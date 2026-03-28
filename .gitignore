@@ -48,3 +48,5 @@ desktop/src-tauri/target/
 
 # Local archive artifacts
 /src.zip
+
+desktop/node_modules/
