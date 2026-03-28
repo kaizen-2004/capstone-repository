@@ -1,0 +1,50 @@
+snapshots/
+/notes-for-myself
+/notes-for-myself.txt
+/data/faces
+/data/fire
+db/thesis.db
+models/
+raw_logs/
+reports/
+.env
+*.log
+.arduino-build/
+__pycache__/
+*.pyc
+.pytest_cache/
+deploy/systemd/generated/
+deploy/systemd/thesis.env
+firmware/mqtt/**/secrets.h
+deploy/mosquitto/passwd
+
+# Local Python environments
+.venv/
+venv/
+
+# Local databases
+db/*.db
+db/*.sqlite
+db/*.sqlite3
+backend/storage/system.db
+backend/storage/**/*.db
+backend/storage/**/*.sqlite
+backend/storage/**/*.sqlite3
+backend/storage/snapshots/
+backend/storage/logs/
+backend/storage/face_samples/raw/
+backend/storage/models/
+
+# Frontend dependencies and build outputs
+web_dashboard_ui/node_modules/
+web_dashboard_ui/dist/
+web_dashboard_ui/.vite/
+desktop/src-tauri/target/
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Local archive artifacts
+/src.zip

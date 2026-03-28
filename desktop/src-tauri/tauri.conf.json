@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/1",
+  "package": {
+    "productName": "Condo Monitoring",
+    "version": "2.0.0"
+  },
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devPath": "http://127.0.0.1:8765/dashboard",
+    "distDir": "../web_dashboard_ui/dist"
+  },
+  "tauri": {
+    "windows": [
+      {
+        "title": "Condo Monitoring",
+        "width": 1400,
+        "height": 900,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "bundle": {
+      "active": true,
+      "targets": "msi",
+      "identifier": "com.cpepractice.condomonitoring",
+      "icon": []
+    },
+    "security": {
+      "csp": null
+    }
+  }
+}
