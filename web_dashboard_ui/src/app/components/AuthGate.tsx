@@ -1,8 +1,23 @@
-import { FormEvent, ReactNode, useEffect, useState } from 'react';
+import { createContext, FormEvent, ReactNode, useContext, useEffect, useState } from 'react';
 import { fetchAuthMe, login, logout, type AuthUser } from '../data/liveApi';
 
 interface AuthGateProps {
   children: ReactNode;
+}
+
+interface AuthContextValue {
+  user: AuthUser;
+  logout: () => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null);
+
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within AuthGate');
+  }
+  return context;
 }
 
 export function AuthGate({ children }: AuthGateProps) {
@@ -116,17 +131,12 @@ export function AuthGate({ children }: AuthGateProps) {
     );
   }
 
+  const authContextValue: AuthContextValue = {
+    user,
+    logout: handleLogout,
+  };
+
   return (
-    <>
-      <div className="fixed top-3 right-3 z-50">
-        <button
-          onClick={handleLogout}
-          className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-100"
-        >
-          Logout ({user.username})
-        </button>
-      </div>
-      {children}
-    </>
+    <AuthContext.Provider value={authContextValue}>{children}</AuthContext.Provider>
   );
 }

@@ -1,0 +1,18 @@
+{
+  "name": "Thesis Monitor Mobile",
+  "short_name": "Thesis Monitor",
+  "description": "Mobile remote interface for intruder and fire monitoring alerts.",
+  "start_url": "/dashboard/remote/mobile",
+  "scope": "/dashboard/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/dashboard/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

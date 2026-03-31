@@ -51,6 +51,83 @@ export interface FaceTrainingStatus {
 
 export type CameraControlCommand = 'flash_on' | 'flash_off' | 'status';
 
+export interface MobileRemoteStatus {
+  ok: boolean;
+  enabled: boolean;
+  phase: string;
+  route: string;
+  localOnly: boolean;
+  pushAvailable: boolean;
+  pushEnabled: boolean;
+  telegramFallbackEnabled: boolean;
+  detail: string;
+}
+
+export type MobileNetworkMode = 'auto' | 'lan' | 'tailscale';
+
+export interface MobileBootstrapPayload {
+  ok: boolean;
+  mobileRemoteEnabled: boolean;
+  route: string;
+  lanBaseUrl: string;
+  tailscaleBaseUrl: string;
+  mdnsBaseUrl: string;
+  preferredBaseUrl: string;
+  networkModes: MobileNetworkMode[];
+  pushAvailable: boolean;
+  pushEnabled: boolean;
+  telegramFallbackEnabled: boolean;
+  vapidPublicKey: string;
+}
+
+export interface RemoteAccessLinksPayload {
+  ok: boolean;
+  preferredUrl: string;
+  tailscaleUrl: string;
+  lanUrl: string;
+  mdnsUrl: string;
+  route: string;
+  hostLabel: string;
+  port: number;
+  fingerprint: string;
+}
+
+export interface MdnsStatusPayload {
+  ok: boolean;
+  enabled: boolean;
+  available: boolean;
+  published: boolean;
+  serviceName: string;
+  hostname: string;
+  port: number;
+  boundIp: string;
+  mdnsBaseUrl: string;
+  detail: string;
+}
+
+export interface TelegramAccessLinkSendPayload {
+  ok: boolean;
+  sent: boolean;
+  status: string;
+  detail: string;
+}
+
+export interface MobileDeviceRegistrationPayload {
+  deviceId: string;
+  platform?: string;
+  networkMode?: MobileNetworkMode;
+  pushSubscription?: PushSubscriptionJSON | Record<string, unknown>;
+  pushToken?: string;
+}
+
+export interface MobileNotificationPreferences {
+  ok: boolean;
+  pushEnabled: boolean;
+  telegramFallbackEnabled: boolean;
+  quietHours: Record<string, unknown>;
+  updatedTs: string;
+}
+
 export interface CameraControlResult {
   ok: boolean;
   nodeId: string;
@@ -402,4 +479,153 @@ export async function logout(): Promise<void> {
   await fetchJson<Json>('/api/auth/logout', {
     method: 'POST',
   });
+}
+
+export async function fetchMobileRemoteStatus(): Promise<MobileRemoteStatus> {
+  const payload = await fetchJson<Json>('/api/remote/mobile/status');
+  return {
+    ok: Boolean(payload.ok),
+    enabled: Boolean(payload.enabled),
+    phase: String(payload.phase ?? ''),
+    route: String(payload.route ?? '/dashboard/remote/mobile'),
+    localOnly: Boolean(payload.local_only ?? payload.localOnly),
+    pushAvailable: Boolean(payload.push_available ?? payload.pushAvailable),
+    pushEnabled: Boolean(payload.push_enabled ?? payload.pushEnabled),
+    telegramFallbackEnabled: Boolean(payload.telegram_fallback_enabled ?? payload.telegramFallbackEnabled),
+    detail: String(payload.detail ?? ''),
+  };
+}
+
+export async function setMobileRemoteEnabled(enabled: boolean): Promise<MobileRemoteStatus> {
+  await fetchJson<Json>('/api/remote/mobile/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  return fetchMobileRemoteStatus();
+}
+
+export async function fetchMobileBootstrap(): Promise<MobileBootstrapPayload> {
+  const payload = await fetchJson<Json>('/api/mobile/bootstrap');
+  const modesRaw = Array.isArray(payload.network_modes) ? payload.network_modes : ['auto', 'lan', 'tailscale'];
+  const modes = modesRaw
+    .map((mode) => String(mode).toLowerCase())
+    .filter((mode): mode is MobileNetworkMode => mode === 'auto' || mode === 'lan' || mode === 'tailscale');
+  return {
+    ok: Boolean(payload.ok),
+    mobileRemoteEnabled: Boolean(payload.mobile_remote_enabled ?? payload.mobileRemoteEnabled),
+    route: String(payload.route ?? '/dashboard/remote/mobile'),
+    lanBaseUrl: String(payload.lan_base_url ?? payload.lanBaseUrl ?? ''),
+    tailscaleBaseUrl: String(payload.tailscale_base_url ?? payload.tailscaleBaseUrl ?? ''),
+    mdnsBaseUrl: String(payload.mdns_base_url ?? payload.mdnsBaseUrl ?? ''),
+    preferredBaseUrl: String(payload.preferred_base_url ?? payload.preferredBaseUrl ?? ''),
+    networkModes: modes.length > 0 ? modes : ['auto', 'lan', 'tailscale'],
+    pushAvailable: Boolean(payload.push_available ?? payload.pushAvailable),
+    pushEnabled: Boolean(payload.push_enabled ?? payload.pushEnabled),
+    telegramFallbackEnabled: Boolean(payload.telegram_fallback_enabled ?? payload.telegramFallbackEnabled),
+    vapidPublicKey: String(payload.vapid_public_key ?? payload.vapidPublicKey ?? ''),
+  };
+}
+
+export async function registerMobileDevice(payload: MobileDeviceRegistrationPayload): Promise<void> {
+  await fetchJson<Json>('/api/mobile/device/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      device_id: payload.deviceId,
+      platform: payload.platform ?? 'web_pwa',
+      network_mode: payload.networkMode ?? 'auto',
+      push_subscription: payload.pushSubscription ?? null,
+      push_token: payload.pushToken ?? '',
+    }),
+  });
+}
+
+export async function unregisterMobileDevice(deviceId: string): Promise<void> {
+  await fetchJson<Json>('/api/mobile/device/unregister', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_id: deviceId }),
+  });
+}
+
+export async function fetchMobileNotificationPreferences(): Promise<MobileNotificationPreferences> {
+  const payload = await fetchJson<Json>('/api/mobile/notifications/preferences');
+  return {
+    ok: Boolean(payload.ok),
+    pushEnabled: Boolean(payload.push_enabled ?? payload.pushEnabled),
+    telegramFallbackEnabled: Boolean(payload.telegram_fallback_enabled ?? payload.telegramFallbackEnabled),
+    quietHours:
+      payload.quiet_hours && typeof payload.quiet_hours === 'object'
+        ? (payload.quiet_hours as Record<string, unknown>)
+        : {},
+    updatedTs: String(payload.updated_ts ?? payload.updatedTs ?? ''),
+  };
+}
+
+export async function saveMobileNotificationPreferences(
+  input: Partial<Pick<MobileNotificationPreferences, 'pushEnabled' | 'telegramFallbackEnabled' | 'quietHours'>>,
+): Promise<MobileNotificationPreferences> {
+  const payload = await fetchJson<Json>('/api/mobile/notifications/preferences', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      push_enabled: input.pushEnabled,
+      telegram_fallback_enabled: input.telegramFallbackEnabled,
+      quiet_hours: input.quietHours,
+    }),
+  });
+  return {
+    ok: Boolean(payload.ok),
+    pushEnabled: Boolean(payload.push_enabled ?? payload.pushEnabled),
+    telegramFallbackEnabled: Boolean(payload.telegram_fallback_enabled ?? payload.telegramFallbackEnabled),
+    quietHours:
+      payload.quiet_hours && typeof payload.quiet_hours === 'object'
+        ? (payload.quiet_hours as Record<string, unknown>)
+        : {},
+    updatedTs: String(payload.updated_ts ?? payload.updatedTs ?? ''),
+  };
+}
+
+export async function fetchRemoteAccessLinks(): Promise<RemoteAccessLinksPayload> {
+  const payload = await fetchJson<Json>('/api/remote/access/links');
+  return {
+    ok: Boolean(payload.ok),
+    preferredUrl: String(payload.preferred_url ?? payload.preferredUrl ?? ''),
+    tailscaleUrl: String(payload.tailscale_url ?? payload.tailscaleUrl ?? ''),
+    lanUrl: String(payload.lan_url ?? payload.lanUrl ?? ''),
+    mdnsUrl: String(payload.mdns_url ?? payload.mdnsUrl ?? ''),
+    route: String(payload.route ?? '/dashboard/remote/mobile'),
+    hostLabel: String(payload.host_label ?? payload.hostLabel ?? ''),
+    port: toInt(payload.port, 0),
+    fingerprint: String(payload.fingerprint ?? ''),
+  };
+}
+
+export async function fetchMdnsStatus(): Promise<MdnsStatusPayload> {
+  const payload = await fetchJson<Json>('/api/integrations/mdns/status');
+  return {
+    ok: Boolean(payload.ok),
+    enabled: Boolean(payload.enabled),
+    available: Boolean(payload.available),
+    published: Boolean(payload.published),
+    serviceName: String(payload.service_name ?? payload.serviceName ?? ''),
+    hostname: String(payload.hostname ?? ''),
+    port: toInt(payload.port, 0),
+    boundIp: String(payload.bound_ip ?? payload.boundIp ?? ''),
+    mdnsBaseUrl: String(payload.mdns_base_url ?? payload.mdnsBaseUrl ?? ''),
+    detail: String(payload.detail ?? ''),
+  };
+}
+
+export async function sendTelegramAccessLink(): Promise<TelegramAccessLinkSendPayload> {
+  const payload = await fetchJson<Json>('/api/integrations/telegram/send-access-link', {
+    method: 'POST',
+  });
+  return {
+    ok: Boolean(payload.ok),
+    sent: Boolean(payload.sent),
+    status: String(payload.status ?? ''),
+    detail: String(payload.detail ?? ''),
+  };
 }

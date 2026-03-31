@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..db import store
 from ..modules.event_engine import infer_location_from_node
+from .notification_dispatcher import NotificationDispatcher
 
 
 class Supervisor:
@@ -18,6 +19,8 @@ class Supervisor:
         snapshot_root: Path,
         regular_snapshot_retention_days: int,
         critical_snapshot_retention_days: int,
+        notification_dispatcher: NotificationDispatcher | None = None,
+        remote_access_poll_seconds: int = 60,
     ) -> None:
         self.node_offline_seconds = node_offline_seconds
         self.event_retention_days = event_retention_days
@@ -25,6 +28,8 @@ class Supervisor:
         self.snapshot_root = snapshot_root
         self.regular_snapshot_retention_days = regular_snapshot_retention_days
         self.critical_snapshot_retention_days = critical_snapshot_retention_days
+        self.notification_dispatcher = notification_dispatcher
+        self.remote_access_poll_seconds = max(20, int(remote_access_poll_seconds))
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -43,6 +48,7 @@ class Supervisor:
 
     def _run(self) -> None:
         next_retention_run = 0.0
+        next_remote_access_poll = 0.0
         while not self._stop.is_set():
             try:
                 self._check_nodes()
@@ -52,6 +58,10 @@ class Supervisor:
                 if now >= next_retention_run:
                     self._run_retention()
                     next_retention_run = now + 3600
+
+                if self.notification_dispatcher and now >= next_remote_access_poll:
+                    self.notification_dispatcher.poll_access_link_changes()
+                    next_remote_access_poll = now + float(self.remote_access_poll_seconds)
             except Exception as exc:
                 store.log("ERROR", f"supervisor loop failed: {exc}")
 
@@ -74,7 +84,7 @@ class Supervisor:
                 description=f"{node_id} has not sent heartbeat in {self.node_offline_seconds}s",
                 details={"timeout_seconds": self.node_offline_seconds},
             )
-            store.create_alert(
+            alert_id = store.create_alert(
                 alert_type="NODE_OFFLINE",
                 severity="warning",
                 status="ACTIVE",
@@ -86,6 +96,11 @@ class Supervisor:
                 event_id=event_id,
                 details={"timeout_seconds": self.node_offline_seconds},
             )
+            if self.notification_dispatcher:
+                try:
+                    self.notification_dispatcher.dispatch_alert_by_id(alert_id)
+                except Exception as exc:
+                    store.log("ERROR", f"notification dispatch failed for alert {alert_id}: {exc}")
 
     def _run_retention(self) -> None:
         store.cleanup_old_records(self.event_retention_days, self.log_retention_days)

@@ -10,12 +10,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import auth, devices, faces, integrations, ui
-from .core.config import load_settings
+from .core.config import load_env_file, load_settings
 from .db import store
 from .modules.event_engine import EventEngine
 from .modules.face_service import FaceService
 from .modules.fire_service import FireService
 from .services.camera_manager import CameraConfig, CameraManager
+from .services.notification_dispatcher import NotificationDispatcher
+from .services.remote_access import LinkResolver, MdnsPublisher
 from .services.supervisor import Supervisor
 
 
@@ -23,6 +25,8 @@ def _seed_default_settings() -> None:
     store.upsert_setting("transport_mode", "http")
     store.upsert_setting("deployment_host", "windows_pc")
     store.upsert_setting("camera_processing_strategy", "event_triggered")
+    store.upsert_setting("mobile_push_enabled", "true")
+    store.upsert_setting("mobile_telegram_fallback_enabled", "true")
 
 
 @asynccontextmanager
@@ -60,7 +64,18 @@ async def lifespan(app: FastAPI):
 
     face_service = FaceService(sample_root=settings.face_samples_root, model_root=settings.models_root)
     fire_service = FireService()
-    event_engine = EventEngine(camera_manager=camera_manager, face_service=face_service, fire_service=fire_service)
+    link_resolver = LinkResolver(settings=settings)
+    mdns_publisher = MdnsPublisher(settings=settings, resolver=link_resolver)
+    notification_dispatcher = NotificationDispatcher(
+        settings=settings,
+        link_resolver=link_resolver,
+    )
+    event_engine = EventEngine(
+        camera_manager=camera_manager,
+        face_service=face_service,
+        fire_service=fire_service,
+        notification_dispatcher=notification_dispatcher,
+    )
 
     supervisor = Supervisor(
         node_offline_seconds=settings.node_offline_seconds,
@@ -69,6 +84,7 @@ async def lifespan(app: FastAPI):
         snapshot_root=settings.snapshot_root,
         regular_snapshot_retention_days=settings.regular_snapshot_retention_days,
         critical_snapshot_retention_days=settings.critical_snapshot_retention_days,
+        notification_dispatcher=notification_dispatcher,
     )
 
     app.state.camera_manager = camera_manager
@@ -76,9 +92,15 @@ async def lifespan(app: FastAPI):
     app.state.fire_service = fire_service
     app.state.event_engine = event_engine
     app.state.supervisor = supervisor
+    app.state.notification_dispatcher = notification_dispatcher
+    app.state.link_resolver = link_resolver
+    app.state.mdns_publisher = mdns_publisher
 
+    mdns_publisher.start()
     camera_manager.start()
     supervisor.start()
+    startup_links_result = notification_dispatcher.send_startup_access_links()
+    store.log("INFO", f"startup access links dispatch status={startup_links_result.get('status')}")
     store.log("INFO", "Backend startup complete")
 
     try:
@@ -86,6 +108,7 @@ async def lifespan(app: FastAPI):
     finally:
         supervisor.stop()
         camera_manager.stop()
+        mdns_publisher.stop()
         store.log("INFO", "Backend shutdown complete")
 
 
@@ -143,6 +166,28 @@ if WEB_ASSETS.exists():
     app.mount("/dashboard/assets", StaticFiles(directory=str(WEB_ASSETS)), name="dashboard-assets-nested")
 
 
+def _serve_web_file(path: str, media_type: str | None = None) -> FileResponse:
+    file_path = WEB_DIST / path
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"{path} not found in dashboard build.")
+    return FileResponse(file_path, media_type=media_type)
+
+
+@app.get("/dashboard/manifest.webmanifest")
+def dashboard_manifest() -> FileResponse:
+    return _serve_web_file("manifest.webmanifest", media_type="application/manifest+json")
+
+
+@app.get("/dashboard/sw.js")
+def dashboard_service_worker() -> FileResponse:
+    return _serve_web_file("dashboard-sw.js", media_type="application/javascript")
+
+
+@app.get("/dashboard/icon.svg")
+def dashboard_icon() -> FileResponse:
+    return _serve_web_file("icon.svg", media_type="image/svg+xml")
+
+
 @app.get("/dashboard")
 @app.get("/dashboard/{path:path}")
 def dashboard(path: str = ""):
@@ -155,6 +200,7 @@ def dashboard(path: str = ""):
 if __name__ == "__main__":
     import uvicorn
 
+    load_env_file()
     uvicorn.run(
         "backend.app.main:app",
         host=os.environ.get("BACKEND_HOST", "127.0.0.1"),

@@ -8,6 +8,7 @@ This backend is the core processing engine for the updated architecture.
 python -m venv .venv
 # activate venv
 pip install -r requirements.txt
+cp .env.example .env  # first-time setup (then edit values)
 python backend/run_backend.py
 ```
 
@@ -31,6 +32,25 @@ Override using env vars:
 - `CAMERA_DOOR_RTSP`
 - `CAMERA_PROCESSING_FPS` (default `12`)
 
+## Mobile Remote / Push Env Vars (Optional)
+
+- `LAN_BASE_URL` (used for mobile bootstrap + QR/share links)
+- `TAILSCALE_BASE_URL` (optional secure overlay URL)
+- `WEBPUSH_VAPID_PUBLIC_KEY`
+- `WEBPUSH_VAPID_PRIVATE_KEY`
+- `WEBPUSH_VAPID_SUBJECT` (default `mailto:admin@localhost`)
+- `TELEGRAM_BOT_TOKEN` (required for actual Telegram delivery)
+- `TELEGRAM_CHAT_ID` (single admin chat/group id, supports private/group)
+- `TELEGRAM_LINK_NOTIFICATIONS_ENABLED` (default `true`; sends startup/IP-change links)
+- `MDNS_ENABLED` (default `true`; publishes `.local` LAN service when dependency is present)
+- `MDNS_SERVICE_NAME` (default `thesis-monitor`)
+- `MDNS_HOSTNAME` (optional override for `.local` hostname)
+
+Notes:
+
+- Backend auto-loads project root `.env` by default.
+- Override env file path using `THESIS_ENV_FILE=/absolute/path/to/file.env`.
+
 ## Core APIs
 
 - `POST /api/devices/register`
@@ -45,8 +65,19 @@ Override using env vars:
 - `GET /api/ui/stats/daily`
 - `GET /api/ui/settings/live`
 - `POST /api/alerts/{id}/ack`
+- `GET /api/mobile/bootstrap`
+- `POST /api/mobile/device/register`
+- `POST /api/mobile/device/unregister`
+- `GET /api/mobile/notifications/preferences`
+- `POST /api/mobile/notifications/preferences`
+- `GET /api/remote/access/links`
+- `GET /api/integrations/mdns/status`
+- `POST /api/integrations/telegram/send-access-link`
 
 ## Notes
 
-- Telegram and Tailscale endpoints are scaffolded and disabled by default.
+- Mobile remote interface is toggle-controlled (`/api/remote/mobile/config`) and disabled by default.
+- Push delivery requires VAPID keys and `pywebpush` dependency.
+- Telegram fallback now uses bot API delivery when token/chat id are configured.
+- Remote access links can be auto-sent to Telegram on startup and endpoint changes.
 - Retention cleanup runs in background.

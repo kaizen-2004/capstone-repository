@@ -3,3 +3,5 @@ uvicorn[standard]>=0.32,<1
 python-multipart>=0.0.12
 opencv-contrib-python>=4.8
 httpx>=0.27
+pywebpush>=2.0,<3
+zeroconf>=0.147,<1

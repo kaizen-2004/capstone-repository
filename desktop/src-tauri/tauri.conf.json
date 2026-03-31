@@ -8,7 +8,7 @@
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
     "devPath": "http://127.0.0.1:8765/dashboard",
-    "distDir": "../web_dashboard_ui/dist"
+    "distDir": "../../web_dashboard_ui/dist"
   },
   "tauri": {
     "windows": [

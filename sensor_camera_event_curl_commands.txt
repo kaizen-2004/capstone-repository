@@ -1,0 +1,57 @@
+# Sensor and camera simulation commands (no BASE_URL variable)
+# Replace 127.0.0.1 with your Windows PC LAN IP if needed.
+
+# 1) smoke_node1 - SMOKE_HIGH (Living Room)
+curl -sS -X POST "http://127.0.0.1:8765/api/sensors/event" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id":"smoke_node1","event":"SMOKE_HIGH","location":"Living Room","value":0.91,"details":{"sensor":"mq2","threshold":0.70,"ppm_estimate":420,"status":"critical"},"ip":"192.168.1.31","ts":"2026-03-31T14:00:01Z"}'
+
+# 2) smoke_node1 - SMOKE_NORMAL (Living Room)
+curl -sS -X POST "http://127.0.0.1:8765/api/sensors/event" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id":"smoke_node1","event":"SMOKE_NORMAL","location":"Living Room","value":0.29,"details":{"sensor":"mq2","threshold":0.70,"ppm_estimate":130,"status":"normal"},"ip":"192.168.1.31","ts":"2026-03-31T14:01:15Z"}'
+
+# 3) smoke_node2 - SMOKE_HIGH (Door Entrance Area)
+curl -sS -X POST "http://127.0.0.1:8765/api/sensors/event" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id":"smoke_node2","event":"SMOKE_HIGH","location":"Door Entrance Area","value":0.86,"details":{"sensor":"mq2","threshold":0.68,"ppm_estimate":390,"status":"critical"},"ip":"192.168.1.32","ts":"2026-03-31T14:02:03Z"}'
+
+# 4) smoke_node2 - SMOKE_NORMAL (Door Entrance Area)
+curl -sS -X POST "http://127.0.0.1:8765/api/sensors/event" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id":"smoke_node2","event":"SMOKE_NORMAL","location":"Door Entrance Area","value":0.33,"details":{"sensor":"mq2","threshold":0.68,"ppm_estimate":150,"status":"normal"},"ip":"192.168.1.32","ts":"2026-03-31T14:03:20Z"}'
+
+# 5) door_force - DOOR_FORCE (Door Entrance Area)
+curl -sS -X POST "http://127.0.0.1:8765/api/sensors/event" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id":"door_force","event":"DOOR_FORCE","location":"Door Entrance Area","value":0.98,"details":{"sensor":"lsm6ds3","force_g":2.84,"vibration_score":0.93,"door_state":"closed"},"ip":"192.168.1.33","ts":"2026-03-31T14:04:05Z"}'
+
+# 6) door_force - ENTRY_MOTION (Door Entrance Area)
+curl -sS -X POST "http://127.0.0.1:8765/api/sensors/event" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id":"door_force","event":"ENTRY_MOTION","location":"Door Entrance Area","value":0.81,"details":{"sensor":"lsm6ds3","motion_score":0.81,"direction":"inbound","door_state":"ajar"},"ip":"192.168.1.33","ts":"2026-03-31T14:04:40Z"}'
+
+# 7) cam_door - PERSON_DETECTED
+curl -sS -X POST "http://127.0.0.1:8765/api/sensors/event" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id":"cam_door","event":"PERSON_DETECTED","location":"Door Entrance Area","value":0.89,"details":{"camera":"cam_door","bbox":[312,145,88,88],"detection_confidence":0.89,"frame_id":"door_001"},"ip":"192.168.1.41","ts":"2026-03-31T14:05:12Z"}'
+
+# 8) cam_door - UNKNOWN
+curl -sS -X POST "http://127.0.0.1:8765/api/sensors/event" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id":"cam_door","event":"UNKNOWN","location":"Door Entrance Area","value":0.23,"details":{"camera":"cam_door","bbox":[280,120,96,96],"face_confidence":0.23,"match":"none","frame_id":"door_002"},"ip":"192.168.1.41","ts":"2026-03-31T14:05:30Z"}'
+
+# 9) cam_door - AUTHORIZED
+curl -sS -X POST "http://127.0.0.1:8765/api/sensors/event" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id":"cam_door","event":"AUTHORIZED","location":"Door Entrance Area","value":0.94,"details":{"camera":"cam_door","name":"admin","bbox":[295,118,94,94],"face_confidence":0.94,"frame_id":"door_003"},"ip":"192.168.1.41","ts":"2026-03-31T14:05:52Z"}'
+
+# 10) cam_indoor - FLAME_SIGNAL
+curl -sS -X POST "http://127.0.0.1:8765/api/sensors/event" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id":"cam_indoor","event":"FLAME_SIGNAL","location":"Living Room","value":0.88,"details":{"camera":"cam_indoor","roi":[120,200,160,140],"flame_confidence":0.88,"pixel_ratio":0.27,"frame_id":"indoor_001"},"ip":"192.168.1.40","ts":"2026-03-31T14:06:10Z"}'
+
+# 11) cam_door - CAMERA_OFFLINE
+curl -sS -X POST "http://127.0.0.1:8765/api/sensors/event" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id":"cam_door","event":"CAMERA_OFFLINE","location":"Door Entrance Area","value":1.0,"details":{"reason":"rtsp_timeout","retry_in_sec":10,"last_seen":"2026-03-31T14:05:00Z"},"ip":"192.168.1.41","ts":"2026-03-31T14:06:25Z"}'

@@ -61,3 +61,25 @@ class CameraControlRequest(BaseModel):
 
 class AckRequest(BaseModel):
     status: str = "ACK"
+
+
+class MobileRemoteConfigRequest(BaseModel):
+    enabled: bool
+
+
+class MobileDeviceRegisterRequest(BaseModel):
+    device_id: str = Field(min_length=8, max_length=128)
+    platform: str = Field(min_length=2, max_length=64, default="web_pwa")
+    network_mode: str = Field(min_length=3, max_length=16, default="auto")
+    push_subscription: dict[str, Any] | None = None
+    push_token: str = ""
+
+
+class MobileDeviceUnregisterRequest(BaseModel):
+    device_id: str = Field(min_length=8, max_length=128)
+
+
+class MobileNotificationPreferencesRequest(BaseModel):
+    push_enabled: bool | None = None
+    telegram_fallback_enabled: bool | None = None
+    quiet_hours: dict[str, Any] | None = None

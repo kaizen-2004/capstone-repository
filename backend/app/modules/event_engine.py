@@ -5,6 +5,7 @@ from typing import Any
 
 from ..db import store
 from ..services.camera_manager import CameraManager
+from ..services.notification_dispatcher import NotificationDispatcher
 from .face_service import FaceService
 from .fire_service import FireService
 
@@ -35,10 +36,17 @@ EVENT_META: dict[str, dict[str, str]] = {
 
 
 class EventEngine:
-    def __init__(self, camera_manager: CameraManager, face_service: FaceService, fire_service: FireService) -> None:
+    def __init__(
+        self,
+        camera_manager: CameraManager,
+        face_service: FaceService,
+        fire_service: FireService,
+        notification_dispatcher: NotificationDispatcher | None = None,
+    ) -> None:
         self.camera_manager = camera_manager
         self.face_service = face_service
         self.fire_service = fire_service
+        self.notification_dispatcher = notification_dispatcher
 
     def _node_meta(self, node_id: str) -> dict[str, str]:
         return NODE_DEFAULTS.get(node_id, {"location": "", "label": node_id, "type": "sensor"})
@@ -227,7 +235,7 @@ class EventEngine:
         snapshot_path: str = "",
         requires_ack: bool = True,
     ) -> int:
-        return store.create_alert(
+        alert_id = store.create_alert(
             alert_type=alert_type,
             severity=severity,
             status="ACTIVE" if requires_ack else "RESOLVED",
@@ -240,6 +248,12 @@ class EventEngine:
             snapshot_path=snapshot_path,
             details=details,
         )
+        if self.notification_dispatcher and requires_ack:
+            try:
+                self.notification_dispatcher.dispatch_alert_by_id(alert_id)
+            except Exception as exc:
+                store.log("ERROR", f"notification dispatch failed for alert {alert_id}: {exc}")
+        return alert_id
 
 
 def infer_location_from_node(node_id: str) -> str:

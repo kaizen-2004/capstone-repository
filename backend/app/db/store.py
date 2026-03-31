@@ -174,6 +174,53 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS mobile_devices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                device_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                network_mode TEXT NOT NULL DEFAULT 'auto',
+                push_token TEXT,
+                push_subscription_json TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_ts TEXT NOT NULL,
+                updated_ts TEXT NOT NULL,
+                last_seen_ts TEXT NOT NULL,
+                UNIQUE(user_id, device_id),
+                FOREIGN KEY(user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_prefs (
+                user_id INTEGER PRIMARY KEY,
+                push_enabled INTEGER NOT NULL DEFAULT 1,
+                telegram_fallback_enabled INTEGER NOT NULL DEFAULT 1,
+                quiet_hours_json TEXT NOT NULL DEFAULT '{}',
+                updated_ts TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_delivery_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_id INTEGER,
+                channel TEXT NOT NULL,
+                status TEXT NOT NULL,
+                detail TEXT,
+                ts TEXT NOT NULL,
+                FOREIGN KEY(alert_id) REFERENCES alerts(id) ON DELETE SET NULL
+            )
+            """
+        )
+
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS system_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 level TEXT NOT NULL,
@@ -189,6 +236,10 @@ def init_db() -> None:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_seen ON devices(last_seen_ts)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_faces_name ON authorized_faces(name)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_face_samples_face ON face_samples(face_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mobile_devices_user ON mobile_devices(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mobile_devices_seen ON mobile_devices(last_seen_ts)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_notification_log_alert ON notification_delivery_log(alert_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_notification_log_ts ON notification_delivery_log(ts DESC)")
 
         conn.commit()
         conn.close()
@@ -561,6 +612,243 @@ def list_settings() -> list[dict[str, str]]:
         rows = [dict(row) for row in cur.fetchall()]
         conn.close()
     return rows
+
+
+def get_setting(key: str) -> str | None:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM settings WHERE key = ? LIMIT 1", (key,))
+        row = cur.fetchone()
+        conn.close()
+    if row is None:
+        return None
+    return str(row["value"])
+
+
+def upsert_mobile_device(
+    user_id: int,
+    device_id: str,
+    platform: str,
+    network_mode: str = "auto",
+    *,
+    push_token: str = "",
+    push_subscription: dict[str, Any] | None = None,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    ts = now_iso()
+    subscription_json = json.dumps(push_subscription or {}, separators=(",", ":"))
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO mobile_devices(
+                user_id, device_id, platform, network_mode, push_token, push_subscription_json, enabled, created_ts, updated_ts, last_seen_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, device_id) DO UPDATE SET
+                platform=excluded.platform,
+                network_mode=excluded.network_mode,
+                push_token=excluded.push_token,
+                push_subscription_json=excluded.push_subscription_json,
+                enabled=excluded.enabled,
+                updated_ts=excluded.updated_ts,
+                last_seen_ts=excluded.last_seen_ts
+            """,
+            (
+                int(user_id),
+                device_id[:128],
+                platform[:64] or "web_pwa",
+                network_mode[:16] or "auto",
+                push_token[:1024],
+                subscription_json,
+                1 if enabled else 0,
+                ts,
+                ts,
+                ts,
+            ),
+        )
+        conn.commit()
+        cur.execute(
+            """
+            SELECT * FROM mobile_devices WHERE user_id = ? AND device_id = ? LIMIT 1
+            """,
+            (int(user_id), device_id[:128]),
+        )
+        row = cur.fetchone()
+        conn.close()
+    return dict(row) if row else {}
+
+
+def disable_mobile_device(user_id: int, device_id: str) -> bool:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE mobile_devices
+            SET enabled = 0, updated_ts = ?, last_seen_ts = ?
+            WHERE user_id = ? AND device_id = ?
+            """,
+            (now_iso(), now_iso(), int(user_id), device_id[:128]),
+        )
+        conn.commit()
+        updated = cur.rowcount > 0
+        conn.close()
+    return updated
+
+
+def list_mobile_devices(user_id: int | None = None, enabled_only: bool = True) -> list[dict[str, Any]]:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        where: list[str] = []
+        args: list[Any] = []
+        if user_id is not None:
+            where.append("user_id = ?")
+            args.append(int(user_id))
+        if enabled_only:
+            where.append("enabled = 1")
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        cur.execute(
+            f"""
+            SELECT * FROM mobile_devices
+            {where_sql}
+            ORDER BY last_seen_ts DESC
+            """,
+            tuple(args),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+        conn.close()
+    return rows
+
+
+def get_notification_prefs(user_id: int) -> dict[str, Any]:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT push_enabled, telegram_fallback_enabled, quiet_hours_json, updated_ts
+            FROM notification_prefs
+            WHERE user_id = ? LIMIT 1
+            """,
+            (int(user_id),),
+        )
+        row = cur.fetchone()
+        if row is None:
+            ts = now_iso()
+            cur.execute(
+                """
+                INSERT INTO notification_prefs(user_id, push_enabled, telegram_fallback_enabled, quiet_hours_json, updated_ts)
+                VALUES (?, 1, 1, '{}', ?)
+                """,
+                (int(user_id), ts),
+            )
+            conn.commit()
+            cur.execute(
+                """
+                SELECT push_enabled, telegram_fallback_enabled, quiet_hours_json, updated_ts
+                FROM notification_prefs
+                WHERE user_id = ? LIMIT 1
+                """,
+                (int(user_id),),
+            )
+            row = cur.fetchone()
+        conn.close()
+
+    quiet_hours: dict[str, Any] = {}
+    if row and row["quiet_hours_json"]:
+        try:
+            parsed = json.loads(str(row["quiet_hours_json"]))
+            if isinstance(parsed, dict):
+                quiet_hours = parsed
+        except Exception:
+            quiet_hours = {}
+
+    return {
+        "push_enabled": bool(int((row or {"push_enabled": 1})["push_enabled"])),
+        "telegram_fallback_enabled": bool(int((row or {"telegram_fallback_enabled": 1})["telegram_fallback_enabled"])),
+        "quiet_hours": quiet_hours,
+        "updated_ts": str((row or {"updated_ts": now_iso()})["updated_ts"]),
+    }
+
+
+def upsert_notification_prefs(
+    user_id: int,
+    *,
+    push_enabled: bool | None = None,
+    telegram_fallback_enabled: bool | None = None,
+    quiet_hours: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    current = get_notification_prefs(user_id)
+    next_push_enabled = current["push_enabled"] if push_enabled is None else bool(push_enabled)
+    next_telegram_fallback_enabled = (
+        current["telegram_fallback_enabled"]
+        if telegram_fallback_enabled is None
+        else bool(telegram_fallback_enabled)
+    )
+    next_quiet_hours = current["quiet_hours"] if quiet_hours is None else quiet_hours
+    ts = now_iso()
+
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO notification_prefs(user_id, push_enabled, telegram_fallback_enabled, quiet_hours_json, updated_ts)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                push_enabled=excluded.push_enabled,
+                telegram_fallback_enabled=excluded.telegram_fallback_enabled,
+                quiet_hours_json=excluded.quiet_hours_json,
+                updated_ts=excluded.updated_ts
+            """,
+            (
+                int(user_id),
+                1 if next_push_enabled else 0,
+                1 if next_telegram_fallback_enabled else 0,
+                json.dumps(next_quiet_hours or {}, separators=(",", ":")),
+                ts,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    return get_notification_prefs(user_id)
+
+
+def create_notification_delivery_log(
+    channel: str,
+    status: str,
+    detail: str = "",
+    *,
+    alert_id: int | None = None,
+) -> int:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO notification_delivery_log(alert_id, channel, status, detail, ts)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (alert_id, channel[:32], status[:32], detail[:1500], now_iso()),
+        )
+        conn.commit()
+        row_id = int(cur.lastrowid)
+        conn.close()
+    return row_id
+
+
+def get_alert(alert_id: int) -> dict[str, Any] | None:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM alerts WHERE id = ? LIMIT 1", (int(alert_id),))
+        row = cur.fetchone()
+        conn.close()
+    return dict(row) if row else None
 
 
 def create_face(name: str, note: str = "") -> dict[str, Any]:

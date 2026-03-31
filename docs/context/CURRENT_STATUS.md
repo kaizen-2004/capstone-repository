@@ -41,10 +41,15 @@ RTSP path:
 - Camera runtime: `backend/app/services/camera_manager.py`
 - Background supervisor: `backend/app/services/supervisor.py`
 
-## 5. Enhancement Flags (Disabled)
+## 5. Enhancement State (Phase 2 Mobile)
 
-- Telegram integration: scaffolded, disabled.
-- Tailscale remote access integration: scaffolded, disabled.
+- Mobile remote interface: implemented (`/dashboard/remote/mobile`), disabled by default and toggle-controlled in Settings.
+- Mobile app/PWA notification APIs: implemented (`/api/mobile/bootstrap`, device register/unregister, notification preferences).
+- Alert dispatch to mobile push: implemented with web-push dispatcher; active when VAPID keys are configured.
+- Telegram fallback: implemented via bot API when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are configured.
+- Tailscale remote access: optional URL overlay via `TAILSCALE_BASE_URL`; preferred link path when configured.
+- LAN mDNS: optional `.local` publishing via `zeroconf` (`MDNS_ENABLED`, `MDNS_SERVICE_NAME`, `MDNS_HOSTNAME`).
+- Remote access link operations: `GET /api/remote/access/links`, `GET /api/integrations/mdns/status`, `POST /api/integrations/telegram/send-access-link`.
 
 ## 6. Documentation Authority
 

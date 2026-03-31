@@ -7,6 +7,7 @@ import { SensorsStatus } from './pages/SensorsStatus';
 import { Statistics } from './pages/Statistics';
 import { Settings } from './pages/Settings';
 import { NotFound } from './pages/NotFound';
+import { MobileRemote } from './pages/MobileRemote';
 
 const routerBase = import.meta.env.BASE_URL.endsWith('/')
   ? import.meta.env.BASE_URL.slice(0, -1)
@@ -46,6 +47,10 @@ export const router = createBrowserRouter([
         Component: NotFound,
       },
     ],
+  },
+  {
+    path: '/remote/mobile',
+    Component: MobileRemote,
   },
 ], {
   basename: routerBase || '/',

@@ -33,12 +33,24 @@ Core processing is event-driven:
 - Retention cleanup background job.
 - Offline-capable local operation.
 
-## Enhancement Stubs (Disabled)
+## Mobile App / Remote Enhancements (Phase 2)
 
-The following are scaffolded but disabled in core phase:
+- Mobile remote interface route is available at `/dashboard/remote/mobile` and admin-toggle controlled in Settings.
+- PWA install assets are included (`manifest.webmanifest`, service worker, app icon).
+- App notification APIs are implemented:
+  - `GET /api/mobile/bootstrap`
+  - `POST /api/mobile/device/register`
+  - `POST /api/mobile/device/unregister`
+  - `GET /api/mobile/notifications/preferences`
+  - `POST /api/mobile/notifications/preferences`
+- Alert dispatch now attempts mobile push delivery first and keeps Telegram fallback logging path.
 
-- Telegram integration endpoints.
-- Tailscale remote status endpoint.
+## Web-Only Remote Access (Phase 3)
+
+- Native mobile app is intentionally skipped to reduce deployment complexity and keep Android/iOS fully cross-platform via browser.
+- Remote access links are now resolved dynamically with priority: `Tailscale -> mDNS (.local) -> LAN`.
+- Telegram bot delivery can send access links at startup, when endpoints change, and on manual request from Settings.
+- mDNS publishing is supported on LAN when `zeroconf` is installed and `MDNS_ENABLED=true`.
 
 ## Run Backend
 
@@ -46,11 +58,30 @@ The following are scaffolded but disabled in core phase:
 python -m venv .venv
 # activate venv
 pip install -r requirements.txt
+cp .env.example .env
+# edit .env (TAILSCALE_BASE_URL, LAN_BASE_URL, TELEGRAM_* etc.)
 python backend/run_backend.py
 ```
 
 Backend: `http://127.0.0.1:8765`
 Dashboard: `http://127.0.0.1:8765/dashboard`
+Mobile remote: `http://127.0.0.1:8765/dashboard/remote/mobile`
+
+Optional env vars for mobile push:
+
+- `WEBPUSH_VAPID_PUBLIC_KEY`
+- `WEBPUSH_VAPID_PRIVATE_KEY`
+- `WEBPUSH_VAPID_SUBJECT` (default `mailto:admin@localhost`)
+- `LAN_BASE_URL` (recommended for QR/shared links)
+- `TAILSCALE_BASE_URL` (optional remote overlay)
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `TELEGRAM_LINK_NOTIFICATIONS_ENABLED` (default `true`)
+- `MDNS_ENABLED` (default `true`)
+- `MDNS_SERVICE_NAME` (default `thesis-monitor`)
+- `MDNS_HOSTNAME` (optional override)
+
+`.env` at project root is auto-loaded by backend startup (`backend/run_backend.py` and FastAPI app startup).
 
 Default admin:
 
@@ -79,6 +110,13 @@ bash scripts/preview_full_system.sh
 cd desktop
 npm install
 npm run dev
+```
+
+For LAN mobile testing, allow backend binding override before launching desktop:
+
+```bash
+cd desktop
+DESKTOP_BACKEND_HOST=0.0.0.0 DESKTOP_BACKEND_PORT=8765 npm run dev
 ```
 
 MSI build:

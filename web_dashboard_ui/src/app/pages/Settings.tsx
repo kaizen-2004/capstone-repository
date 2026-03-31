@@ -4,7 +4,9 @@ import {
   Camera,
   Check,
   Database,
+  Link2,
   Save,
+  Send,
   Shield,
   Upload,
   User,
@@ -17,9 +19,17 @@ import {
   createFaceProfile,
   deleteFaceProfile,
   fetchFaceTrainingStatus,
+  fetchMdnsStatus,
+  fetchMobileRemoteStatus,
+  fetchRemoteAccessLinks,
   fetchSettingsLive,
+  sendTelegramAccessLink,
+  setMobileRemoteEnabled,
   trainFaceModel,
   type FaceTrainingStatus,
+  type MdnsStatusPayload,
+  type MobileRemoteStatus,
+  type RemoteAccessLinksPayload,
 } from '../data/liveApi';
 import {
   authorizedProfiles as fallbackAuthorizedProfiles,
@@ -59,6 +69,13 @@ export function Settings() {
   const [isTraining, setIsTraining] = useState(false);
   const [isSavingUser, setIsSavingUser] = useState(false);
   const [deletingFaceId, setDeletingFaceId] = useState<number | null>(null);
+  const [mobileRemoteStatus, setMobileRemoteStatus] = useState<MobileRemoteStatus | null>(null);
+  const [mobileRemoteSaving, setMobileRemoteSaving] = useState(false);
+  const [mobileRemoteMessage, setMobileRemoteMessage] = useState('');
+  const [remoteLinks, setRemoteLinks] = useState<RemoteAccessLinksPayload | null>(null);
+  const [mdnsStatus, setMdnsStatus] = useState<MdnsStatusPayload | null>(null);
+  const [remoteLinksMessage, setRemoteLinksMessage] = useState('');
+  const [isSendingTelegramLink, setIsSendingTelegramLink] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
 
@@ -160,9 +177,17 @@ export function Settings() {
 
   const loadSettings = async () => {
     try {
-      const live = await fetchSettingsLive();
+      const [live, remoteStatus, links, mdns] = await Promise.all([
+        fetchSettingsLive(),
+        fetchMobileRemoteStatus(),
+        fetchRemoteAccessLinks(),
+        fetchMdnsStatus(),
+      ]);
       setAuthorizedProfiles(live.authorizedProfiles);
       setRuntimeSettings(live.runtimeSettings);
+      setMobileRemoteStatus(remoteStatus);
+      setRemoteLinks(links);
+      setMdnsStatus(mdns);
     } catch {
       // Keep fallback data if API is unavailable.
     }
@@ -173,12 +198,20 @@ export function Settings() {
 
     const load = async () => {
       try {
-        const live = await fetchSettingsLive();
+        const [live, remoteStatus, links, mdns] = await Promise.all([
+          fetchSettingsLive(),
+          fetchMobileRemoteStatus(),
+          fetchRemoteAccessLinks(),
+          fetchMdnsStatus(),
+        ]);
         if (cancelled) {
           return;
         }
         setAuthorizedProfiles(live.authorizedProfiles);
         setRuntimeSettings(live.runtimeSettings);
+        setMobileRemoteStatus(remoteStatus);
+        setRemoteLinks(links);
+        setMdnsStatus(mdns);
       } catch {
         // Keep fallback data if API is unavailable.
       }
@@ -364,6 +397,52 @@ export function Settings() {
       setDeletingFaceId(null);
     }
   };
+
+  const handleToggleMobileRemote = async (enabled: boolean) => {
+    if (mobileRemoteSaving) {
+      return;
+    }
+    setMobileRemoteSaving(true);
+    setMobileRemoteMessage('');
+    try {
+      const updated = await setMobileRemoteEnabled(enabled);
+      setMobileRemoteStatus(updated);
+      setMobileRemoteMessage(
+        updated.enabled
+          ? 'Mobile remote interface enabled.'
+          : 'Mobile remote interface disabled.',
+      );
+      window.setTimeout(() => setMobileRemoteMessage(''), 3000);
+    } catch {
+      setMobileRemoteMessage('Unable to update mobile remote interface setting.');
+      window.setTimeout(() => setMobileRemoteMessage(''), 3500);
+    } finally {
+      setMobileRemoteSaving(false);
+    }
+  };
+
+  const handleSendAccessLinkToTelegram = async () => {
+    if (isSendingTelegramLink) {
+      return;
+    }
+    setIsSendingTelegramLink(true);
+    setRemoteLinksMessage('');
+    try {
+      const result = await sendTelegramAccessLink();
+      setRemoteLinksMessage(result.detail || (result.sent ? 'Access link sent to Telegram.' : 'Access link not sent.'));
+      await loadSettings();
+      window.setTimeout(() => setRemoteLinksMessage(''), 4200);
+    } catch {
+      setRemoteLinksMessage('Unable to send access link to Telegram.');
+      window.setTimeout(() => setRemoteLinksMessage(''), 4200);
+    } finally {
+      setIsSendingTelegramLink(false);
+    }
+  };
+
+  const mobileRemoteRoute = mobileRemoteStatus?.route || '/dashboard/remote/mobile';
+  const mobileRemoteUrl = remoteLinks?.preferredUrl ||
+    (typeof window !== 'undefined' ? `${window.location.origin}${mobileRemoteRoute}` : mobileRemoteRoute);
 
   const addUserModal = (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
@@ -694,17 +773,17 @@ export function Settings() {
   );
 
   return (
-    <div className="p-4 md:p-8 space-y-8">
+    <div className="p-3 sm:p-4 md:p-8 space-y-6 md:space-y-8 overflow-x-hidden">
       <div>
-        <h2 className="text-2xl font-semibold text-gray-900">Settings</h2>
-        <p className="text-gray-600 mt-1">
+        <h2 className="text-xl md:text-2xl font-semibold text-gray-900">Settings</h2>
+        <p className="text-sm md:text-base text-gray-600 mt-1">
           Configuration for alerts, fusion behavior, authorized faces, and local system services.
         </p>
       </div>
 
       <div className="space-y-6">
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <div className="flex items-center gap-3 mb-6">
+        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
+          <div className="flex items-center gap-3 mb-4 sm:mb-6">
             <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
               <Bell className="w-5 h-5 text-blue-600" />
             </div>
@@ -734,13 +813,13 @@ export function Settings() {
             ].map((item) => (
               <div
                 key={item.title}
-                className="flex items-center justify-between py-3 border-b border-gray-200 last:border-b-0"
+                className="flex items-start sm:items-center justify-between gap-3 py-3 border-b border-gray-200 last:border-b-0"
               >
-                <div>
+                <div className="min-w-0">
                   <p className="font-medium text-gray-900">{item.title}</p>
-                  <p className="text-sm text-gray-600">{item.desc}</p>
+                  <p className="text-sm text-gray-600 break-words">{item.desc}</p>
                 </div>
-                <label className="relative inline-flex items-center cursor-pointer">
+                <label className="relative inline-flex items-center cursor-pointer shrink-0">
                   <input type="checkbox" className="sr-only peer" defaultChecked={item.enabled} />
                   <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-100 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600" />
                 </label>
@@ -749,8 +828,8 @@ export function Settings() {
           </div>
         </div>
 
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <div className="flex items-center gap-3 mb-6">
+        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
+          <div className="flex items-center gap-3 mb-4 sm:mb-6">
             <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
               <Shield className="w-5 h-5 text-blue-600" />
             </div>
@@ -763,7 +842,7 @@ export function Settings() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {fusionSettings.map((setting) => (
               <div key={setting.key} className="rounded-lg border border-gray-200 p-4">
-                <p className="text-xs font-mono text-gray-500">{setting.key}</p>
+                <p className="text-[11px] sm:text-xs font-mono text-gray-500 break-all">{setting.key}</p>
                 <p className="text-lg font-semibold text-gray-900 mt-1">{setting.value}</p>
                 <p className="text-sm text-gray-600 mt-1">{setting.description}</p>
               </div>
@@ -771,8 +850,8 @@ export function Settings() {
           </div>
         </div>
 
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <div className="flex items-center gap-3 mb-6">
+        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
+          <div className="flex items-center gap-3 mb-4 sm:mb-6">
             <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
               <User className="w-5 h-5 text-blue-600" />
             </div>
@@ -785,14 +864,17 @@ export function Settings() {
           <div className="space-y-3">
             {authorizedProfiles.length > 0 ? (
               authorizedProfiles.map((profile) => (
-                <div key={profile.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                  <div className="flex items-center gap-3">
+                <div
+                  key={profile.id}
+                  className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 bg-gray-50 rounded-lg"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
                     <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center text-white font-medium">
                       {profile.label.slice(0, 2).toUpperCase()}
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <p className="font-medium text-gray-900">{profile.label}</p>
-                      <p className="text-xs text-gray-600">
+                      <p className="text-xs text-gray-600 break-words">
                         {profile.role} • enrolled {profile.enrolledAt}
                         {profile.sampleCount != null ? ` • samples ${profile.sampleCount}` : ''}
                       </p>
@@ -801,7 +883,7 @@ export function Settings() {
                   <button
                     onClick={() => void handleRemoveProfile(profile)}
                     disabled={deletingFaceId === profile.dbId}
-                    className="px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 rounded transition-colors disabled:text-gray-400"
+                    className="self-start sm:self-auto px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 rounded transition-colors disabled:text-gray-400"
                   >
                     {deletingFaceId === profile.dbId ? 'Removing...' : 'Remove'}
                   </button>
@@ -823,8 +905,8 @@ export function Settings() {
           </button>
         </div>
 
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <div className="flex items-center gap-3 mb-6">
+        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
+          <div className="flex items-center gap-3 mb-4 sm:mb-6">
             <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
               <Wifi className="w-5 h-5 text-blue-600" />
             </div>
@@ -838,29 +920,134 @@ export function Settings() {
             {connectivitySettings.map((setting) => (
               <div key={setting.key} className="rounded-lg border border-gray-200 p-4">
                 <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm font-mono text-gray-900">{setting.key}</p>
-                  <Database className="w-4 h-4 text-gray-500" />
+                  <p className="text-[11px] sm:text-sm font-mono text-gray-900 break-all">{setting.key}</p>
+                  <Database className="w-4 h-4 text-gray-500 shrink-0" />
                 </div>
-                <p className="text-sm font-medium text-gray-900 mt-1">{setting.value}</p>
+                <p className="text-sm font-medium text-gray-900 mt-1 break-all">{setting.value}</p>
                 <p className="text-xs text-gray-600 mt-1">{setting.description}</p>
               </div>
             ))}
           </div>
 
-          <div className="mt-4 p-3 rounded-lg bg-gray-50 border border-gray-200 text-sm text-gray-700">
+          <div className="mt-4 p-3 rounded-lg bg-gray-50 border border-gray-200 text-sm text-gray-700 break-words">
             <p>
               Monitored scope: {systemProfile.monitoredAreas.join(' and ')}. Contract preserved:{' '}
               {systemProfile.apiContract}.
             </p>
           </div>
         </div>
+
+        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
+              <Camera className="w-5 h-5 text-blue-600" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-gray-900">Mobile Remote Interface</h3>
+              <p className="text-sm text-gray-600">
+                Phone-optimized monitoring view for local network sessions.
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-gray-200 p-4">
+            <div className="flex items-start sm:items-center justify-between gap-4">
+              <div className="min-w-0">
+                <p className="font-medium text-gray-900">Enable Mobile Remote</p>
+                <p className="text-sm text-gray-600 mt-1 break-words">
+                  Disabled by default. Keep local-only access unless secure overlay is configured.
+                </p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  className="sr-only peer"
+                  checked={Boolean(mobileRemoteStatus?.enabled)}
+                  onChange={(event) => {
+                    void handleToggleMobileRemote(event.target.checked);
+                  }}
+                  disabled={mobileRemoteSaving}
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-100 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600 peer-disabled:opacity-60" />
+              </label>
+            </div>
+
+            <div className="mt-4 text-sm text-gray-700 space-y-2">
+              <p>
+                Status: <span className="font-medium">{mobileRemoteStatus?.enabled ? 'Enabled' : 'Disabled'}</span>
+              </p>
+              <p>
+                Route: <span className="font-mono break-all">{mobileRemoteRoute}</span>
+              </p>
+              <p>
+                Preferred URL:{' '}
+                <span className="font-mono break-all">
+                  {remoteLinks?.preferredUrl || mobileRemoteUrl}
+                </span>
+              </p>
+              <p className="text-xs text-gray-600 break-words">{mobileRemoteStatus?.detail}</p>
+            </div>
+
+            <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2 text-sm text-gray-700">
+              <div className="flex items-center gap-2">
+                <Link2 className="w-4 h-4 text-blue-600" />
+                <p className="font-medium text-gray-900">Remote Access Links</p>
+              </div>
+              <p className="break-all">
+                Tailscale: <span className="font-mono">{remoteLinks?.tailscaleUrl || 'Not configured'}</span>
+              </p>
+              <p className="break-all">
+                mDNS: <span className="font-mono">{remoteLinks?.mdnsUrl || 'Not available'}</span>
+              </p>
+              <p className="break-all">
+                LAN: <span className="font-mono">{remoteLinks?.lanUrl || 'Unavailable'}</span>
+              </p>
+              <p className="text-xs text-gray-600 break-words">
+                mDNS status: {mdnsStatus?.published ? 'Published' : mdnsStatus?.detail || 'Unavailable'}
+              </p>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <a
+                href={mobileRemoteRoute}
+                className="px-3 py-1.5 text-sm bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Open Mobile Interface
+              </a>
+              <button
+                onClick={() => {
+                  void navigator.clipboard?.writeText(mobileRemoteUrl);
+                }}
+                className="px-3 py-1.5 text-sm bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Copy Preferred URL
+              </button>
+              <button
+                onClick={() => {
+                  void handleSendAccessLinkToTelegram();
+                }}
+                disabled={isSendingTelegramLink}
+                className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
+              >
+                <Send className="w-4 h-4" />
+                {isSendingTelegramLink ? 'Sending...' : 'Send Link to Telegram'}
+              </button>
+            </div>
+            {mobileRemoteMessage && (
+              <p className="mt-3 text-sm text-gray-700">{mobileRemoteMessage}</p>
+            )}
+            {remoteLinksMessage && (
+              <p className="mt-2 text-sm text-gray-700 break-words">{remoteLinksMessage}</p>
+            )}
+          </div>
+        </div>
       </div>
 
-      <div className="flex justify-end gap-3 pt-6 border-t border-gray-200">
-        <button className="px-6 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
+      <div className="flex flex-col sm:flex-row sm:justify-end gap-3 pt-6 border-t border-gray-200">
+        <button className="w-full sm:w-auto px-6 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
           Revert
         </button>
-        <button className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors inline-flex items-center gap-2">
+        <button className="w-full sm:w-auto px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors inline-flex items-center justify-center gap-2">
           <Save className="w-4 h-4" />
           Save Changes
         </button>

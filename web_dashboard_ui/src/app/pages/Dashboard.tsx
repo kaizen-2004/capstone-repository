@@ -161,6 +161,8 @@ export function Dashboard() {
     eventFilter === 'all'
       ? timelineEvents
       : timelineEvents.filter((event) => event.type === eventFilter);
+  const activeAlertCount = criticalAlerts.length + warningAlerts.length;
+  const latestEventTimestamp = timelineEvents[0]?.timestamp;
 
   const handleExportDailySummary = async () => {
     if (isExporting) {
@@ -250,19 +252,54 @@ export function Dashboard() {
     }
   };
 
+  const formatLastUpdate = (timestamp?: string) => {
+    if (!timestamp) {
+      return 'No recent events';
+    }
+    const date = new Date(timestamp);
+    const diffMs = Date.now() - date.getTime();
+    if (!Number.isFinite(diffMs) || diffMs < 0) {
+      return date.toLocaleString();
+    }
+    const diffSeconds = Math.floor(diffMs / 1000);
+    if (diffSeconds < 60) {
+      return `${diffSeconds}s ago`;
+    }
+    const diffMinutes = Math.floor(diffSeconds / 60);
+    if (diffMinutes < 60) {
+      return `${diffMinutes}m ago`;
+    }
+    const diffHours = Math.floor(diffMinutes / 60);
+    if (diffHours < 24) {
+      return `${diffHours}h ago`;
+    }
+    return date.toLocaleString();
+  };
+
   return (
-    <div className="p-4 md:p-8 space-y-6 md:space-y-8">
+    <div className="p-3 md:p-8 space-y-5 md:space-y-7">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl md:text-2xl font-semibold text-gray-900">Dashboard Overview</h2>
           <p className="text-sm md:text-base text-gray-600 mt-1">
             Focused monitoring for {systemProfile.monitoredAreas.join(' and ')}.
           </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-medium text-blue-700">
+              Active alerts: {activeAlertCount}
+            </span>
+            <span className="inline-flex items-center rounded-full border border-orange-200 bg-orange-50 px-2.5 py-1 font-medium text-orange-700">
+              Warnings: {warningAlerts.length}
+            </span>
+            <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 font-medium text-gray-700">
+              Last update: {formatLastUpdate(latestEventTimestamp)}
+            </span>
+          </div>
         </div>
         <button
           onClick={() => void handleExportDailySummary()}
           disabled={isExporting}
-          className="flex items-center justify-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          className="flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white border border-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
         >
           <Download className="w-4 h-4" />
           <span className="hidden sm:inline">{isExporting ? 'Exporting...' : 'Export Daily Summary'}</span>
@@ -273,7 +310,7 @@ export function Dashboard() {
         <div className="text-sm text-gray-700">{exportMessage}</div>
       )}
 
-      <div className="bg-white rounded-lg border border-gray-200 p-4 md:p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="bg-white rounded-lg border border-gray-200 p-4 md:p-5 grid grid-cols-1 md:grid-cols-3 gap-4">
         <div>
           <p className="text-xs uppercase tracking-wide text-gray-500">Transport</p>
           <p className="text-sm font-medium text-gray-900 mt-1">{systemProfile.transport}</p>
@@ -281,6 +318,10 @@ export function Dashboard() {
         <div>
           <p className="text-xs uppercase tracking-wide text-gray-500">Sensor API Contract</p>
           <p className="text-sm font-medium text-gray-900 mt-1">{systemProfile.apiContract}</p>
+        </div>
+        <div>
+          <p className="text-xs uppercase tracking-wide text-gray-500">Live Timeline Size</p>
+          <p className="text-sm font-medium text-gray-900 mt-1">{timelineEvents.length} events</p>
         </div>
       </div>
 
@@ -307,6 +348,11 @@ export function Dashboard() {
           </div>
         </div>
       )}
+      {criticalAlerts.length === 0 && warningAlerts.length === 0 && (
+        <div className="rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800">
+          No active critical or warning alerts right now.
+        </div>
+      )}
 
       <div className="space-y-3">
         <h3 className="text-base md:text-lg font-semibold text-gray-900">Today's Summary</h3>
@@ -317,9 +363,12 @@ export function Dashboard() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 md:gap-6">
         <div className="space-y-4">
-          <h3 className="text-base md:text-lg font-semibold text-gray-900">Camera Feeds</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="text-base md:text-lg font-semibold text-gray-900">Camera Feeds</h3>
+            <span className="text-xs text-gray-500">{cameraFeeds.length} configured</span>
+          </div>
           {cameraFeeds.map((feed) => (
             <CameraPreview
               key={feed.nodeId}
@@ -335,12 +384,12 @@ export function Dashboard() {
         <div className="lg:col-span-2 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <h3 className="text-base md:text-lg font-semibold text-gray-900">Recent Events</h3>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 w-full sm:w-auto">
               <Filter className="w-4 h-4 text-gray-500" />
               <select
                 value={eventFilter}
                 onChange={(e) => setEventFilter(e.target.value as FilterType)}
-                className="px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full sm:w-auto px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="all">All Events</option>
                 <option value="intruder">Intruder</option>
@@ -352,10 +401,24 @@ export function Dashboard() {
             </div>
           </div>
 
-          <div className="space-y-3">
+          <div className="rounded-lg border border-gray-200 bg-white p-3 md:p-4 space-y-3">
+            <div className="flex items-center justify-between text-xs text-gray-600">
+              <span>{filteredEvents.length} matching events</span>
+              {eventFilter !== 'all' && (
+                <button
+                  onClick={() => setEventFilter('all')}
+                  className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50"
+                >
+                  Clear filter
+                </button>
+              )}
+            </div>
             {filteredEvents.slice(0, 5).map((event) => (
               <AlertCard key={event.id} alert={event} onClick={() => navigate('/events')} />
             ))}
+            {filteredEvents.length === 0 && (
+              <p className="text-sm text-gray-600 py-2">No events match the selected filter.</p>
+            )}
           </div>
 
           <button
