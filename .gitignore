@@ -33,7 +33,14 @@ backend/storage/**/*.sqlite3
 backend/storage/snapshots/
 backend/storage/logs/
 backend/storage/face_samples/raw/
+backend/storage/face_samples/processed/
 backend/storage/models/
+backend/storage/uploads/
+backend/storage/**/*.jpg
+backend/storage/**/*.jpeg
+backend/storage/**/*.png
+backend/storage/**/*.webp
+backend/storage/**/*.gif
 
 # Frontend dependencies and build outputs
 web_dashboard_ui/node_modules/
