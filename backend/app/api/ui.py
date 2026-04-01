@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
-import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import cv2
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from ..core.auth import get_current_user
 from ..core.config import Settings
@@ -29,12 +30,23 @@ def _safe_json(value: str | None) -> dict[str, Any]:
 
 def _alert_to_ui(row: dict[str, Any]) -> dict[str, Any]:
     details = _safe_json(row.get("details_json"))
+    snapshot_path = str(row.get("snapshot_path") or "")
+    snapshot_url = ""
+    if snapshot_path:
+        snapshot_url = (
+            snapshot_path if snapshot_path.startswith("/") else f"/{snapshot_path}"
+        )
     return {
         "id": int(row["id"]),
         "timestamp": str(row["ts"]),
         "severity": str(row.get("severity") or "info").lower(),
-        "type": "intruder" if str(row.get("type", "")).upper() in {"INTRUDER", "DOOR_TAMPER", "AUTHORIZED_ENTRY"} else (
-            "fire" if str(row.get("type", "")).upper() in {"FIRE", "SMOKE_WARNING"} else "system"
+        "type": "intruder"
+        if str(row.get("type", "")).upper()
+        in {"INTRUDER", "DOOR_TAMPER", "AUTHORIZED_ENTRY"}
+        else (
+            "fire"
+            if str(row.get("type", "")).upper() in {"FIRE", "SMOKE_WARNING"}
+            else "system"
         ),
         "event_code": str(row.get("type") or "ALERT"),
         "source_node": str(details.get("source_node") or "system"),
@@ -44,6 +56,7 @@ def _alert_to_ui(row: dict[str, Any]) -> dict[str, Any]:
         "acknowledged": str(row.get("status") or "").upper() != "ACTIVE",
         "confidence": details.get("confidence"),
         "fusion_evidence": details.get("fusion_evidence") or [],
+        "snapshot_path": snapshot_url,
     }
 
 
@@ -73,6 +86,16 @@ def _runtime_settings(settings: Settings) -> list[dict[str, str]]:
             "description": "HTTP sensor event ingest endpoint",
         },
         {
+            "key": "CAMERA_SOURCE_MODE",
+            "value": str(settings.camera_source_mode),
+            "description": "Active camera source backend mode",
+        },
+        {
+            "key": "CAMERA_WEBCAM_SINGLE_NODE",
+            "value": str(settings.camera_webcam_single_node),
+            "description": "Single-webcam mapped node in webcam mode",
+        },
+        {
             "key": "NODE_OFFLINE_SECONDS",
             "value": str(settings.node_offline_seconds),
             "description": "Seconds before sensor node is marked offline",
@@ -86,6 +109,36 @@ def _runtime_settings(settings: Settings) -> list[dict[str, str]]:
             "key": "CAMERA_PROCESSING_FPS",
             "value": str(settings.camera_processing_fps),
             "description": "Target processing FPS per camera",
+        },
+        {
+            "key": "FACE_MATCH_THRESHOLD",
+            "value": str(settings.face_match_threshold),
+            "description": "Lower is stricter; higher reduces unknowns in webcam tests",
+        },
+        {
+            "key": "AUTHORIZED_PRESENCE_LOGGING_ENABLED",
+            "value": str(settings.authorized_presence_logging_enabled).lower(),
+            "description": "Auto-log authorized re-entry events from live camera view",
+        },
+        {
+            "key": "AUTHORIZED_PRESENCE_SCAN_SECONDS",
+            "value": str(settings.authorized_presence_scan_seconds),
+            "description": "Face-presence scan interval in seconds",
+        },
+        {
+            "key": "AUTHORIZED_PRESENCE_COOLDOWN_SECONDS",
+            "value": str(settings.authorized_presence_cooldown_seconds),
+            "description": "Cooldown before logging another authorized re-entry",
+        },
+        {
+            "key": "UNKNOWN_PRESENCE_LOGGING_ENABLED",
+            "value": str(settings.unknown_presence_logging_enabled).lower(),
+            "description": "Auto-log unknown-person re-entry events from live camera view",
+        },
+        {
+            "key": "UNKNOWN_PRESENCE_COOLDOWN_SECONDS",
+            "value": str(settings.unknown_presence_cooldown_seconds),
+            "description": "Cooldown before logging another unknown-person re-entry",
         },
         {
             "key": "EVENT_RETENTION_DAYS",
@@ -136,11 +189,13 @@ def ui_nodes_live(request: Request) -> dict:
                 "id": str(row["node_id"]),
                 "name": str(row["label"]),
                 "location": str(row.get("location") or "System"),
-                "type": "force" if str(row.get("device_type")) == "force" else (
-                    "camera" if str(row.get("device_type")) == "camera" else "smoke"
-                ),
+                "type": "force"
+                if str(row.get("device_type")) == "force"
+                else ("camera" if str(row.get("device_type")) == "camera" else "smoke"),
                 "status": "online" if str(row.get("status")) == "online" else "offline",
-                "last_update": str(row.get("last_seen_ts") or datetime.now(timezone.utc).isoformat()),
+                "last_update": str(
+                    row.get("last_seen_ts") or datetime.now(timezone.utc).isoformat()
+                ),
                 "note": str(row.get("note") or ""),
             }
         )
@@ -157,7 +212,9 @@ def ui_nodes_live(request: Request) -> dict:
         {
             "id": "sensor_transport",
             "name": "HTTP Sensor Transport",
-            "status": "online" if any(item["status"] == "online" for item in sensor_statuses) else "warning",
+            "status": "online"
+            if any(item["status"] == "online" for item in sensor_statuses)
+            else "warning",
             "endpoint": "POST /api/sensors/event",
             "last_update": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "detail": "ESP32-C3 nodes communicating via HTTP",
@@ -165,7 +222,9 @@ def ui_nodes_live(request: Request) -> dict:
         {
             "id": "camera_manager",
             "name": "RTSP Camera Manager",
-            "status": "online" if any(str(cam.get("status")) == "online" for cam in cameras) else "warning",
+            "status": "online"
+            if any(str(cam.get("status")) == "online" for cam in cameras)
+            else "warning",
             "endpoint": "RTSP pull workers",
             "last_update": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "detail": "Persistent stream monitoring with reconnect",
@@ -183,7 +242,7 @@ def ui_nodes_live(request: Request) -> dict:
                 "quality": "720p",
                 "fps": int(cam.get("fps_target") or settings.camera_processing_fps),
                 "latency_ms": 120,
-                "stream_path": f"/camera/frame/{node_id}?_={int(time.time())}",
+                "stream_path": f"/camera/stream/{node_id}",
                 "stream_available": str(cam.get("status")) == "online",
             }
         )
@@ -213,7 +272,9 @@ def ui_nodes_live(request: Request) -> dict:
         ],
         "system_health": {
             "host": "online",
-            "sensor_transport": "connected" if any(item["status"] == "online" for item in sensor_statuses) else "disconnected",
+            "sensor_transport": "connected"
+            if any(item["status"] == "online" for item in sensor_statuses)
+            else "disconnected",
             "backend": "online",
             "last_sync": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "uptime": "running",
@@ -270,7 +331,9 @@ def ack_compat(alert_id: int, request: Request) -> Response:
     user = get_current_user(request)
     ok = store.ack_alert(alert_id, ack_by=user["username"], status="ACK")
     if not ok:
-        raise HTTPException(status_code=404, detail="alert not found or already acknowledged")
+        raise HTTPException(
+            status_code=404, detail="alert not found or already acknowledged"
+        )
     return JSONResponse({"ok": True, "alert_id": alert_id})
 
 
@@ -279,18 +342,138 @@ def ack_json(alert_id: int, request: Request) -> dict:
     user = get_current_user(request)
     ok = store.ack_alert(alert_id, ack_by=user["username"], status="ACK")
     if not ok:
-        raise HTTPException(status_code=404, detail="alert not found or already acknowledged")
+        raise HTTPException(
+            status_code=404, detail="alert not found or already acknowledged"
+        )
     return {"ok": True}
 
 
+@router.get("/snapshots/{snapshot_rel_path:path}")
+def snapshot_file(snapshot_rel_path: str, request: Request) -> FileResponse:
+    get_current_user(request)
+    settings: Settings = request.app.state.settings
+    root = Path(settings.snapshot_root).resolve()
+    target = (root / snapshot_rel_path).resolve()
+
+    if target != root and root not in target.parents:
+        raise HTTPException(status_code=404, detail="snapshot not found")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="snapshot not found")
+    return FileResponse(target)
+
+
 @router.get("/camera/frame/{node_id}")
-def camera_frame(node_id: str, request: Request) -> Response:
+def camera_frame(node_id: str, request: Request, face_debug: bool = False) -> Response:
     get_current_user(request)
     frame = request.app.state.camera_manager.snapshot_frame(node_id)
     if frame is None:
         raise HTTPException(status_code=404, detail="camera frame unavailable")
 
+    if face_debug:
+        _draw_face_debug_overlay(request, frame)
+
     ok, encoded = cv2.imencode(".jpg", frame)
     if not ok:
         raise HTTPException(status_code=500, detail="failed to encode frame")
-    return Response(content=encoded.tobytes(), media_type="image/jpeg")
+    return Response(
+        content=encoded.tobytes(),
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+def _draw_face_debug_overlay(request: Request, frame: Any) -> None:
+    try:
+        verdict = request.app.state.face_service.classify_frame_with_bbox(frame)
+        bbox = verdict.get("bbox")
+        if isinstance(bbox, list) and len(bbox) == 4:
+            x, y, w, h = [int(value) for value in bbox]
+            is_authorized = str(verdict.get("result") or "") == "authorized"
+            color = (50, 205, 50) if is_authorized else (0, 165, 255)
+            label_state = "AUTHORIZED" if is_authorized else "NON-AUTHORIZED"
+            confidence = float(verdict.get("confidence") or 0.0)
+            label = f"{label_state} {confidence:.1f}%"
+
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+            text_x = max(4, x)
+            text_y = max(20, y - 8)
+            cv2.putText(
+                frame,
+                label,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+        else:
+            reason = str(verdict.get("reason") or "No face detected")
+            cv2.putText(
+                frame,
+                reason,
+                (12, 26),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 165, 255),
+                2,
+                cv2.LINE_AA,
+            )
+    except Exception:
+        pass
+
+
+@router.get("/camera/stream/{node_id}")
+async def camera_stream(
+    node_id: str,
+    request: Request,
+    face_debug: bool = False,
+    fps: int = 12,
+) -> StreamingResponse:
+    get_current_user(request)
+    target_fps = max(2, min(30, int(fps)))
+    frame_wait = 1.0 / float(target_fps)
+
+    async def _stream_bytes():
+        while True:
+            if await request.is_disconnected():
+                break
+
+            frame = request.app.state.camera_manager.snapshot_frame(node_id)
+            if frame is None:
+                await asyncio.sleep(0.15)
+                continue
+
+            if face_debug:
+                _draw_face_debug_overlay(request, frame)
+
+            ok, encoded = cv2.imencode(".jpg", frame)
+            if not ok:
+                await asyncio.sleep(frame_wait)
+                continue
+
+            payload = encoded.tobytes()
+            header = (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                + f"Content-Length: {len(payload)}\r\n".encode("ascii")
+                + b"Cache-Control: no-cache\r\n"
+                + b"Pragma: no-cache\r\n\r\n"
+            )
+            yield header + payload + b"\r\n"
+            await asyncio.sleep(frame_wait)
+
+    return StreamingResponse(
+        _stream_bytes(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Accel-Buffering": "no",
+        },
+    )

@@ -67,6 +67,38 @@ Backend: `http://127.0.0.1:8765`
 Dashboard: `http://127.0.0.1:8765/dashboard`
 Mobile remote: `http://127.0.0.1:8765/dashboard/remote/mobile`
 
+Camera source env vars:
+
+- `CAMERA_SOURCE_MODE` (`rtsp` default, `webcam` for temporary local testing)
+- `CAMERA_WEBCAM_SINGLE_NODE` (`cam_door` default for single-webcam outdoor testing; set `none` for dual-webcam workers)
+- `CAMERA_INDOOR_RTSP` / `CAMERA_DOOR_RTSP` (used when `CAMERA_SOURCE_MODE=rtsp`)
+- `CAMERA_INDOOR_WEBCAM_INDEX` (default `0` when `CAMERA_SOURCE_MODE=webcam`)
+- `CAMERA_DOOR_WEBCAM_INDEX` (default `1`, auto-fallback to index `0` if unavailable)
+- `CAMERA_PROCESSING_FPS` (default `12`)
+- `FACE_MATCH_THRESHOLD` (default `68`; higher values like `85` are less strict for webcam testing)
+- `AUTHORIZED_PRESENCE_LOGGING_ENABLED` (default `false`; when `true`, logs authorized re-entry events from live camera view)
+- `AUTHORIZED_PRESENCE_SCAN_SECONDS` (default `2`; scan interval for authorized presence logging)
+- `AUTHORIZED_PRESENCE_COOLDOWN_SECONDS` (default `20`; minimum seconds between repeated authorized-presence logs)
+- `UNKNOWN_PRESENCE_LOGGING_ENABLED` (default `false`; when `true`, logs unknown-person re-entry events and captures evidence snapshots)
+- `UNKNOWN_PRESENCE_COOLDOWN_SECONDS` (default `20`; minimum seconds between repeated unknown-person re-entry logs)
+
+Note: authorized/unknown presence scans share `AUTHORIZED_PRESENCE_SCAN_SECONDS` as the polling interval.
+
+Temporary webcam test mode example:
+
+```bash
+export CAMERA_SOURCE_MODE=webcam
+export CAMERA_WEBCAM_SINGLE_NODE=cam_door
+export CAMERA_INDOOR_WEBCAM_INDEX=0
+export CAMERA_DOOR_WEBCAM_INDEX=1
+export FACE_MATCH_THRESHOLD=85
+export AUTHORIZED_PRESENCE_LOGGING_ENABLED=true
+export UNKNOWN_PRESENCE_LOGGING_ENABLED=true
+python backend/run_backend.py
+```
+
+For one-webcam outdoor-only testing, use `CAMERA_DOOR_WEBCAM_INDEX=0`.
+
 Optional env vars for mobile push:
 
 - `WEBPUSH_VAPID_PUBLIC_KEY`

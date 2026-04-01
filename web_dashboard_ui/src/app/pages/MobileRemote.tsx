@@ -505,7 +505,7 @@ export function MobileRemote() {
         <section className="rounded-lg border border-gray-200 bg-white p-3 space-y-2">
           <div className="flex items-center gap-2">
             <Camera className="w-4 h-4 text-blue-600" />
-            <h2 className="text-sm font-semibold">Camera Snapshots</h2>
+            <h2 className="text-sm font-semibold">Camera Live Preview</h2>
           </div>
           <div className="grid grid-cols-1 gap-3">
             {cameraFeeds.map((feed) => (
@@ -513,8 +513,8 @@ export function MobileRemote() {
                 <div className="relative bg-gray-900 aspect-video">
                   {feed.streamAvailable && feed.streamPath ? (
                     <img
-                      src={feed.streamPath}
-                      alt={`${feed.location} snapshot`}
+                      src={`${feed.streamPath}${feed.streamPath.includes('?') ? '&' : '?'}face_debug=1`}
+                      alt={`${feed.location} live preview`}
                       className="absolute inset-0 h-full w-full object-cover"
                     />
                   ) : (

@@ -206,6 +206,10 @@ function mapAlert(raw: Json): Alert {
   const fusionEvidence = Array.isArray(fusionRaw) ? fusionRaw.map((item) => String(item)) : [];
   const responseTimeMs = raw.response_time_ms == null ? undefined : toInt(raw.response_time_ms);
   const confidence = raw.confidence == null ? undefined : toInt(raw.confidence);
+  const snapshotPathRaw = String(raw.snapshot_path ?? raw.snapshotPath ?? '').trim();
+  const snapshotPath = snapshotPathRaw
+    ? (snapshotPathRaw.startsWith('/') ? snapshotPathRaw : `/${snapshotPathRaw}`)
+    : undefined;
 
   return {
     id: String(raw.id ?? ''),
@@ -221,6 +225,7 @@ function mapAlert(raw: Json): Alert {
     responseTimeMs,
     confidence,
     fusionEvidence,
+    snapshotPath,
   };
 }
 

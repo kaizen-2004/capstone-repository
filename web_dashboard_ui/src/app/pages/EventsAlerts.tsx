@@ -15,6 +15,9 @@ const TIME_RANGE_DAYS: Record<Exclude<TimeRange, 'all'>, number> = {
   '30d': 30,
 };
 
+const displayEventCode = (eventCode: string) =>
+  eventCode === 'UNKNOWN' ? 'NON-AUTHORIZED' : eventCode;
+
 function toCsvCell(value: unknown): string {
   const raw = String(value ?? '');
   if (/[",\n]/.test(raw)) {
@@ -44,6 +47,7 @@ export function EventsAlerts() {
   const [selectedType, setSelectedType] = useState<EventType | 'all'>('all');
   const [selectedTimeRange, setSelectedTimeRange] = useState<TimeRange>(DEFAULT_TIME_RANGE);
   const [selectedEvent, setSelectedEvent] = useState<Alert | null>(null);
+  const [snapshotLoadFailed, setSnapshotLoadFailed] = useState(false);
   const [ackPendingId, setAckPendingId] = useState<string | null>(null);
 
   const handleAcknowledge = async (id: string) => {
@@ -105,6 +109,10 @@ export function EventsAlerts() {
     };
   }, []);
 
+  useEffect(() => {
+    setSnapshotLoadFailed(false);
+  }, [selectedEvent?.id, selectedEvent?.snapshotPath]);
+
   const filteredEvents = useMemo(
     () => {
       const keyword = searchQuery.toLowerCase().trim();
@@ -152,7 +160,7 @@ export function EventsAlerts() {
       ['Timestamp', event.timestamp],
       ['Severity', event.severity],
       ['Type', event.type],
-      ['Event Code', event.eventCode],
+      ['Event Code', displayEventCode(event.eventCode)],
       ['Title', event.title],
       ['Description', event.description],
       ['Location', event.location],
@@ -275,7 +283,9 @@ export function EventsAlerts() {
 
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-sm font-semibold text-gray-900 break-words">{event.eventCode}</p>
+                  <p className="text-sm font-semibold text-gray-900 break-words">
+                    {displayEventCode(event.eventCode)}
+                  </p>
                   <p className="text-sm font-medium text-gray-900 mt-1 break-words">{event.title}</p>
                   <p className="text-sm text-gray-600 mt-1 break-words">{event.description}</p>
                 </div>
@@ -335,7 +345,7 @@ export function EventsAlerts() {
                     {formatDateTime(event.timestamp)}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                    {event.eventCode}
+                    {displayEventCode(event.eventCode)}
                   </td>
                   <td className="px-6 py-4">
                     <div>
@@ -422,7 +432,9 @@ export function EventsAlerts() {
                   </div>
                   <div>
                     <p className="text-sm text-gray-600">Event Code</p>
-                    <p className="text-sm font-medium text-gray-900 mt-1">{selectedEvent.eventCode}</p>
+                    <p className="text-sm font-medium text-gray-900 mt-1">
+                      {displayEventCode(selectedEvent.eventCode)}
+                    </p>
                   </div>
                   {selectedEvent.responseTimeMs && (
                     <div>
@@ -444,7 +456,18 @@ export function EventsAlerts() {
               <div>
                 <p className="text-sm font-medium text-gray-900 mb-2">Camera Snapshot</p>
                 <div className="bg-gray-900 aspect-video rounded-lg flex items-center justify-center">
-                  <ImageIcon className="w-12 h-12 text-gray-600" />
+                  {selectedEvent.snapshotPath && !snapshotLoadFailed ? (
+                    <img
+                      src={selectedEvent.snapshotPath}
+                      alt="Event snapshot"
+                      className="w-full h-full object-cover rounded-lg"
+                      onError={() => {
+                        setSnapshotLoadFailed(true);
+                      }}
+                    />
+                  ) : (
+                    <ImageIcon className="w-12 h-12 text-gray-600" />
+                  )}
                 </div>
               </div>
 

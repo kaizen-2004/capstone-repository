@@ -34,35 +34,138 @@ async def lifespan(app: FastAPI):
     settings = load_settings()
     app.state.settings = settings
 
-    store.configure(path=settings.db_path, session_ttl_seconds=settings.session_ttl_seconds)
+    store.configure(
+        path=settings.db_path, session_ttl_seconds=settings.session_ttl_seconds
+    )
     store.init_db()
     store.ensure_admin_user(settings.admin_username, settings.admin_password)
     _seed_default_settings()
 
-    store.upsert_camera("cam_indoor", "Indoor RTSP Camera", "Living Room", settings.camera_indoor_rtsp, settings.camera_processing_fps)
-    store.upsert_camera("cam_door", "Door RTSP Camera", "Door Entrance Area", settings.camera_door_rtsp, settings.camera_processing_fps)
+    camera_source_mode = settings.camera_source_mode
+    camera_labels = {
+        "cam_indoor": "Indoor RTSP Camera",
+        "cam_door": "Door RTSP Camera",
+    }
+    camera_locations = {
+        "cam_indoor": "Living Room",
+        "cam_door": "Door Entrance Area",
+    }
+
+    mirrored_camera_node: str | None = None
+    camera_configs: list[CameraConfig] = []
+
+    if camera_source_mode == "webcam":
+        webcam_indices = {
+            "cam_indoor": settings.camera_indoor_webcam_index,
+            "cam_door": settings.camera_door_webcam_index,
+        }
+        door_webcam_fallback_index = (
+            0 if settings.camera_door_webcam_index != 0 else None
+        )
+        single_webcam_node = settings.camera_webcam_single_node
+        camera_sources = {
+            "cam_indoor": f"webcam://{webcam_indices['cam_indoor']}",
+            "cam_door": f"webcam://{webcam_indices['cam_door']}",
+        }
+
+        if single_webcam_node in {"cam_indoor", "cam_door"}:
+            mirrored_camera_node = (
+                "cam_indoor" if single_webcam_node == "cam_door" else "cam_door"
+            )
+            camera_sources[mirrored_camera_node] = f"mirror://{single_webcam_node}"
+            camera_configs.append(
+                CameraConfig(
+                    node_id=single_webcam_node,
+                    label=camera_labels[single_webcam_node],
+                    location=camera_locations[single_webcam_node],
+                    rtsp_url="",
+                    fps_target=settings.camera_processing_fps,
+                    source_mode="webcam",
+                    webcam_index=webcam_indices[single_webcam_node],
+                    webcam_fallback_index=(
+                        door_webcam_fallback_index
+                        if single_webcam_node == "cam_door"
+                        else None
+                    ),
+                )
+            )
+        else:
+            camera_configs.extend(
+                [
+                    CameraConfig(
+                        node_id="cam_indoor",
+                        label=camera_labels["cam_indoor"],
+                        location=camera_locations["cam_indoor"],
+                        rtsp_url="",
+                        fps_target=settings.camera_processing_fps,
+                        source_mode="webcam",
+                        webcam_index=webcam_indices["cam_indoor"],
+                    ),
+                    CameraConfig(
+                        node_id="cam_door",
+                        label=camera_labels["cam_door"],
+                        location=camera_locations["cam_door"],
+                        rtsp_url="",
+                        fps_target=settings.camera_processing_fps,
+                        source_mode="webcam",
+                        webcam_index=webcam_indices["cam_door"],
+                        webcam_fallback_index=door_webcam_fallback_index,
+                    ),
+                ]
+            )
+    else:
+        camera_sources = {
+            "cam_indoor": settings.camera_indoor_rtsp,
+            "cam_door": settings.camera_door_rtsp,
+        }
+        camera_configs.extend(
+            [
+                CameraConfig(
+                    node_id="cam_indoor",
+                    label=camera_labels["cam_indoor"],
+                    location=camera_locations["cam_indoor"],
+                    rtsp_url=settings.camera_indoor_rtsp,
+                    fps_target=settings.camera_processing_fps,
+                    source_mode="rtsp",
+                ),
+                CameraConfig(
+                    node_id="cam_door",
+                    label=camera_labels["cam_door"],
+                    location=camera_locations["cam_door"],
+                    rtsp_url=settings.camera_door_rtsp,
+                    fps_target=settings.camera_processing_fps,
+                    source_mode="rtsp",
+                ),
+            ]
+        )
+
+    for node_id in ("cam_indoor", "cam_door"):
+        store.upsert_camera(
+            node_id,
+            camera_labels[node_id],
+            camera_locations[node_id],
+            camera_sources[node_id],
+            settings.camera_processing_fps,
+        )
+
+    if mirrored_camera_node is not None:
+        mirror_target = (
+            "cam_door" if mirrored_camera_node == "cam_indoor" else "cam_indoor"
+        )
+        store.set_camera_runtime(
+            mirrored_camera_node,
+            "offline",
+            f"mirror source active: {mirror_target}",
+        )
 
     camera_manager = CameraManager(storage_snapshot_root=settings.snapshot_root)
-    camera_manager.configure(
-        [
-            CameraConfig(
-                node_id="cam_indoor",
-                label="Indoor RTSP Camera",
-                location="Living Room",
-                rtsp_url=settings.camera_indoor_rtsp,
-                fps_target=settings.camera_processing_fps,
-            ),
-            CameraConfig(
-                node_id="cam_door",
-                label="Door RTSP Camera",
-                location="Door Entrance Area",
-                rtsp_url=settings.camera_door_rtsp,
-                fps_target=settings.camera_processing_fps,
-            ),
-        ]
-    )
+    camera_manager.configure(camera_configs)
 
-    face_service = FaceService(sample_root=settings.face_samples_root, model_root=settings.models_root)
+    face_service = FaceService(
+        sample_root=settings.face_samples_root,
+        model_root=settings.models_root,
+        match_threshold=settings.face_match_threshold,
+    )
     fire_service = FireService()
     link_resolver = LinkResolver(settings=settings)
     mdns_publisher = MdnsPublisher(settings=settings, resolver=link_resolver)
@@ -85,6 +188,13 @@ async def lifespan(app: FastAPI):
         regular_snapshot_retention_days=settings.regular_snapshot_retention_days,
         critical_snapshot_retention_days=settings.critical_snapshot_retention_days,
         notification_dispatcher=notification_dispatcher,
+        camera_manager=camera_manager,
+        face_service=face_service,
+        authorized_presence_logging_enabled=settings.authorized_presence_logging_enabled,
+        authorized_presence_scan_seconds=settings.authorized_presence_scan_seconds,
+        authorized_presence_cooldown_seconds=settings.authorized_presence_cooldown_seconds,
+        unknown_presence_logging_enabled=settings.unknown_presence_logging_enabled,
+        unknown_presence_cooldown_seconds=settings.unknown_presence_cooldown_seconds,
     )
 
     app.state.camera_manager = camera_manager
@@ -100,7 +210,10 @@ async def lifespan(app: FastAPI):
     camera_manager.start()
     supervisor.start()
     startup_links_result = notification_dispatcher.send_startup_access_links()
-    store.log("INFO", f"startup access links dispatch status={startup_links_result.get('status')}")
+    store.log(
+        "INFO",
+        f"startup access links dispatch status={startup_links_result.get('status')}",
+    )
     store.log("INFO", "Backend startup complete")
 
     try:
@@ -162,20 +275,30 @@ WEB_DIST = PROJECT_ROOT / "web_dashboard_ui" / "dist"
 WEB_ASSETS = WEB_DIST / "assets"
 
 if WEB_ASSETS.exists():
-    app.mount("/assets", StaticFiles(directory=str(WEB_ASSETS)), name="dashboard-assets")
-    app.mount("/dashboard/assets", StaticFiles(directory=str(WEB_ASSETS)), name="dashboard-assets-nested")
+    app.mount(
+        "/assets", StaticFiles(directory=str(WEB_ASSETS)), name="dashboard-assets"
+    )
+    app.mount(
+        "/dashboard/assets",
+        StaticFiles(directory=str(WEB_ASSETS)),
+        name="dashboard-assets-nested",
+    )
 
 
 def _serve_web_file(path: str, media_type: str | None = None) -> FileResponse:
     file_path = WEB_DIST / path
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"{path} not found in dashboard build.")
+        raise HTTPException(
+            status_code=404, detail=f"{path} not found in dashboard build."
+        )
     return FileResponse(file_path, media_type=media_type)
 
 
 @app.get("/dashboard/manifest.webmanifest")
 def dashboard_manifest() -> FileResponse:
-    return _serve_web_file("manifest.webmanifest", media_type="application/manifest+json")
+    return _serve_web_file(
+        "manifest.webmanifest", media_type="application/manifest+json"
+    )
 
 
 @app.get("/dashboard/sw.js")
@@ -193,7 +316,10 @@ def dashboard_icon() -> FileResponse:
 def dashboard(path: str = ""):
     index_file = WEB_DIST / "index.html"
     if not index_file.exists():
-        raise HTTPException(status_code=404, detail="Dashboard build not found. Build web_dashboard_ui first.")
+        raise HTTPException(
+            status_code=404,
+            detail="Dashboard build not found. Build web_dashboard_ui first.",
+        )
     return FileResponse(index_file)
 
 

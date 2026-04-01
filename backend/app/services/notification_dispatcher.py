@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 from ..core.config import Settings
@@ -140,7 +141,9 @@ class NotificationDispatcher:
                 "links": links_payload,
             }
 
-        message = self.telegram_notifier.format_access_links_message(links_payload, reason)
+        message = self.telegram_notifier.format_access_links_message(
+            links_payload, reason
+        )
         ok, detail = self.telegram_notifier.send_message(message)
         status = "sent" if ok else "failed"
 
@@ -216,7 +219,9 @@ class NotificationDispatcher:
                 "links": links_payload,
             }
 
-        return self.send_access_links(reason="endpoint_change", force=False, links=links_payload)
+        return self.send_access_links(
+            reason="endpoint_change", force=False, links=links_payload
+        )
 
     def _dispatch_telegram_fallback(self, alert_id: int | None, reason: str) -> None:
         if not self.telegram_notifier.enabled:
@@ -230,13 +235,93 @@ class NotificationDispatcher:
 
         alert_payload = store.get_alert(alert_id) if alert_id else {}
         links_payload = self._resolve_access_links()
-        text = self.telegram_notifier.format_alert_fallback_message(alert_payload or {}, reason, links_payload)
+        text = self.telegram_notifier.format_alert_fallback_message(
+            alert_payload or {}, reason, links_payload
+        )
         ok, detail = self.telegram_notifier.send_message(text)
 
         store.create_notification_delivery_log(
             "telegram",
             "sent" if ok else "failed",
             f"fallback reason={reason}; {detail}",
+            alert_id=alert_id,
+        )
+
+    def _is_face_snapshot_alert(self, alert: dict[str, Any]) -> bool:
+        alert_type = str(alert.get("type") or "").upper()
+        if alert_type not in {"AUTHORIZED_ENTRY", "INTRUDER"}:
+            return False
+        details = _safe_json(alert.get("details_json"))
+        return isinstance(details.get("face"), dict)
+
+    def _resolve_snapshot_file_path(self, snapshot_path: str | None) -> Path | None:
+        raw = str(snapshot_path or "").strip()
+        if not raw:
+            return None
+
+        try:
+            path = Path(raw)
+            resolved = (
+                path.resolve()
+                if path.is_absolute()
+                else (self.settings.storage_root / raw.lstrip("/")).resolve()
+            )
+            storage_root = self.settings.storage_root.resolve()
+            if resolved != storage_root and storage_root not in resolved.parents:
+                return None
+            if not resolved.exists() or not resolved.is_file():
+                return None
+            return resolved
+        except Exception:
+            return None
+
+    def _dispatch_telegram_face_snapshot(self, alert: dict[str, Any]) -> None:
+        alert_id = int(alert.get("id") or 0) or None
+        details = _safe_json(alert.get("details_json"))
+        alert_payload = {
+            **alert,
+            "details": details,
+        }
+        caption = self.telegram_notifier.format_face_snapshot_caption(alert_payload)
+
+        if not self.telegram_notifier.enabled:
+            store.create_notification_delivery_log(
+                "telegram",
+                "skipped",
+                "face_snapshot; Telegram bot token/chat id not configured.",
+                alert_id=alert_id,
+            )
+            return
+
+        snapshot_file = self._resolve_snapshot_file_path(alert.get("snapshot_path"))
+        if snapshot_file is not None:
+            ok, detail = self.telegram_notifier.send_photo(
+                str(snapshot_file), caption=caption
+            )
+            if ok:
+                store.create_notification_delivery_log(
+                    "telegram",
+                    "sent",
+                    f"face_snapshot photo={snapshot_file.name}; {detail}",
+                    alert_id=alert_id,
+                )
+                return
+
+            fallback_ok, fallback_detail = self.telegram_notifier.send_message(caption)
+            status = "sent" if fallback_ok else "failed"
+            store.create_notification_delivery_log(
+                "telegram",
+                status,
+                f"face_snapshot photo_failed={detail}; caption_fallback={fallback_detail}",
+                alert_id=alert_id,
+            )
+            return
+
+        ok, detail = self.telegram_notifier.send_message(caption)
+        store.create_notification_delivery_log(
+            "telegram",
+            "sent" if ok else "failed",
+            f"face_snapshot no_photo; {detail}",
             alert_id=alert_id,
         )
 
@@ -248,6 +333,10 @@ class NotificationDispatcher:
 
     def dispatch_alert(self, alert: dict[str, Any]) -> None:
         alert_id = int(alert.get("id") or 0) or None
+        is_face_snapshot_alert = self._is_face_snapshot_alert(alert)
+        if is_face_snapshot_alert:
+            self._dispatch_telegram_face_snapshot(alert)
+
         devices = store.list_mobile_devices(enabled_only=True)
         if not devices:
             store.create_notification_delivery_log(
@@ -256,7 +345,8 @@ class NotificationDispatcher:
                 "No active mobile devices registered.",
                 alert_id=alert_id,
             )
-            self._dispatch_telegram_fallback(alert_id, "no_mobile_devices")
+            if not is_face_snapshot_alert:
+                self._dispatch_telegram_fallback(alert_id, "no_mobile_devices")
             return
 
         if not self._mobile_push_enabled():
@@ -266,7 +356,8 @@ class NotificationDispatcher:
                 "Mobile push disabled by configuration.",
                 alert_id=alert_id,
             )
-            self._dispatch_telegram_fallback(alert_id, "push_disabled")
+            if not is_face_snapshot_alert:
+                self._dispatch_telegram_fallback(alert_id, "push_disabled")
             return
 
         payload = self._build_push_payload(alert)
@@ -337,5 +428,7 @@ class NotificationDispatcher:
                     alert_id=alert_id,
                 )
 
-        if not any_sent and any_fallback_enabled:
-            self._dispatch_telegram_fallback(alert_id, "all_push_attempts_failed_or_skipped")
+        if not any_sent and any_fallback_enabled and not is_face_snapshot_alert:
+            self._dispatch_telegram_fallback(
+                alert_id, "all_push_attempts_failed_or_skipped"
+            )

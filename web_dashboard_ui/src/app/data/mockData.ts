@@ -20,6 +20,7 @@ export interface Alert {
   responseTimeMs?: number;
   confidence?: number;
   fusionEvidence?: string[];
+  snapshotPath?: string;
 }
 
 export interface KPI {
@@ -224,8 +225,8 @@ export const recentEvents: Alert[] = [
     eventCode: 'UNKNOWN',
     sourceNode: 'cam_indoor',
     location: 'Living Room',
-    title: 'Unknown Face Detected',
-    description: 'Indoor camera marked an unrecognized face.',
+    title: 'Non-Authorized Face Detected',
+    description: 'Indoor camera classified a non-authorized face.',
     acknowledged: true,
     confidence: 88,
   },
@@ -240,7 +241,7 @@ export const kpiData: KPI[] = [
     subtitle: 'Today',
   },
   {
-    label: 'Unknown Detections',
+    label: 'Non-Authorized Detections',
     value: 2,
     trend: -1,
     icon: 'UserX',

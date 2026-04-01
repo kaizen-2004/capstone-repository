@@ -28,9 +28,21 @@ Override using env vars:
 
 ## Camera Env Vars
 
+- `CAMERA_SOURCE_MODE` (`rtsp` default, `webcam` for temporary local testing)
+- `CAMERA_WEBCAM_SINGLE_NODE` (`cam_door` default for one-webcam outdoor mode; `none` enables dual-webcam workers)
 - `CAMERA_INDOOR_RTSP`
 - `CAMERA_DOOR_RTSP`
+- `CAMERA_INDOOR_WEBCAM_INDEX` (default `0`)
+- `CAMERA_DOOR_WEBCAM_INDEX` (default `1`, auto-fallback to `0` if unavailable)
 - `CAMERA_PROCESSING_FPS` (default `12`)
+- `FACE_MATCH_THRESHOLD` (default `68`; `80-90` is useful for temporary webcam validation)
+- `AUTHORIZED_PRESENCE_LOGGING_ENABLED` (default `false`; logs authorized re-entry when a recognized face appears in camera view)
+- `AUTHORIZED_PRESENCE_SCAN_SECONDS` (default `2`)
+- `AUTHORIZED_PRESENCE_COOLDOWN_SECONDS` (default `20`)
+- `UNKNOWN_PRESENCE_LOGGING_ENABLED` (default `false`; logs unknown-person re-entry with evidence snapshot)
+- `UNKNOWN_PRESENCE_COOLDOWN_SECONDS` (default `20`)
+
+Note: authorized/unknown presence scans share `AUTHORIZED_PRESENCE_SCAN_SECONDS` as the scan interval.
 
 ## Mobile Remote / Push Env Vars (Optional)
 

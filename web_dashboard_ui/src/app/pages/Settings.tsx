@@ -48,6 +48,15 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+function readBlobAsDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Failed to read captured frame.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
 export function Settings() {
   const [authorizedProfiles, setAuthorizedProfiles] = useState<AuthorizedProfile[]>(fallbackAuthorizedProfiles);
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSetting[]>(fallbackRuntimeSettings);
@@ -61,6 +70,9 @@ export function Settings() {
   const [trainingMessage, setTrainingMessage] = useState('');
   const [trainingError, setTrainingError] = useState('');
   const [trainingInputMode, setTrainingInputMode] = useState<'upload' | 'camera'>('upload');
+  const [trainingCameraSource, setTrainingCameraSource] = useState<'device' | 'system'>('device');
+  const [trainingSystemCameraNode, setTrainingSystemCameraNode] = useState<'cam_indoor' | 'cam_door'>('cam_indoor');
+  const [systemPreviewTick, setSystemPreviewTick] = useState(() => Date.now());
   const [isCameraStarting, setIsCameraStarting] = useState(false);
   const [isCameraLive, setIsCameraLive] = useState(false);
   const [isCapturingSample, setIsCapturingSample] = useState(false);
@@ -92,24 +104,34 @@ export function Settings() {
   };
 
   const startCameraStream = async () => {
+    if (trainingCameraSource !== 'device') {
+      return;
+    }
     if (cameraStreamRef.current) {
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia) {
-      setTrainingError('This browser does not support camera capture. Use image upload instead.');
+      setTrainingError(
+        'Device camera capture is unavailable in this browser context. Use System Camera Feed or Upload Images.',
+      );
       return;
     }
     setIsCameraStarting(true);
     setTrainingError('');
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'user',
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-        },
-        audio: false,
-      });
+      let stream: MediaStream | null = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+          },
+          audio: false,
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      }
       cameraStreamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -118,7 +140,7 @@ export function Settings() {
       setIsCameraLive(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Camera access denied or unavailable.';
-      setTrainingError(`Unable to start camera: ${message}`);
+      setTrainingError(`Unable to start device camera: ${message}. Try System Camera Feed capture.`);
       stopCameraStream();
     } finally {
       setIsCameraStarting(false);
@@ -141,7 +163,7 @@ export function Settings() {
     return canvas.toDataURL('image/jpeg', 0.92);
   };
 
-  const handleCaptureFromCamera = async () => {
+  const handleCaptureFromDeviceCamera = async () => {
     const cleanName = newUserName.trim();
     if (!cleanName) {
       setTrainingError('Enter the user name before capturing samples.');
@@ -174,6 +196,68 @@ export function Settings() {
       setIsCapturingSample(false);
     }
   };
+
+  const handleCaptureFromSystemCamera = async () => {
+    const cleanName = newUserName.trim();
+    if (!cleanName) {
+      setTrainingError('Enter the user name before capturing samples.');
+      return;
+    }
+
+    setIsCapturingSample(true);
+    setTrainingError('');
+    setTrainingMessage('');
+    setTrainingComplete(false);
+    try {
+      const response = await fetch(
+        `/camera/frame/${trainingSystemCameraNode}?capture_tick=${Date.now()}`,
+        {
+          method: 'GET',
+          cache: 'no-store',
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`camera frame unavailable (${response.status})`);
+      }
+      const frameBlob = await response.blob();
+      const imageData = await readBlobAsDataUrl(frameBlob);
+      const status = await captureFaceTrainingSample(cleanName, imageData);
+      setTrainingStatus(status);
+      setCapturedSamples((previous) => previous + 1);
+      setTrainingMessage(`Captured sample accepted. Current total: ${status.count}.`);
+      setSystemPreviewTick(Date.now());
+    } catch {
+      setTrainingError('Unable to capture from system camera feed. Ensure the selected camera feed is online.');
+    } finally {
+      setIsCapturingSample(false);
+    }
+  };
+
+  const handleCaptureSample = async () => {
+    if (trainingCameraSource === 'system') {
+      await handleCaptureFromSystemCamera();
+      return;
+    }
+    await handleCaptureFromDeviceCamera();
+  };
+
+  useEffect(() => {
+    if (trainingInputMode !== 'camera' || trainingCameraSource !== 'system') {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      setSystemPreviewTick(Date.now());
+    }, 1000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [trainingInputMode, trainingCameraSource]);
+
+  useEffect(() => {
+    if (trainingInputMode !== 'camera' || trainingCameraSource !== 'device') {
+      stopCameraStream();
+    }
+  }, [trainingInputMode, trainingCameraSource]);
 
   const loadSettings = async () => {
     try {
@@ -606,39 +690,113 @@ export function Settings() {
               </>
             ) : (
               <div className="border-2 border-dashed border-gray-300 rounded-lg p-4">
-                <div className="relative aspect-video bg-gray-900 rounded-lg overflow-hidden mb-3 flex items-center justify-center">
-                  <video
-                    ref={videoRef}
-                    className={`w-full h-full object-cover ${isCameraLive ? '' : 'hidden'}`}
-                    muted
-                    playsInline
-                  />
-                  {!isCameraLive && (
-                    <div className="text-center text-gray-300 px-4">
-                      <Camera className="w-10 h-10 mx-auto mb-2 text-gray-500" />
-                      <p className="text-sm">Start camera to preview and capture face samples.</p>
+                <div className="mb-3 flex flex-wrap items-center gap-2 justify-center">
+                  <button
+                    onClick={() => {
+                      setTrainingCameraSource('device');
+                      setTrainingError('');
+                    }}
+                    className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
+                      trainingCameraSource === 'device'
+                        ? 'bg-white text-blue-700 border border-blue-200'
+                        : 'text-gray-600 bg-gray-100 hover:text-gray-900'
+                    }`}
+                  >
+                    Device Camera
+                  </button>
+                  <button
+                    onClick={() => {
+                      setTrainingCameraSource('system');
+                      setTrainingError('');
+                    }}
+                    className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
+                      trainingCameraSource === 'system'
+                        ? 'bg-white text-blue-700 border border-blue-200'
+                        : 'text-gray-600 bg-gray-100 hover:text-gray-900'
+                    }`}
+                  >
+                    System Camera Feed
+                  </button>
+                </div>
+
+                {trainingCameraSource === 'device' ? (
+                  <>
+                    <div className="relative aspect-video bg-gray-900 rounded-lg overflow-hidden mb-3 flex items-center justify-center">
+                      <video
+                        ref={videoRef}
+                        className={`w-full h-full object-cover ${isCameraLive ? '' : 'hidden'}`}
+                        muted
+                        playsInline
+                      />
+                      {!isCameraLive && (
+                        <div className="text-center text-gray-300 px-4">
+                          <Camera className="w-10 h-10 mx-auto mb-2 text-gray-500" />
+                          <p className="text-sm">Start camera to preview and capture face samples.</p>
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-                <div className="flex flex-wrap gap-3 justify-center">
-                  <button
-                    onClick={() => void startCameraStream()}
-                    disabled={isCameraStarting || isCameraLive}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
-                  >
-                    {isCameraStarting ? 'Starting Camera...' : isCameraLive ? 'Camera Ready' : 'Start Camera'}
-                  </button>
-                  <button
-                    onClick={stopCameraStream}
-                    disabled={!isCameraLive || isCameraStarting || isCapturingSample}
-                    className="px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors disabled:text-gray-400"
-                  >
-                    Stop Camera
-                  </button>
-                </div>
-                <p className="text-xs text-gray-600 text-center mt-3">
-                  If camera permission is blocked by browser security, use Upload Images mode.
-                </p>
+                    <div className="flex flex-wrap gap-3 justify-center">
+                      <button
+                        onClick={() => void startCameraStream()}
+                        disabled={isCameraStarting || isCameraLive}
+                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+                      >
+                        {isCameraStarting ? 'Starting Camera...' : isCameraLive ? 'Camera Ready' : 'Start Camera'}
+                      </button>
+                      <button
+                        onClick={stopCameraStream}
+                        disabled={!isCameraLive || isCameraStarting || isCapturingSample}
+                        className="px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors disabled:text-gray-400"
+                      >
+                        Stop Camera
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-600 text-center mt-3">
+                      If browser permission is blocked, switch to System Camera Feed.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="mb-3 flex items-center justify-center gap-2">
+                      <label className="text-xs text-gray-700">Feed</label>
+                      <select
+                        value={trainingSystemCameraNode}
+                        onChange={(event) => {
+                          setTrainingSystemCameraNode(event.target.value as 'cam_indoor' | 'cam_door');
+                          setSystemPreviewTick(Date.now());
+                        }}
+                        className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      >
+                        <option value="cam_indoor">cam_indoor</option>
+                        <option value="cam_door">cam_door</option>
+                      </select>
+                    </div>
+                    <div className="relative aspect-video bg-gray-900 rounded-lg overflow-hidden mb-3 flex items-center justify-center">
+                      <img
+                        src={`/camera/frame/${trainingSystemCameraNode}?sample_tick=${systemPreviewTick}`}
+                        alt={`${trainingSystemCameraNode} training preview`}
+                        className="w-full h-full object-cover"
+                        onError={() => {
+                          setTrainingError('Selected system camera feed is unavailable.');
+                        }}
+                      />
+                    </div>
+                    <div className="flex flex-wrap gap-3 justify-center">
+                      <button
+                        onClick={() => {
+                          setSystemPreviewTick(Date.now());
+                          setTrainingError('');
+                        }}
+                        className="px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                      >
+                        Refresh Preview
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-600 text-center mt-3">
+                      Uses your backend live feed. No browser camera permission required.
+                    </p>
+                  </>
+                )}
               </div>
             )}
 
@@ -679,11 +837,20 @@ export function Settings() {
                 </button>
               ) : (
                 <button
-                  onClick={() => void handleCaptureFromCamera()}
-                  disabled={!isCameraLive || isCameraStarting || isCapturingSample || isTraining}
+                  onClick={() => void handleCaptureSample()}
+                  disabled={
+                    isCameraStarting ||
+                    isCapturingSample ||
+                    isTraining ||
+                    (trainingCameraSource === 'device' && !isCameraLive)
+                  }
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
                 >
-                  {isCapturingSample ? 'Capturing...' : 'Capture Sample'}
+                  {isCapturingSample
+                    ? 'Capturing...'
+                    : trainingCameraSource === 'system'
+                      ? 'Capture From Feed'
+                      : 'Capture Sample'}
                 </button>
               )}
               <button

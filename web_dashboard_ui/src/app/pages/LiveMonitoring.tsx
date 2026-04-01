@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Camera, Maximize2 } from 'lucide-react';
+import { Camera, Maximize2, X } from 'lucide-react';
 import { StatusBadge } from '../components/StatusBadge';
 import { fetchLiveEvents, fetchLiveNodes, sendCameraControl } from '../data/liveApi';
 import {
@@ -37,11 +37,22 @@ export function LiveMonitoring() {
   const [detectionPipelines, setDetectionPipelines] = useState<DetectionPipeline[]>(
     fallbackDetectionPipelines,
   );
+  const [frameRefreshTick, setFrameRefreshTick] = useState(() => Date.now());
+  const [faceDebugOverlay, setFaceDebugOverlay] = useState(true);
+  const [expandedFeed, setExpandedFeed] = useState<
+    { location: Room; nodeId: string; streamPath?: string } | null
+  >(null);
   const [flashStateByNode, setFlashStateByNode] = useState<Record<string, boolean>>({});
   const [controlPendingByNode, setControlPendingByNode] = useState<Record<string, boolean>>({});
   const [controlFeedbackByNode, setControlFeedbackByNode] = useState<Record<string, string>>({});
   const onlineFeedCount = cameraFeeds.filter((feed) => feed.status === 'online').length;
   const offlineFeedCount = cameraFeeds.filter((feed) => feed.status !== 'online').length;
+  const needsFramePolling = useMemo(() => {
+    if ((expandedFeed?.streamPath || '').includes('/camera/frame/')) {
+      return true;
+    }
+    return cameraFeeds.some((feed) => (feed.streamPath || '').includes('/camera/frame/'));
+  }, [cameraFeeds, expandedFeed]);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,6 +84,18 @@ export function LiveMonitoring() {
       window.clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    if (!needsFramePolling) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setFrameRefreshTick(Date.now());
+    }, 800);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [needsFramePolling]);
 
   const formatTime = (timestamp: string) => {
     const date = new Date(timestamp);
@@ -147,7 +170,7 @@ export function LiveMonitoring() {
     };
   }, []);
 
-  const toggleFullscreen = async (target: HTMLElement) => {
+  const toggleFullscreen = async (target: HTMLElement): Promise<boolean> => {
     const fsDoc = document as FullscreenDocument;
     const activeFsElement =
       fsDoc.fullscreenElement || fsDoc.webkitFullscreenElement || fsDoc.msFullscreenElement || null;
@@ -155,17 +178,17 @@ export function LiveMonitoring() {
     if (activeFsElement === target) {
       if (fsDoc.exitFullscreen) {
         await fsDoc.exitFullscreen();
-        return;
+        return true;
       }
       if (fsDoc.webkitExitFullscreen) {
         await fsDoc.webkitExitFullscreen();
-        return;
+        return true;
       }
       if (fsDoc.msExitFullscreen) {
         await fsDoc.msExitFullscreen();
       }
       unlockOrientationIfPossible();
-      return;
+      return true;
     }
 
     if (activeFsElement && fsDoc.exitFullscreen) {
@@ -179,8 +202,11 @@ export function LiveMonitoring() {
       await fsTarget.webkitRequestFullscreen();
     } else if (fsTarget.msRequestFullscreen) {
       await fsTarget.msRequestFullscreen();
+    } else {
+      return false;
     }
     await lockLandscapeIfPossible();
+    return true;
   };
 
   const handleLightToggle = async (nodeId: string, turnOn: boolean) => {
@@ -200,6 +226,19 @@ export function LiveMonitoring() {
     } finally {
       setControlPendingByNode((prev) => ({ ...prev, [nodeId]: false }));
     }
+  };
+
+  const buildCameraSrc = (path?: string) => {
+    if (!path) {
+      return '';
+    }
+    const separator = path.includes('?') ? '&' : '?';
+    const isStream = path.includes('/camera/stream/');
+    if (isStream) {
+      return faceDebugOverlay ? `${path}${separator}face_debug=1` : path;
+    }
+    const debugPart = faceDebugOverlay ? '&face_debug=1' : '';
+    return `${path}${separator}frame_tick=${frameRefreshTick}${debugPart}`;
   };
 
   const CameraPanel = ({
@@ -225,7 +264,7 @@ export function LiveMonitoring() {
 
     const hasFreshFace = Boolean(latestFaceEvent && isFreshEvent(latestFaceEvent.timestamp));
     const faceLabel = hasFreshFace
-      ? `Face: ${latestFaceEvent?.eventCode === 'UNKNOWN' ? 'UNKNOWN' : 'AUTHORIZED'}`
+      ? `Face: ${latestFaceEvent?.eventCode === 'UNKNOWN' ? 'NON-AUTHORIZED' : 'AUTHORIZED'}`
       : 'Face: IDLE';
     const faceSeverity: 'warning' | 'online' | 'info' = hasFreshFace
       ? (latestFaceEvent?.eventCode === 'UNKNOWN' ? 'warning' : 'online')
@@ -234,6 +273,7 @@ export function LiveMonitoring() {
     const hasFreshFlame = Boolean(latestFlameEvent && isFreshEvent(latestFlameEvent.timestamp));
     const flameLabel = hasFreshFlame ? 'Flame: DETECTED' : 'Flame: IDLE';
     const flameSeverity: 'warning' | 'info' = hasFreshFlame ? 'warning' : 'info';
+    const frameSrc = buildCameraSrc(streamPath);
 
     return (
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
@@ -241,9 +281,9 @@ export function LiveMonitoring() {
           className="relative bg-gray-900 aspect-video flex items-center justify-center"
           data-camera-frame="true"
         >
-          {streamPath && (
+          {frameSrc && (
             <img
-              src={streamPath}
+              src={frameSrc}
               alt={`${location} live feed`}
               className="absolute inset-0 h-full w-full object-cover"
             />
@@ -267,7 +307,18 @@ export function LiveMonitoring() {
             onClick={(event) => {
               const frame = event.currentTarget.closest('[data-camera-frame="true"]');
               if (frame instanceof HTMLElement) {
-                void toggleFullscreen(frame);
+                void (async () => {
+                  try {
+                    const opened = await toggleFullscreen(frame);
+                    if (!opened) {
+                      setExpandedFeed({ location, nodeId, streamPath });
+                    }
+                  } catch {
+                    setExpandedFeed({ location, nodeId, streamPath });
+                  }
+                })();
+              } else {
+                setExpandedFeed({ location, nodeId, streamPath });
               }
             }}
             className="absolute bottom-3 right-3 p-2 bg-white/90 hover:bg-white rounded-lg transition-colors"
@@ -334,7 +385,11 @@ export function LiveMonitoring() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-sm font-medium text-gray-900 break-words">{event.title}</p>
-                        <StatusBadge severity={event.severity} label={event.eventCode} size="sm" />
+                        <StatusBadge
+                          severity={event.severity}
+                          label={event.eventCode === 'UNKNOWN' ? 'NON-AUTHORIZED' : event.eventCode}
+                          size="sm"
+                        />
                       </div>
                       <p className="text-xs text-gray-600 mt-0.5">{formatTime(event.timestamp)}</p>
                     </div>
@@ -356,6 +411,8 @@ export function LiveMonitoring() {
     return 'offline';
   };
 
+  const expandedFrameSrc = buildCameraSrc(expandedFeed?.streamPath);
+
   return (
     <div className="p-3 md:p-8 space-y-5 md:space-y-7">
       <div>
@@ -373,6 +430,18 @@ export function LiveMonitoring() {
           <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-medium text-blue-700">
             Pipelines: {detectionPipelines.length}
           </span>
+          <button
+            onClick={() => {
+              setFaceDebugOverlay((prev) => !prev);
+            }}
+            className={`inline-flex items-center rounded-full border px-2.5 py-1 font-medium transition-colors ${
+              faceDebugOverlay
+                ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            Face Overlay: {faceDebugOverlay ? 'ON' : 'OFF'}
+          </button>
         </div>
       </div>
 
@@ -416,6 +485,34 @@ export function LiveMonitoring() {
           <p className="text-sm text-gray-600">No detection pipelines reported by backend.</p>
         )}
       </div>
+
+      {expandedFeed && (
+        <div className="fixed inset-0 z-50 bg-black/90 p-3 md:p-6 flex flex-col">
+          <div className="flex items-center justify-between text-white mb-3">
+            <div>
+              <p className="text-sm text-white/80">Live Preview</p>
+              <p className="font-semibold">{expandedFeed.location} - {expandedFeed.nodeId}</p>
+            </div>
+            <button
+              onClick={() => {
+                setExpandedFeed(null);
+              }}
+              className="p-2 rounded-lg bg-white/10 hover:bg-white/20 transition-colors"
+              aria-label="Close expanded preview"
+              title="Close"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          <div className="flex-1 rounded-lg overflow-hidden bg-black border border-white/15 flex items-center justify-center">
+            {expandedFrameSrc ? (
+              <img src={expandedFrameSrc} alt="Expanded camera preview" className="w-full h-full object-contain" />
+            ) : (
+              <p className="text-sm text-white/70">Camera stream unavailable</p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

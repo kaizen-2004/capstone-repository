@@ -20,7 +20,14 @@ class TelegramNotifier:
         self.bot_token = settings.telegram_bot_token.strip()
         self.chat_id = settings.telegram_chat_id.strip()
         self._endpoint = (
-            f"https://api.telegram.org/bot{self.bot_token}/sendMessage" if self.bot_token else ""
+            f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            if self.bot_token
+            else ""
+        )
+        self._photo_endpoint = (
+            f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
+            if self.bot_token
+            else ""
         )
 
     @property
@@ -50,13 +57,21 @@ class TelegramNotifier:
         ]
 
         if preferred:
-            lines.append(f"Preferred: <a href=\"{html.escape(preferred)}\">Open mobile dashboard</a>")
+            lines.append(
+                f'Preferred: <a href="{html.escape(preferred)}">Open mobile dashboard</a>'
+            )
         if tailscale:
-            lines.append(f"Tailscale: <a href=\"{html.escape(tailscale)}\">{html.escape(tailscale)}</a>")
+            lines.append(
+                f'Tailscale: <a href="{html.escape(tailscale)}">{html.escape(tailscale)}</a>'
+            )
         if mdns_url:
-            lines.append(f"mDNS (LAN): <a href=\"{html.escape(mdns_url)}\">{html.escape(mdns_url)}</a>")
+            lines.append(
+                f'mDNS (LAN): <a href="{html.escape(mdns_url)}">{html.escape(mdns_url)}</a>'
+            )
         if lan_url:
-            lines.append(f"LAN fallback: <a href=\"{html.escape(lan_url)}\">{html.escape(lan_url)}</a>")
+            lines.append(
+                f'LAN fallback: <a href="{html.escape(lan_url)}">{html.escape(lan_url)}</a>'
+            )
 
         lines.extend(
             [
@@ -67,7 +82,9 @@ class TelegramNotifier:
         )
         return "\n".join(lines)
 
-    def format_alert_fallback_message(self, alert: dict[str, Any], reason: str, links: dict[str, Any]) -> str:
+    def format_alert_fallback_message(
+        self, alert: dict[str, Any], reason: str, links: dict[str, Any]
+    ) -> str:
         severity = _safe_text(alert.get("severity"), "info").upper()
         title = _safe_text(alert.get("title"), _safe_text(alert.get("type"), "Alert"))
         location = _safe_text(alert.get("location"), "System")
@@ -82,12 +99,65 @@ class TelegramNotifier:
         ]
 
         if preferred:
-            lines.append(f"Open dashboard: <a href=\"{html.escape(preferred)}\">{html.escape(preferred)}</a>")
+            lines.append(
+                f'Open dashboard: <a href="{html.escape(preferred)}">{html.escape(preferred)}</a>'
+            )
 
-        lines.append(f"Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')}")
+        lines.append(
+            f"Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')}"
+        )
         return "\n".join(lines)
 
-    def send_message(self, text: str, disable_web_page_preview: bool = True) -> tuple[bool, str]:
+    def format_face_snapshot_caption(self, alert: dict[str, Any]) -> str:
+        details = alert.get("details") if isinstance(alert.get("details"), dict) else {}
+        face_details = (
+            details.get("face") if isinstance(details.get("face"), dict) else {}
+        )
+        classification = _safe_text(face_details.get("classification")).upper()
+        if not classification:
+            result = _safe_text(face_details.get("result")).lower()
+            classification = (
+                "AUTHORIZED" if result == "authorized" else "NON-AUTHORIZED"
+            )
+
+        severity = _safe_text(alert.get("severity"), "info").upper()
+        location = _safe_text(alert.get("location"), "System")
+        source_node = _safe_text(alert.get("source_node"), "system")
+        ts = _safe_text(alert.get("ts"))
+
+        if ts:
+            normalized = ts.replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(normalized)
+            except ValueError:
+                timestamp_label = ts
+            else:
+                timestamp_label = dt.astimezone(timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M:%SZ"
+                )
+        else:
+            timestamp_label = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+        lines = [
+            f"<b>[{html.escape(severity)}] {html.escape(classification)} Face Detection</b>",
+            f"Location: {html.escape(location)}",
+            f"Source Node: <code>{html.escape(source_node)}</code>",
+            f"Timestamp: {html.escape(timestamp_label)}",
+        ]
+
+        confidence = face_details.get("confidence")
+        try:
+            confidence_value = float(confidence)
+        except Exception:
+            confidence_value = None
+        if confidence_value is not None:
+            lines.append(f"Confidence: {confidence_value:.1f}%")
+
+        return "\n".join(lines)
+
+    def send_message(
+        self, text: str, disable_web_page_preview: bool = True
+    ) -> tuple[bool, str]:
         if not self.enabled:
             return False, "Telegram bot token/chat id not configured."
 
@@ -114,3 +184,42 @@ class TelegramNotifier:
             return True, "Delivered through Telegram bot API."
         except Exception as exc:
             return False, f"Telegram delivery error: {exc}"
+
+    def send_photo(self, photo_path: str, caption: str = "") -> tuple[bool, str]:
+        if not self.enabled:
+            return False, "Telegram bot token/chat id not configured."
+        if not self._photo_endpoint:
+            return False, "Telegram sendPhoto endpoint unavailable."
+
+        try:
+            with open(photo_path, "rb") as file_handle:
+                with httpx.Client(timeout=12.0) as client:
+                    response = client.post(
+                        self._photo_endpoint,
+                        data={
+                            "chat_id": self.chat_id,
+                            "caption": caption,
+                            "parse_mode": "HTML",
+                        },
+                        files={
+                            "photo": (
+                                photo_path.rsplit("/", 1)[-1] or "snapshot.jpg",
+                                file_handle,
+                                "image/jpeg",
+                            )
+                        },
+                    )
+
+            if response.status_code >= 400:
+                body = response.text.strip()
+                return False, f"Telegram API HTTP {response.status_code}: {body[:280]}"
+
+            payload = response.json() if response.content else {}
+            if not bool(payload.get("ok")):
+                return False, f"Telegram API returned ok=false: {payload}"
+
+            return True, "Photo delivered through Telegram bot API."
+        except FileNotFoundError:
+            return False, f"Photo file not found: {photo_path}"
+        except Exception as exc:
+            return False, f"Telegram photo delivery error: {exc}"
