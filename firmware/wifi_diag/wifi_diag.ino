@@ -7,7 +7,7 @@
 
   Edit these before upload.
 */
-const char* WIFI_SSID = "condo2026";
+const char* WIFI_SSID = "test";
 const char* WIFI_PASSWORD = "condo2026";
 
 // Optional MAC override test. Keep disabled unless needed.

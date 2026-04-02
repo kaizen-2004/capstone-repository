@@ -32,6 +32,9 @@ class FaceService:
         self._cascade = cv2.CascadeClassifier(
             str(Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml")
         )
+        self._eye_cascade = cv2.CascadeClassifier(
+            str(Path(cv2.data.haarcascades) / "haarcascade_eye_tree_eyeglasses.xml")
+        )
         self._recognizer: Any | None = None
         self._label_to_name: dict[int, str] = {}
         self._load_model()
@@ -59,8 +62,33 @@ class FaceService:
         )
         if len(faces) == 0:
             return None
-        x, y, w, h = max(faces, key=lambda item: item[2] * item[3])
-        return int(x), int(y), int(w), int(h)
+
+        def _area(item: Any) -> int:
+            return int(item[2]) * int(item[3])
+
+        sorted_faces = sorted(faces, key=_area, reverse=True)
+        for item in sorted_faces:
+            x, y, w, h = [int(v) for v in item]
+            if self._has_eye_pattern(gray, (x, y, w, h)):
+                return x, y, w, h
+
+        x, y, w, h = [int(v) for v in sorted_faces[0]]
+        return x, y, w, h
+
+    def _has_eye_pattern(
+        self, gray: np.ndarray, rect: tuple[int, int, int, int]
+    ) -> bool:
+        if self._eye_cascade.empty():
+            return True
+        x, y, w, h = rect
+        roi = gray[y : y + h, x : x + w]
+        eyes = self._eye_cascade.detectMultiScale(
+            roi,
+            scaleFactor=1.1,
+            minNeighbors=3,
+            minSize=(12, 12),
+        )
+        return len(eyes) >= 1
 
     def _prepare_face_roi(
         self, gray: np.ndarray, rect: tuple[int, int, int, int]
@@ -215,9 +243,10 @@ class FaceService:
         if rect is None:
             return {
                 "result": "unknown",
-                "classification": "NON-AUTHORIZED",
+                "classification": "NO-FACE",
                 "confidence": 0.0,
-                "reason": "No face detected",
+                "face_present": False,
+                "reason": "no_face_detected",
             }
 
         try:
@@ -227,6 +256,7 @@ class FaceService:
                 "result": "unknown",
                 "classification": "NON-AUTHORIZED",
                 "confidence": 0.0,
+                "face_present": True,
                 "reason": str(exc),
                 "bbox": list(rect),
             }
@@ -236,6 +266,7 @@ class FaceService:
                 "result": "unknown",
                 "classification": "NON-AUTHORIZED",
                 "confidence": 0.0,
+                "face_present": True,
                 "reason": "model_not_trained",
                 "quality": quality,
                 "bbox": list(rect),
@@ -251,6 +282,7 @@ class FaceService:
             "result": "authorized" if authorized else "unknown",
             "classification": "AUTHORIZED" if authorized else "NON-AUTHORIZED",
             "confidence": confidence,
+            "face_present": True,
             "quality": quality,
             "distance": float(distance),
             "threshold": effective_threshold,

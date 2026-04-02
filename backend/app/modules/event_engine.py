@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Any
 
 from ..db import store
@@ -82,6 +84,8 @@ EVENT_META: dict[str, dict[str, str]] = {
     },
 }
 
+INTRUDER_TRIGGER_CODES = {"DOOR_FORCE", "ENTRY_MOTION", "PERSON_DETECTED", "UNKNOWN"}
+
 
 class EventEngine:
     def __init__(
@@ -90,11 +94,17 @@ class EventEngine:
         face_service: FaceService,
         fire_service: FireService,
         notification_dispatcher: NotificationDispatcher | None = None,
+        intruder_event_cooldown_seconds: int = 20,
     ) -> None:
         self.camera_manager = camera_manager
         self.face_service = face_service
         self.fire_service = fire_service
         self.notification_dispatcher = notification_dispatcher
+        self.intruder_event_cooldown_seconds = max(
+            0, int(intruder_event_cooldown_seconds)
+        )
+        self._intruder_alert_lock = threading.Lock()
+        self._intruder_alert_last_ts_by_node: dict[str, float] = {}
 
     def _node_meta(self, node_id: str) -> dict[str, str]:
         return NODE_DEFAULTS.get(
@@ -152,6 +162,23 @@ class EventEngine:
         description = str(
             payload.get("description") or details.get("description") or meta["title"]
         )
+
+        if event_code in INTRUDER_TRIGGER_CODES:
+            suppressed, remaining_seconds = self._should_suppress_intruder_event(
+                node_id
+            )
+            if suppressed:
+                return {
+                    "event_id": None,
+                    "event_code": event_code,
+                    "classification": "intruder",
+                    "alert_id": None,
+                    "suppressed": True,
+                    "suppression_reason": "intruder_cooldown",
+                    "cooldown_seconds": self.intruder_event_cooldown_seconds,
+                    "cooldown_remaining_seconds": round(remaining_seconds, 1),
+                }
+
         event_id = store.create_event(
             event_type=meta["type"],
             event_code=event_code,
@@ -169,12 +196,13 @@ class EventEngine:
             "event_code": event_code,
             "classification": meta["type"],
             "alert_id": None,
+            "suppressed": False,
         }
 
         if event_code == "SMOKE_HIGH":
             alert_id = self._handle_smoke_trigger(event_id, node_id, location, details)
             classification["classification"] = "fire"
-        elif event_code in {"DOOR_FORCE", "ENTRY_MOTION", "PERSON_DETECTED", "UNKNOWN"}:
+        elif event_code in INTRUDER_TRIGGER_CODES:
             alert_id = self._handle_intruder_trigger(
                 event_id, node_id, location, details
             )
@@ -204,6 +232,21 @@ class EventEngine:
 
         classification["alert_id"] = alert_id
         return classification
+
+    def _should_suppress_intruder_event(self, node_id: str) -> tuple[bool, float]:
+        cooldown_seconds = float(self.intruder_event_cooldown_seconds)
+        if cooldown_seconds <= 0.0:
+            return False, 0.0
+
+        now_ts = time.time()
+        with self._intruder_alert_lock:
+            last_ts = self._intruder_alert_last_ts_by_node.get(node_id)
+            if last_ts is not None:
+                elapsed = now_ts - last_ts
+                if elapsed < cooldown_seconds:
+                    return True, max(0.0, cooldown_seconds - elapsed)
+            self._intruder_alert_last_ts_by_node[node_id] = now_ts
+        return False, 0.0
 
     def _handle_smoke_trigger(
         self, event_id: int, node_id: str, location: str, details: dict[str, Any]
@@ -255,8 +298,9 @@ class EventEngine:
 
         face_result = {
             "result": "unknown",
-            "classification": "NON-AUTHORIZED",
+            "classification": "NO-FACE",
             "confidence": 0.0,
+            "face_present": False,
             "reason": "no_frame",
         }
         snapshot_path = ""
@@ -292,6 +336,20 @@ class EventEngine:
                 details={"face": face_result, **details},
                 requires_ack=False,
                 dispatch_notification=True,
+            )
+
+        if not bool(face_result.get("face_present")):
+            return self._create_alert(
+                event_id,
+                alert_type="INTRUDER",
+                severity="critical",
+                title="Entry Anomaly Alert",
+                description="Entry anomaly detected; no face confirmation available",
+                source_node=node_id,
+                location=location or ROOM_DOOR,
+                snapshot_path=snapshot_path,
+                details={"face": face_result, **details},
+                requires_ack=True,
             )
 
         return self._create_alert(

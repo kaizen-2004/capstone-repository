@@ -81,6 +81,7 @@ Camera source env vars:
 - `AUTHORIZED_PRESENCE_COOLDOWN_SECONDS` (default `20`; minimum seconds between repeated authorized-presence logs)
 - `UNKNOWN_PRESENCE_LOGGING_ENABLED` (default `false`; when `true`, logs unknown-person re-entry events and captures evidence snapshots)
 - `UNKNOWN_PRESENCE_COOLDOWN_SECONDS` (default `20`; minimum seconds between repeated unknown-person re-entry logs)
+- `INTRUDER_EVENT_COOLDOWN_SECONDS` (default `20`; suppresses repeated sensor intruder triggers per node during cooldown)
 
 Note: authorized/unknown presence scans share `AUTHORIZED_PRESENCE_SCAN_SECONDS` as the polling interval.
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Camera, Maximize2, X } from 'lucide-react';
 import { StatusBadge } from '../components/StatusBadge';
 import { fetchLiveEvents, fetchLiveNodes, sendCameraControl } from '../data/liveApi';
@@ -41,6 +41,9 @@ export function LiveMonitoring() {
   const [faceDebugOverlay, setFaceDebugOverlay] = useState(true);
   const [expandedFeed, setExpandedFeed] = useState<
     { location: Room; nodeId: string; streamPath?: string } | null
+  >(null);
+  const pendingNativeFullscreenRef = useRef<
+    { location: Room; nodeId: string; streamPath?: string; requestedAt: number } | null
   >(null);
   const [flashStateByNode, setFlashStateByNode] = useState<Record<string, boolean>>({});
   const [controlPendingByNode, setControlPendingByNode] = useState<Record<string, boolean>>({});
@@ -157,6 +160,15 @@ export function LiveMonitoring() {
         fsDoc.fullscreenElement || fsDoc.webkitFullscreenElement || fsDoc.msFullscreenElement || null;
       if (!currentFullscreen) {
         unlockOrientationIfPossible();
+        const pending = pendingNativeFullscreenRef.current;
+        if (pending && Date.now() - pending.requestedAt <= 3500) {
+          setExpandedFeed({
+            location: pending.location,
+            nodeId: pending.nodeId,
+            streamPath: pending.streamPath,
+          });
+        }
+        pendingNativeFullscreenRef.current = null;
       }
     };
 
@@ -205,6 +217,13 @@ export function LiveMonitoring() {
     } else {
       return false;
     }
+
+    const enteredFullscreen =
+      (fsDoc.fullscreenElement || fsDoc.webkitFullscreenElement || fsDoc.msFullscreenElement || null) === target;
+    if (!enteredFullscreen) {
+      return false;
+    }
+
     await lockLandscapeIfPossible();
     return true;
   };
@@ -311,9 +330,40 @@ export function LiveMonitoring() {
                   try {
                     const opened = await toggleFullscreen(frame);
                     if (!opened) {
+                      pendingNativeFullscreenRef.current = null;
                       setExpandedFeed({ location, nodeId, streamPath });
+                      return;
                     }
+
+                    const requestedAt = Date.now();
+                    pendingNativeFullscreenRef.current = {
+                      location,
+                      nodeId,
+                      streamPath,
+                      requestedAt,
+                    };
+                    window.setTimeout(() => {
+                      const pending = pendingNativeFullscreenRef.current;
+                      if (!pending || pending.requestedAt !== requestedAt) {
+                        return;
+                      }
+                      const fsDoc = document as FullscreenDocument;
+                      const currentFullscreen =
+                        fsDoc.fullscreenElement ||
+                        fsDoc.webkitFullscreenElement ||
+                        fsDoc.msFullscreenElement ||
+                        null;
+                      if (!currentFullscreen) {
+                        setExpandedFeed({
+                          location: pending.location,
+                          nodeId: pending.nodeId,
+                          streamPath: pending.streamPath,
+                        });
+                      }
+                      pendingNativeFullscreenRef.current = null;
+                    }, 3500);
                   } catch {
+                    pendingNativeFullscreenRef.current = null;
                     setExpandedFeed({ location, nodeId, streamPath });
                   }
                 })();

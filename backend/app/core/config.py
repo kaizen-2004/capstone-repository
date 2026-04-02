@@ -37,6 +37,7 @@ class Settings:
     authorized_presence_cooldown_seconds: int
     unknown_presence_logging_enabled: bool
     unknown_presence_cooldown_seconds: int
+    intruder_event_cooldown_seconds: int
     lan_base_url: str
     tailscale_base_url: str
     webpush_vapid_public_key: str
@@ -181,7 +182,7 @@ def load_settings() -> Settings:
         camera_processing_fps=_env_int("CAMERA_PROCESSING_FPS", 12, 5, 20),
         face_match_threshold=_env_float("FACE_MATCH_THRESHOLD", 68.0, 40.0, 120.0),
         authorized_presence_logging_enabled=_env_bool(
-            "AUTHORIZED_PRESENCE_LOGGING_ENABLED", False
+            "AUTHORIZED_PRESENCE_LOGGING_ENABLED", True
         ),
         authorized_presence_scan_seconds=_env_int(
             "AUTHORIZED_PRESENCE_SCAN_SECONDS", 2, 1, 30
@@ -190,10 +191,13 @@ def load_settings() -> Settings:
             "AUTHORIZED_PRESENCE_COOLDOWN_SECONDS", 20, 5, 600
         ),
         unknown_presence_logging_enabled=_env_bool(
-            "UNKNOWN_PRESENCE_LOGGING_ENABLED", False
+            "UNKNOWN_PRESENCE_LOGGING_ENABLED", True
         ),
         unknown_presence_cooldown_seconds=_env_int(
             "UNKNOWN_PRESENCE_COOLDOWN_SECONDS", 20, 5, 600
+        ),
+        intruder_event_cooldown_seconds=_env_int(
+            "INTRUDER_EVENT_COOLDOWN_SECONDS", 20, 0, 600
         ),
         lan_base_url=_env_str("LAN_BASE_URL", ""),
         tailscale_base_url=_env_str("TAILSCALE_BASE_URL", ""),

@@ -141,6 +141,11 @@ def _runtime_settings(settings: Settings) -> list[dict[str, str]]:
             "description": "Cooldown before logging another unknown-person re-entry",
         },
         {
+            "key": "INTRUDER_EVENT_COOLDOWN_SECONDS",
+            "value": str(settings.intruder_event_cooldown_seconds),
+            "description": "Minimum seconds between repeated intruder trigger events per node",
+        },
+        {
             "key": "EVENT_RETENTION_DAYS",
             "value": str(settings.event_retention_days),
             "description": "Event retention window",
@@ -413,6 +418,8 @@ def _draw_face_debug_overlay(request: Request, frame: Any) -> None:
             )
         else:
             reason = str(verdict.get("reason") or "No face detected")
+            if reason == "no_face_detected":
+                reason = "No face detected"
             cv2.putText(
                 frame,
                 reason,

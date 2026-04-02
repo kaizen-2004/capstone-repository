@@ -41,6 +41,7 @@ Override using env vars:
 - `AUTHORIZED_PRESENCE_COOLDOWN_SECONDS` (default `20`)
 - `UNKNOWN_PRESENCE_LOGGING_ENABLED` (default `false`; logs unknown-person re-entry with evidence snapshot)
 - `UNKNOWN_PRESENCE_COOLDOWN_SECONDS` (default `20`)
+- `INTRUDER_EVENT_COOLDOWN_SECONDS` (default `20`; suppresses repeated sensor intruder triggers per node)
 
 Note: authorized/unknown presence scans share `AUTHORIZED_PRESENCE_SCAN_SECONDS` as the scan interval.
 

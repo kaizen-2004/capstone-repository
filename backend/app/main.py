@@ -178,6 +178,7 @@ async def lifespan(app: FastAPI):
         face_service=face_service,
         fire_service=fire_service,
         notification_dispatcher=notification_dispatcher,
+        intruder_event_cooldown_seconds=settings.intruder_event_cooldown_seconds,
     )
 
     supervisor = Supervisor(

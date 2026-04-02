@@ -122,6 +122,8 @@ class Supervisor:
         if self.camera_manager is None or self.face_service is None:
             return
 
+        miss_reset_threshold = 1
+
         for camera in self.camera_manager.live_status():
             node_id = str(camera.get("node_id") or "")
             if not node_id:
@@ -134,18 +136,16 @@ class Supervisor:
                     unknown_misses = self._unknown_miss_by_node.get(node_id, 0) + 1
                     self._presence_miss_by_node[node_id] = authorized_misses
                     self._unknown_miss_by_node[node_id] = unknown_misses
-                    if authorized_misses >= 2:
+                    if authorized_misses >= miss_reset_threshold:
                         self._presence_visible_by_node[node_id] = False
                         self._presence_name_by_node[node_id] = ""
-                    if unknown_misses >= 2:
+                    if unknown_misses >= miss_reset_threshold:
                         self._unknown_visible_by_node[node_id] = False
                     continue
 
                 verdict = self.face_service.classify_frame_with_bbox(frame)
                 result = str(verdict.get("result") or "").lower()
-                reason = str(verdict.get("reason") or "")
-                bbox = verdict.get("bbox")
-                has_face_bbox = isinstance(bbox, list) and len(bbox) == 4
+                face_present = bool(verdict.get("face_present"))
                 location = infer_location_from_node(node_id)
 
                 if result == "authorized":
@@ -163,10 +163,8 @@ class Supervisor:
                     )
                     entered_view = not was_visible
 
-                    if (
-                        self.authorized_presence_logging_enabled
-                        and entered_view
-                        and cooldown_ready
+                    if self.authorized_presence_logging_enabled and (
+                        entered_view or cooldown_ready
                     ):
                         snapshot_path = self.camera_manager.save_snapshot(
                             node_id, frame, "authorized_presence"
@@ -216,7 +214,7 @@ class Supervisor:
                     self._presence_name_by_node[node_id] = "authorized"
                     continue
 
-                is_unknown_face = result == "unknown" and has_face_bbox and not reason
+                is_unknown_face = result == "unknown" and face_present
                 if is_unknown_face:
                     self._presence_miss_by_node[node_id] = 0
                     self._presence_visible_by_node[node_id] = False
@@ -232,11 +230,10 @@ class Supervisor:
                     unknown_cooldown_ready = (now_ts - last_unknown_logged_at) >= float(
                         self.unknown_presence_cooldown_seconds
                     )
+                    unknown_entered_view = not was_unknown_visible
 
-                    if (
-                        self.unknown_presence_logging_enabled
-                        and not was_unknown_visible
-                        and unknown_cooldown_ready
+                    if self.unknown_presence_logging_enabled and (
+                        unknown_entered_view or unknown_cooldown_ready
                     ):
                         snapshot_path = self.camera_manager.save_snapshot(
                             node_id, frame, "intruder_unknown_presence"
@@ -289,10 +286,10 @@ class Supervisor:
                 unknown_misses = self._unknown_miss_by_node.get(node_id, 0) + 1
                 self._presence_miss_by_node[node_id] = authorized_misses
                 self._unknown_miss_by_node[node_id] = unknown_misses
-                if authorized_misses >= 2:
+                if authorized_misses >= miss_reset_threshold:
                     self._presence_visible_by_node[node_id] = False
                     self._presence_name_by_node[node_id] = ""
-                if unknown_misses >= 2:
+                if unknown_misses >= miss_reset_threshold:
                     self._unknown_visible_by_node[node_id] = False
             except Exception as exc:
                 store.log("ERROR", f"face presence scan failed for {node_id}: {exc}")
