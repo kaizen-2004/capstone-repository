@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, cast
 
 from ..core.config import Settings
 from ..db import store
@@ -48,9 +48,13 @@ class NotificationDispatcher:
         self.link_resolver = link_resolver
         self.telegram_notifier = telegram_notifier or TelegramNotifier(settings)
         self.access_link_cooldown_seconds = 300
+        self.telegram_snapshot_cooldown_seconds = max(
+            0, int(settings.telegram_snapshot_cooldown_seconds)
+        )
         self._last_access_fingerprint = ""
         self._last_access_sent_at = 0.0
         self._last_access_observed_fingerprint = ""
+        self._last_snapshot_sent_at_by_key: dict[str, float] = {}
 
     @property
     def push_available(self) -> bool:
@@ -275,6 +279,27 @@ class NotificationDispatcher:
         except Exception:
             return None
 
+    def _snapshot_cooldown_key(self, alert: dict[str, Any]) -> str:
+        source_node = str(alert.get("source_node") or "system").strip().lower()
+        alert_type = str(alert.get("type") or "ALERT").strip().upper()
+        return f"{source_node}:{alert_type}"
+
+    def _should_suppress_snapshot(self, alert: dict[str, Any]) -> tuple[bool, float]:
+        cooldown_seconds = float(self.telegram_snapshot_cooldown_seconds)
+        if cooldown_seconds <= 0.0:
+            return False, 0.0
+
+        key = self._snapshot_cooldown_key(alert)
+        now = time.time()
+        last_sent_at = self._last_snapshot_sent_at_by_key.get(key)
+        if last_sent_at is not None:
+            elapsed = now - last_sent_at
+            if elapsed < cooldown_seconds:
+                return True, max(0.0, cooldown_seconds - elapsed)
+
+        self._last_snapshot_sent_at_by_key[key] = now
+        return False, 0.0
+
     def _dispatch_telegram_face_snapshot(self, alert: dict[str, Any]) -> None:
         alert_id = int(alert.get("id") or 0) or None
         details = _safe_json(alert.get("details_json"))
@@ -283,6 +308,16 @@ class NotificationDispatcher:
             "details": details,
         }
         caption = self.telegram_notifier.format_face_snapshot_caption(alert_payload)
+
+        suppressed, remaining_seconds = self._should_suppress_snapshot(alert)
+        if suppressed:
+            store.create_notification_delivery_log(
+                "telegram",
+                "suppressed",
+                f"face_snapshot cooldown_active remaining={remaining_seconds:.1f}s",
+                alert_id=alert_id,
+            )
+            return
 
         if not self.telegram_notifier.enabled:
             store.create_notification_delivery_log(
@@ -399,7 +434,8 @@ class NotificationDispatcher:
                 continue
 
             try:
-                webpush(
+                push_sender = cast(Callable[..., Any], webpush)
+                push_sender(
                     subscription_info=subscription,
                     data=json.dumps(payload, separators=(",", ":")),
                     vapid_private_key=self.vapid_private_key,

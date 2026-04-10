@@ -48,6 +48,7 @@ class Settings:
     telegram_bot_token: str
     telegram_chat_id: str
     telegram_link_notifications_enabled: bool
+    telegram_snapshot_cooldown_seconds: int
     mdns_enabled: bool
     mdns_service_name: str
     mdns_hostname: str
@@ -212,6 +213,9 @@ def load_settings() -> Settings:
         telegram_chat_id=_env_str("TELEGRAM_CHAT_ID", ""),
         telegram_link_notifications_enabled=_env_bool(
             "TELEGRAM_LINK_NOTIFICATIONS_ENABLED", True
+        ),
+        telegram_snapshot_cooldown_seconds=_env_int(
+            "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS", 60, 10, 3600
         ),
         mdns_enabled=_env_bool("MDNS_ENABLED", True),
         mdns_service_name=_env_str("MDNS_SERVICE_NAME", "thesis-monitor"),
