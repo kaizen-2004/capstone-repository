@@ -57,3 +57,6 @@ desktop/src-tauri/target/
 /src.zip
 
 desktop/node_modules/
+opencode.json
+AGENTS.md
+

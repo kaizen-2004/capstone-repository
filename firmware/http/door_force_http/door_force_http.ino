@@ -47,9 +47,60 @@ unsigned long lastReadingMs = 0;
 unsigned long lastWiFiAttemptMs = 0;
 unsigned long lastWiFiBeginMs = 0;
 unsigned long lastRegisterAttemptMs = 0;
+unsigned long lastWiFiStatusLogMs = 0;
 uint8_t wifiConnectAttempts = 0;
 bool wasWiFiConnected = false;
 bool registrationOk = false;
+
+const char* wlStatusText(wl_status_t s) {
+  switch (s) {
+    case WL_IDLE_STATUS: return "IDLE";
+    case WL_NO_SSID_AVAIL: return "NO_SSID";
+    case WL_SCAN_COMPLETED: return "SCAN_DONE";
+    case WL_CONNECTED: return "CONNECTED";
+    case WL_CONNECT_FAILED: return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+    case WL_DISCONNECTED: return "DISCONNECTED";
+    default: return "UNKNOWN";
+  }
+}
+
+const char* reasonText(uint8_t reason) {
+  switch (reason) {
+    case 2: return "AUTH_EXPIRE";
+    case 3: return "AUTH_LEAVE";
+    case 4: return "ASSOC_EXPIRE";
+    case 6: return "NOT_AUTHED";
+    case 7: return "NOT_ASSOCED";
+    case 8: return "ASSOC_LEAVE";
+    case 15: return "4WAY_HANDSHAKE_TIMEOUT";
+    case 201: return "NO_AP_FOUND";
+    case 202: return "AUTH_FAIL";
+    case 205: return "CONNECTION_FAIL";
+    default: return "OTHER";
+  }
+}
+
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.println("[WiFi] associated with AP");
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.printf("[WiFi] got ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.printf(
+        "[WiFi] disconnected reason=%u (%s) status=%s\n",
+        info.wifi_sta_disconnected.reason,
+        reasonText(info.wifi_sta_disconnected.reason),
+        wlStatusText(WiFi.status())
+      );
+      break;
+    default:
+      break;
+  }
+}
 
 String endpoint(const char* path) {
   return String(BACKEND_BASE) + path;
@@ -166,9 +217,14 @@ void sendDoorEvent(float spike, const char* eventCode) {
 
 void setup() {
   Serial.begin(115200);
+  unsigned long serialWaitStartMs = millis();
+  while (!Serial && (uint32_t)(millis() - serialWaitStartMs) < 2000) {
+    delay(10);
+  }
   delay(250);
   Serial.println("\n[BOOT] Door-force HTTP node start");
 
+  WiFi.onEvent(onWiFiEvent);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(false);
@@ -182,6 +238,11 @@ void loop() {
   handleWiFiStateChange();
 
   if (WiFi.status() != WL_CONNECTED) {
+    unsigned long now = millis();
+    if ((uint32_t)(now - lastWiFiStatusLogMs) >= 2000) {
+      Serial.printf("[WiFi] waiting status=%d attempt=%u\n", (int)WiFi.status(), (unsigned)(wifiConnectAttempts + 1));
+      lastWiFiStatusLogMs = now;
+    }
     delay(50);
     return;
   }
