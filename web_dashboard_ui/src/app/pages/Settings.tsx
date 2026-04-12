@@ -26,6 +26,7 @@ import {
   sendTelegramAccessLink,
   setMobileRemoteEnabled,
   trainFaceModel,
+  updateRuntimeSetting,
   type FaceTrainingStatus,
   type MdnsStatusPayload,
   type MobileRemoteStatus,
@@ -88,6 +89,9 @@ export function Settings() {
   const [mdnsStatus, setMdnsStatus] = useState<MdnsStatusPayload | null>(null);
   const [remoteLinksMessage, setRemoteLinksMessage] = useState('');
   const [isSendingTelegramLink, setIsSendingTelegramLink] = useState(false);
+  const [telegramSnapshotCooldown, setTelegramSnapshotCooldown] = useState('60');
+  const [telegramSnapshotSaving, setTelegramSnapshotSaving] = useState(false);
+  const [telegramSnapshotMessage, setTelegramSnapshotMessage] = useState('');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
 
@@ -269,6 +273,12 @@ export function Settings() {
       ]);
       setAuthorizedProfiles(live.authorizedProfiles);
       setRuntimeSettings(live.runtimeSettings);
+      const snapshotCooldown = live.runtimeSettings.find(
+        (setting) => setting.key === 'TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS',
+      );
+      if (snapshotCooldown) {
+        setTelegramSnapshotCooldown(snapshotCooldown.value);
+      }
       setMobileRemoteStatus(remoteStatus);
       setRemoteLinks(links);
       setMdnsStatus(mdns);
@@ -293,6 +303,12 @@ export function Settings() {
         }
         setAuthorizedProfiles(live.authorizedProfiles);
         setRuntimeSettings(live.runtimeSettings);
+        const snapshotCooldown = live.runtimeSettings.find(
+          (setting) => setting.key === 'TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS',
+        );
+        if (snapshotCooldown) {
+          setTelegramSnapshotCooldown(snapshotCooldown.value);
+        }
         setMobileRemoteStatus(remoteStatus);
         setRemoteLinks(links);
         setMdnsStatus(mdns);
@@ -521,6 +537,35 @@ export function Settings() {
       window.setTimeout(() => setRemoteLinksMessage(''), 4200);
     } finally {
       setIsSendingTelegramLink(false);
+    }
+  };
+
+  const handleSaveTelegramSnapshotCooldown = async () => {
+    const trimmed = telegramSnapshotCooldown.trim();
+    const parsed = Number.parseInt(trimmed, 10);
+
+    if (!Number.isFinite(parsed) || String(parsed) !== trimmed) {
+      setTelegramSnapshotMessage('Enter a whole number between 10 and 3600 seconds.');
+      return;
+    }
+    if (parsed < 10 || parsed > 3600) {
+      setTelegramSnapshotMessage('Telegram snapshot cooldown must be between 10 and 3600 seconds.');
+      return;
+    }
+
+    setTelegramSnapshotSaving(true);
+    setTelegramSnapshotMessage('');
+    try {
+      const result = await updateRuntimeSetting('TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS', String(parsed));
+      setTelegramSnapshotCooldown(result.value);
+      await loadSettings();
+      setTelegramSnapshotMessage(`Telegram snapshot cooldown saved to ${result.value}s.`);
+      window.setTimeout(() => setTelegramSnapshotMessage(''), 4200);
+    } catch {
+      setTelegramSnapshotMessage('Unable to save Telegram snapshot cooldown.');
+      window.setTimeout(() => setTelegramSnapshotMessage(''), 4200);
+    } finally {
+      setTelegramSnapshotSaving(false);
     }
   };
 
@@ -992,6 +1037,41 @@ export function Settings() {
                 </label>
               </div>
             ))}
+
+            <div className="rounded-lg border border-gray-200 p-4 bg-gray-50">
+              <div className="flex flex-col md:flex-row md:items-end gap-3 md:gap-4">
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium text-gray-900">Telegram Snapshot Cooldown</p>
+                  <p className="text-sm text-gray-600 mt-1 break-words">
+                    Minimum interval between Telegram image snapshots for the same source node and alert type.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={10}
+                    max={3600}
+                    step={1}
+                    value={telegramSnapshotCooldown}
+                    onChange={(event) => setTelegramSnapshotCooldown(event.target.value)}
+                    className="w-28 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                  />
+                  <span className="text-sm text-gray-600">seconds</span>
+                  <button
+                    onClick={() => {
+                      void handleSaveTelegramSnapshotCooldown();
+                    }}
+                    disabled={telegramSnapshotSaving}
+                    className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                  >
+                    {telegramSnapshotSaving ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+              </div>
+              {telegramSnapshotMessage && (
+                <p className="mt-3 text-sm text-gray-700 break-words">{telegramSnapshotMessage}</p>
+              )}
+            </div>
           </div>
         </div>
 

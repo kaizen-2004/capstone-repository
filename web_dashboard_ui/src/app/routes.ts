@@ -6,6 +6,7 @@ import { EventsAlerts } from './pages/EventsAlerts';
 import { SensorsStatus } from './pages/SensorsStatus';
 import { Statistics } from './pages/Statistics';
 import { Settings } from './pages/Settings';
+import { NodeOnboarding } from './pages/NodeOnboarding';
 import { NotFound } from './pages/NotFound';
 import { MobileRemote } from './pages/MobileRemote';
 
@@ -41,6 +42,10 @@ export const router = createBrowserRouter([
       {
         path: 'settings',
         Component: Settings,
+      },
+      {
+        path: 'onboarding',
+        Component: NodeOnboarding,
       },
       {
         path: '*',

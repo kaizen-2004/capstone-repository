@@ -14,9 +14,9 @@ For each survey item and each ISO characteristic, compute:
 
 The weighted mean is computed as:
 
-```
-WM = (Σ f x) / N
-```
+
+$WM = \frac{(Σ f x)}{N}$
+
 
 Where:
 

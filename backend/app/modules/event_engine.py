@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from ..db import store
+from ..services.camera_http_control import CameraHttpController
 from ..services.camera_manager import CameraManager
 from ..services.notification_dispatcher import NotificationDispatcher
 from .face_service import FaceService
@@ -91,12 +92,14 @@ class EventEngine:
     def __init__(
         self,
         camera_manager: CameraManager,
+        camera_http_controller: CameraHttpController | None,
         face_service: FaceService,
         fire_service: FireService,
         notification_dispatcher: NotificationDispatcher | None = None,
         intruder_event_cooldown_seconds: int = 20,
     ) -> None:
         self.camera_manager = camera_manager
+        self.camera_http_controller = camera_http_controller
         self.face_service = face_service
         self.fire_service = fire_service
         self.notification_dispatcher = notification_dispatcher
@@ -291,7 +294,28 @@ class EventEngine:
         self, event_id: int, node_id: str, location: str, details: dict[str, Any]
     ) -> int:
         primary_node = "cam_door"
-        frame = self.camera_manager.snapshot_frame(primary_node)
+        frame = None
+        capture_detail = ""
+
+        if node_id == "door_force" and self.camera_http_controller is not None:
+            frame, capture_detail = self.camera_http_controller.capture_frame(
+                primary_node, flash=True, timeout_seconds=4.0
+            )
+            if frame is not None:
+                details = {
+                    **details,
+                    "triggered_snapshot": True,
+                    "trigger_capture": capture_detail,
+                }
+            elif capture_detail:
+                details = {
+                    **details,
+                    "triggered_snapshot": False,
+                    "trigger_capture_error": capture_detail,
+                }
+
+        if frame is None:
+            frame = self.camera_manager.snapshot_frame(primary_node)
         if frame is None:
             primary_node = "cam_indoor"
             frame = self.camera_manager.snapshot_frame("cam_indoor")

@@ -33,6 +33,42 @@ export interface LiveSettingsPayload {
   runtimeSettings: RuntimeSetting[];
 }
 
+export interface RuntimeSettingUpdatePayload {
+  ok: boolean;
+  key: string;
+  value: string;
+  description: string;
+}
+
+export interface CameraOnboardingApplyPayload {
+  ok: boolean;
+  applied: boolean;
+  nodeId: string;
+  activeStreamUrl: string;
+  cameraRuntime: {
+    status: string;
+    lastError: string;
+  };
+}
+
+export interface ReprovisionNodeResult {
+  nodeId: string;
+  ip: string;
+  status: 'accepted' | 'offline_no_ip' | 'timeout' | 'error';
+  detail: string;
+}
+
+export interface ReprovisionAllNodesPayload {
+  ok: boolean;
+  requestedNodes: string[];
+  results: ReprovisionNodeResult[];
+  summary: {
+    accepted: number;
+    offlineNoIp: number;
+    failed: number;
+  };
+}
+
 export interface AuthUser {
   username: string;
 }
@@ -386,6 +422,20 @@ export async function fetchSettingsLive(): Promise<LiveSettingsPayload> {
   };
 }
 
+export async function updateRuntimeSetting(key: string, value: string): Promise<RuntimeSettingUpdatePayload> {
+  const payload = await fetchJson<Json>('/api/ui/settings/runtime', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, value }),
+  });
+  return {
+    ok: Boolean(payload.ok),
+    key: String(payload.key ?? key),
+    value: String(payload.value ?? value),
+    description: String(payload.description ?? ''),
+  };
+}
+
 export async function sendCameraControl(
   nodeId: string,
   command: CameraControlCommand,
@@ -632,5 +682,72 @@ export async function sendTelegramAccessLink(): Promise<TelegramAccessLinkSendPa
     sent: Boolean(payload.sent),
     status: String(payload.status ?? ''),
     detail: String(payload.detail ?? ''),
+  };
+}
+
+export async function applyOnboardedCameraStream(input: {
+  nodeId: string;
+  streamUrl: string;
+  fallbackStreamUrl?: string;
+}): Promise<CameraOnboardingApplyPayload> {
+  const payload = await fetchJson<Json>('/api/ui/onboarding/camera/apply', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      node_id: input.nodeId,
+      stream_url: input.streamUrl,
+      fallback_stream_url: input.fallbackStreamUrl ?? '',
+    }),
+  });
+
+  const runtimeRaw = payload.camera_runtime && typeof payload.camera_runtime === 'object'
+    ? (payload.camera_runtime as Json)
+    : {};
+
+  return {
+    ok: Boolean(payload.ok),
+    applied: Boolean(payload.applied),
+    nodeId: String(payload.node_id ?? input.nodeId),
+    activeStreamUrl: String(payload.active_stream_url ?? input.streamUrl),
+    cameraRuntime: {
+      status: String(runtimeRaw.status ?? ''),
+      lastError: String(runtimeRaw.last_error ?? ''),
+    },
+  };
+}
+
+export async function reprovisionAllNodes(): Promise<ReprovisionAllNodesPayload> {
+  const payload = await fetchJson<Json>('/api/ui/onboarding/reprovision-all', {
+    method: 'POST',
+  });
+
+  const requestedNodesRaw = Array.isArray(payload.requested_nodes) ? payload.requested_nodes : [];
+  const resultsRaw = Array.isArray(payload.results) ? payload.results : [];
+  const summaryRaw = payload.summary && typeof payload.summary === 'object'
+    ? (payload.summary as Json)
+    : {};
+
+  return {
+    ok: Boolean(payload.ok),
+    requestedNodes: requestedNodesRaw.map((item) => String(item ?? '').trim()).filter((item) => item.length > 0),
+    results: resultsRaw.map((item) => {
+      const row = item && typeof item === 'object' ? (item as Json) : {};
+      const statusRaw = String(row.status ?? '').toLowerCase();
+      const status: ReprovisionNodeResult['status'] =
+        statusRaw === 'accepted' || statusRaw === 'offline_no_ip' || statusRaw === 'timeout'
+          ? statusRaw
+          : 'error';
+      return {
+        nodeId: String(row.node_id ?? ''),
+        ip: String(row.ip ?? ''),
+        status,
+        detail: String(row.detail ?? ''),
+      };
+    }),
+    summary: {
+      accepted: toInt(summaryRaw.accepted),
+      offlineNoIp: toInt(summaryRaw.offline_no_ip),
+      failed: toInt(summaryRaw.failed),
+    },
   };
 }

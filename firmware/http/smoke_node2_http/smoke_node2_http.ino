@@ -1,15 +1,25 @@
-#include <WiFi.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
+#include <WebServer.h>
+#include <WiFi.h>
 
-// Configure these before flashing.
-static const char* WIFI_SSID = "Villa";
-static const char* WIFI_PASSWORD = "Beliy@f@m_2026";
-static const char* BACKEND_BASE = "http://192.168.1.8:8765";
+// Compile-time fallback values.
+static const char* WIFI_SSID = "";
+static const char* WIFI_PASSWORD = "";
+static const char* WIFI_HOSTNAME = "smoke-node2";
+static const char* BACKEND_BASE = "";
+
+// Node metadata.
+static const char* NODE_ID = "smoke_node2";
+static const char* NODE_LABEL = "Smoke Sensor Node 2";
+static const char* NODE_LOCATION = "Door Entrance Area";
+static const char* NODE_TYPE = "smoke";
+static const char* FIRMWARE_VERSION = "smoke_node2_http_v2_provision";
 
 // Adaptive TX power profile:
 // - start with moderate TX for join attempts
 // - escalate to high TX after repeated failures
-// - settle to moderate runtime TX (fallback to low if 11 dBm option is unavailable)
+// - settle to moderate runtime TX
 #if defined(WIFI_POWER_13dBm)
 #define WIFI_TX_POWER_CONNECT_INITIAL WIFI_POWER_13dBm
 #elif defined(WIFI_POWER_11dBm)
@@ -32,44 +42,393 @@ static const char* BACKEND_BASE = "http://192.168.1.8:8765";
 #define WIFI_TX_POWER_RUNTIME WIFI_TX_POWER_CONNECT_INITIAL
 #endif
 
-static const char* NODE_ID = "smoke_node2";
-static const char* NODE_LABEL = "Smoke Sensor Node 2";
-static const char* NODE_LOCATION = "Door Entrance Area";
+// Provisioning behavior.
+static const uint32_t SETUP_AP_TIMEOUT_MS = 600000;  // 10 minutes
+static const uint32_t SETUP_AP_POST_CONNECT_GRACE_MS = 30000;  // 30 seconds
+static const char* SETUP_AP_PREFIX = "Thesis-Setup";
 
+// Connectivity/retry timing.
 static const uint32_t WIFI_RETRY_INTERVAL_MS = 15000;
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 static const uint32_t REGISTER_RETRY_INTERVAL_MS = 10000;
 static const uint8_t WIFI_ESCALATE_AFTER_ATTEMPTS = 2;
 
-unsigned long lastHeartbeatMs = 0;
-unsigned long lastReadingMs = 0;
-unsigned long lastWiFiAttemptMs = 0;
-unsigned long lastWiFiBeginMs = 0;
-unsigned long lastRegisterAttemptMs = 0;
-unsigned long lastWiFiStatusLogMs = 0;
+// Sensor and heartbeat timing.
+static const uint32_t HEARTBEAT_INTERVAL_MS = 15000;
+static const uint32_t SENSOR_REPORT_INTERVAL_MS = 5000;
+
+// NVS keys.
+static const char* NVS_NAMESPACE = "th_prov";
+static const char* NVS_WIFI_SSID = "wifi_ssid";
+static const char* NVS_WIFI_PASS = "wifi_pass";
+static const char* NVS_HOSTNAME = "hostname";
+static const char* NVS_BACKEND_BASE = "backend_base";
+static const char* NVS_FORCE_SETUP_AP = "force_ap";
+
+enum ProvisionState {
+  PROVISION_UNCONFIGURED = 0,
+  PROVISION_AP_SETUP,
+  PROVISION_CONNECTING,
+  PROVISION_CONNECTED,
+  PROVISION_CONNECT_FAILED,
+};
+
+ProvisionState provisionState = PROVISION_UNCONFIGURED;
+
+String runtimeWiFiSsid;
+String runtimeWiFiPassword;
+String runtimeHostname;
+String runtimeBackendBase;
+String lastProvisionError;
+
+bool forceSetupApOnBoot = false;
+bool setupApActive = false;
+bool setupApExpired = false;
+String setupApSsid;
+uint32_t setupApStartedMs = 0;
+bool pendingDisableSetupAp = false;
+uint32_t setupApDisableAtMs = 0;
+
+uint32_t lastHeartbeatMs = 0;
+uint32_t lastReadingMs = 0;
+uint32_t lastWiFiAttemptMs = 0;
+uint32_t lastWiFiBeginMs = 0;
+uint32_t lastRegisterAttemptMs = 0;
+uint32_t lastWiFiStatusLogMs = 0;
 uint8_t wifiConnectAttempts = 0;
+uint8_t lastDisconnectReason = 0;
 bool wasWiFiConnected = false;
 bool registrationOk = false;
 
-String endpoint(const char* path) {
-  return String(BACKEND_BASE) + path;
+WebServer provisionServer(80);
+bool provisionServerRoutesReady = false;
+bool provisionServerRunning = false;
+
+String sanitizeHostname(const String& raw) {
+  String out;
+  out.reserve(raw.length());
+  for (size_t i = 0; i < raw.length(); ++i) {
+    char c = raw.charAt(i);
+    if (isalnum(static_cast<unsigned char>(c))) {
+      out += static_cast<char>(tolower(c));
+    } else if (c == '-' || c == '_') {
+      out += '-';
+    }
+  }
+  while (out.startsWith("-")) {
+    out.remove(0, 1);
+  }
+  while (out.endsWith("-")) {
+    out.remove(out.length() - 1);
+  }
+  if (out.length() == 0) {
+    return "smoke-node2";
+  }
+  if (out.length() > 31) {
+    out = out.substring(0, 31);
+  }
+  return out;
 }
 
-bool postJson(const String& url, const String& body) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-  HTTPClient http;
-  http.setConnectTimeout(3000);
-  http.setTimeout(4000);
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  int code = http.POST(body);
-  if (code <= 0) {
-    Serial.printf("[HTTP] post failed url=%s code=%d\n", url.c_str(), code);
-  } else if (code >= 400) {
-    Serial.printf("[HTTP] post error url=%s code=%d\n", url.c_str(), code);
+bool isConfiguredValue(const String& valueRaw) {
+  String value = valueRaw;
+  value.trim();
+  if (value.length() == 0) {
+    return false;
   }
-  http.end();
-  return code > 0 && code < 400;
+
+  String lower = value;
+  lower.toLowerCase();
+  return !(lower == "changeme" || lower == "none" || lower == "null");
+}
+
+bool isLocalOnlyBackendTarget(const String& valueRaw) {
+  String value = valueRaw;
+  value.trim();
+  if (value.length() == 0) {
+    return false;
+  }
+
+  String lower = value;
+  lower.toLowerCase();
+  return lower.indexOf("://127.0.0.1") >= 0 ||
+         lower.indexOf("://localhost") >= 0 ||
+         lower.indexOf("://0.0.0.0") >= 0 ||
+         lower.startsWith("127.0.0.1") ||
+         lower.startsWith("localhost") ||
+         lower.startsWith("0.0.0.0");
+}
+
+String sanitizeBackendBase(const String& baseRaw) {
+  String base = baseRaw;
+  base.trim();
+  if (base.length() == 0) {
+    return "";
+  }
+  if (isLocalOnlyBackendTarget(base)) {
+    Serial.printf("[PROV] ignoring local-only backend_base=%s\n", base.c_str());
+    return "";
+  }
+  if (base.endsWith("/")) {
+    base.remove(base.length() - 1);
+  }
+  return base;
+}
+
+String jsonEscape(const String& in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); ++i) {
+    char c = in.charAt(i);
+    if (c == '\\' || c == '"') {
+      out += '\\';
+      out += c;
+    } else if (c == '\n') {
+      out += "\\n";
+    } else if (c == '\r') {
+      out += "\\r";
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+const char* wifiStatusText(wl_status_t s) {
+  switch (s) {
+    case WL_IDLE_STATUS:
+      return "IDLE";
+    case WL_NO_SSID_AVAIL:
+      return "NO_SSID";
+    case WL_SCAN_COMPLETED:
+      return "SCAN_DONE";
+    case WL_CONNECTED:
+      return "CONNECTED";
+    case WL_CONNECT_FAILED:
+      return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST:
+      return "CONNECTION_LOST";
+    case WL_DISCONNECTED:
+      return "DISCONNECTED";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+String provisionStateText() {
+  switch (provisionState) {
+    case PROVISION_UNCONFIGURED:
+      return "unconfigured";
+    case PROVISION_AP_SETUP:
+      return "ap_setup";
+    case PROVISION_CONNECTING:
+      return "connecting";
+    case PROVISION_CONNECTED:
+      return "connected";
+    case PROVISION_CONNECT_FAILED:
+      return "connect_failed";
+    default:
+      return "unknown";
+  }
+}
+
+String chipIdSuffix() {
+  uint64_t chipId = ESP.getEfuseMac();
+  char suffix[7];
+  snprintf(suffix, sizeof(suffix), "%06llX", chipId & 0xFFFFFFULL);
+  return String(suffix);
+}
+
+String chipIdHex() {
+  uint64_t chipId = ESP.getEfuseMac();
+  char buf[13];
+  snprintf(buf, sizeof(buf), "%012llX", chipId);
+  return String(buf);
+}
+
+String buildSetupApSsid() {
+  return String(SETUP_AP_PREFIX) + "-" + chipIdSuffix();
+}
+
+bool hasRuntimeWiFiConfig() {
+  return isConfiguredValue(runtimeWiFiSsid);
+}
+
+String activeModeText() {
+  if (setupApActive && WiFi.status() == WL_CONNECTED) {
+    return "ap_sta";
+  }
+  if (setupApActive) {
+    return "ap";
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    return "sta";
+  }
+  return "idle";
+}
+
+uint32_t setupApRemainingSec() {
+  if (!setupApActive) {
+    return 0;
+  }
+  uint32_t elapsed = millis() - setupApStartedMs;
+  if (elapsed >= SETUP_AP_TIMEOUT_MS) {
+    return 0;
+  }
+  return (SETUP_AP_TIMEOUT_MS - elapsed) / 1000;
+}
+
+bool backendEnabled() {
+  return runtimeBackendBase.length() > 0;
+}
+
+String endpoint(const char* path) {
+  if (!backendEnabled()) {
+    return "";
+  }
+  return runtimeBackendBase + String(path);
+}
+
+void loadRuntimeConfigFromStorage() {
+  runtimeWiFiSsid = String(WIFI_SSID);
+  runtimeWiFiPassword = String(WIFI_PASSWORD);
+  runtimeHostname = sanitizeHostname(String(WIFI_HOSTNAME));
+  runtimeBackendBase = sanitizeBackendBase(String(BACKEND_BASE));
+
+  Preferences prefs;
+  if (prefs.begin(NVS_NAMESPACE, true)) {
+    String storedSsid = prefs.getString(NVS_WIFI_SSID, "");
+    String storedPass = prefs.getString(NVS_WIFI_PASS, "");
+    String storedHostname = prefs.getString(NVS_HOSTNAME, "");
+    String storedBackendBase = sanitizeBackendBase(prefs.getString(NVS_BACKEND_BASE, ""));
+    forceSetupApOnBoot = prefs.getBool(NVS_FORCE_SETUP_AP, false);
+    prefs.end();
+
+    if (isConfiguredValue(storedSsid)) {
+      runtimeWiFiSsid = storedSsid;
+      runtimeWiFiPassword = storedPass;
+    }
+    if (isConfiguredValue(storedHostname)) {
+      runtimeHostname = sanitizeHostname(storedHostname);
+    }
+    if (isConfiguredValue(storedBackendBase)) {
+      runtimeBackendBase = storedBackendBase;
+    }
+    if (forceSetupApOnBoot) {
+      runtimeWiFiSsid = "";
+      runtimeWiFiPassword = "";
+    }
+  }
+}
+
+bool saveProvisioningToStorage(const String& ssid, const String& password,
+                              const String& hostname,
+                              const String& backendBase) {
+  Preferences prefs;
+  if (!prefs.begin(NVS_NAMESPACE, false)) {
+    return false;
+  }
+  prefs.putString(NVS_WIFI_SSID, ssid);
+  prefs.putString(NVS_WIFI_PASS, password);
+  prefs.putString(NVS_HOSTNAME, hostname);
+  prefs.putString(NVS_BACKEND_BASE, backendBase);
+  prefs.putBool(NVS_FORCE_SETUP_AP, false);
+  prefs.end();
+  return true;
+}
+
+void clearProvisioningStorage() {
+  Preferences prefs;
+  if (!prefs.begin(NVS_NAMESPACE, false)) {
+    return;
+  }
+  prefs.remove(NVS_WIFI_SSID);
+  prefs.remove(NVS_WIFI_PASS);
+  prefs.remove(NVS_HOSTNAME);
+  prefs.remove(NVS_BACKEND_BASE);
+  prefs.remove(NVS_FORCE_SETUP_AP);
+  prefs.end();
+}
+
+void setForceSetupApFlag(bool enabled) {
+  Preferences prefs;
+  if (!prefs.begin(NVS_NAMESPACE, false)) {
+    return;
+  }
+  prefs.putBool(NVS_FORCE_SETUP_AP, enabled);
+  prefs.end();
+}
+
+void startSetupAP(const String& reason) {
+  if (setupApActive) {
+    return;
+  }
+
+  setupApSsid = buildSetupApSsid();
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setSleep(false);
+
+  bool ok = WiFi.softAP(setupApSsid.c_str());
+  if (!ok) {
+    Serial.println("[PROV] failed to start setup AP");
+    return;
+  }
+
+  setupApActive = true;
+  setupApExpired = false;
+  setupApStartedMs = millis();
+  provisionState = PROVISION_AP_SETUP;
+  lastProvisionError = reason;
+  pendingDisableSetupAp = false;
+  setupApDisableAtMs = 0;
+
+  Serial.printf("[PROV] setup AP active ssid=%s ip=%s\n", setupApSsid.c_str(),
+                WiFi.softAPIP().toString().c_str());
+}
+
+void stopSetupAP(bool markExpired) {
+  if (!setupApActive) {
+    return;
+  }
+
+  WiFi.softAPdisconnect(true);
+  setupApActive = false;
+  setupApSsid = "";
+  setupApStartedMs = 0;
+  pendingDisableSetupAp = false;
+  setupApDisableAtMs = 0;
+  if (markExpired) {
+    setupApExpired = true;
+  }
+
+  if (WiFi.status() == WL_CONNECTED || hasRuntimeWiFiConfig()) {
+    WiFi.mode(WIFI_STA);
+  }
+
+  Serial.println("[PROV] setup AP stopped");
+}
+
+void handleSetupApTimeout() {
+  if (!setupApActive) {
+    return;
+  }
+  if (pendingDisableSetupAp && WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+  if ((millis() - setupApStartedMs) < SETUP_AP_TIMEOUT_MS) {
+    return;
+  }
+
+  Serial.println("[PROV] setup AP timed out (10 minutes)");
+  stopSetupAP(true);
+  if (WiFi.status() != WL_CONNECTED) {
+    lastProvisionError = "setup_ap_timeout";
+    if (!hasRuntimeWiFiConfig()) {
+      provisionState = PROVISION_UNCONFIGURED;
+    } else {
+      provisionState = PROVISION_CONNECT_FAILED;
+    }
+  }
 }
 
 #if defined(WIFI_TX_POWER_CONNECT_INITIAL) && defined(WIFI_TX_POWER_CONNECT_ESCALATED)
@@ -82,38 +441,190 @@ wifi_power_t currentConnectTxPower() {
 #endif
 
 void beginWiFiConnection() {
+  if (!hasRuntimeWiFiConfig()) {
+    return;
+  }
+
+  WiFi.mode(setupApActive ? WIFI_AP_STA : WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(false);
+  WiFi.setHostname(sanitizeHostname(runtimeHostname).c_str());
 #if defined(WIFI_TX_POWER_CONNECT_INITIAL) && defined(WIFI_TX_POWER_CONNECT_ESCALATED)
   WiFi.setTxPower(currentConnectTxPower());
 #endif
-  WiFi.setSleep(false);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(runtimeWiFiSsid.c_str(), runtimeWiFiPassword.c_str());
   lastWiFiBeginMs = millis();
+  lastWiFiAttemptMs = lastWiFiBeginMs;
+  provisionState = PROVISION_CONNECTING;
   bool escalated = wifiConnectAttempts >= WIFI_ESCALATE_AFTER_ATTEMPTS;
-  Serial.printf(
-    "[WiFi] connecting ssid=%s tx=%s attempt=%u\n",
-    WIFI_SSID,
-    escalated ? "escalated" : "initial",
-    (unsigned)(wifiConnectAttempts + 1)
-  );
+  Serial.printf("[WiFi] connecting ssid=%s tx=%s attempt=%u\n",
+                runtimeWiFiSsid.c_str(),
+                escalated ? "escalated" : "initial",
+                static_cast<unsigned>(wifiConnectAttempts + 1));
 }
 
-void ensureWiFi() {
+void connectWiFiBlocking() {
+  if (!hasRuntimeWiFiConfig()) {
+    Serial.println("[WiFi] no configured credentials");
+    return;
+  }
+
+  beginWiFiConnection();
+  uint32_t startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         (millis() - startedAt) < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    provisionState = PROVISION_CONNECTED;
+    return;
+  }
+
+  provisionState = PROVISION_CONNECT_FAILED;
+  lastProvisionError = "wifi_connect_timeout";
+  if (!setupApActive) {
+    startSetupAP("connect_failed");
+  }
+}
+
+void maintainWiFiConnection() {
+  if (!hasRuntimeWiFiConfig()) {
+    return;
+  }
+
   wl_status_t status = WiFi.status();
-  if (status == WL_CONNECTED) return;
+  if (status == WL_CONNECTED) {
+    return;
+  }
 
-  unsigned long now = millis();
-  if ((uint32_t)(now - lastWiFiBeginMs) < WIFI_CONNECT_TIMEOUT_MS) return;
-  if ((uint32_t)(now - lastWiFiAttemptMs) < WIFI_RETRY_INTERVAL_MS) return;
-  if (status != WL_DISCONNECTED && status != WL_CONNECT_FAILED && status != WL_NO_SSID_AVAIL) return;
+  uint32_t now = millis();
+  if ((now - lastWiFiBeginMs) < WIFI_CONNECT_TIMEOUT_MS) {
+    return;
+  }
+  if ((now - lastWiFiAttemptMs) < WIFI_RETRY_INTERVAL_MS) {
+    return;
+  }
+  if (status != WL_DISCONNECTED && status != WL_CONNECT_FAILED &&
+      status != WL_NO_SSID_AVAIL) {
+    return;
+  }
 
-  lastWiFiAttemptMs = now;
   if (wifiConnectAttempts < 250) {
     wifiConnectAttempts++;
   }
+
+  if (!setupApActive && !setupApExpired) {
+    startSetupAP("connect_retry");
+  }
+
+  Serial.printf("[WiFi] reconnecting status=%s\n", wifiStatusText(status));
   WiFi.disconnect();
-  delay(200);
+  delay(20);
   beginWiFiConnection();
-  Serial.printf("[WiFi] reconnecting status=%d\n", (int)status);
+}
+
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_START:
+      Serial.println("[WiFi] STA started");
+      break;
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.println("[WiFi] associated with AP");
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      provisionState = PROVISION_CONNECTED;
+      lastProvisionError = "";
+      if (setupApActive) {
+        pendingDisableSetupAp = true;
+        setupApDisableAtMs = millis() + SETUP_AP_POST_CONNECT_GRACE_MS;
+      }
+      Serial.printf("[WiFi] connected ip=%s rssi=%d\n",
+                    WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      lastDisconnectReason = info.wifi_sta_disconnected.reason;
+      if (pendingDisableSetupAp) {
+        pendingDisableSetupAp = false;
+        setupApDisableAtMs = 0;
+      }
+      if (hasRuntimeWiFiConfig()) {
+        provisionState = PROVISION_CONNECT_FAILED;
+        lastProvisionError = "wifi_disconnected";
+      }
+      Serial.printf("[WiFi] disconnected reason=%u status=%s\n",
+                    static_cast<unsigned>(lastDisconnectReason),
+                    wifiStatusText(WiFi.status()));
+      break;
+    default:
+      break;
+  }
+}
+
+bool postJson(const String& url, const String& body) {
+  if (url.length() == 0 || WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  HTTPClient http;
+  http.setConnectTimeout(3000);
+  http.setTimeout(4000);
+  if (!http.begin(url)) {
+    Serial.printf("[HTTP] begin failed url=%s\n", url.c_str());
+    return false;
+  }
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(body);
+  if (code <= 0) {
+    Serial.printf("[HTTP] post failed url=%s code=%d\n", url.c_str(), code);
+  } else if (code >= 400) {
+    Serial.printf("[HTTP] post error url=%s code=%d\n", url.c_str(), code);
+  }
+  http.end();
+  return code > 0 && code < 400;
+}
+
+void sendRegister() {
+  if (!backendEnabled()) {
+    return;
+  }
+  lastRegisterAttemptMs = millis();
+  String body = String("{") +
+                "\"node_id\":\"" + NODE_ID + "\"," +
+                "\"label\":\"" + NODE_LABEL + "\"," +
+                "\"device_type\":\"" + NODE_TYPE + "\"," +
+                "\"location\":\"" + NODE_LOCATION + "\"}";
+  bool ok = postJson(endpoint("/api/devices/register"), body);
+  registrationOk = ok;
+  Serial.printf("[HTTP] register %s\n", ok ? "ok" : "failed");
+}
+
+void sendHeartbeat() {
+  if (!backendEnabled()) {
+    return;
+  }
+  String body = String("{") +
+                "\"node_id\":\"" + NODE_ID + "\"," +
+                "\"note\":\"heartbeat\"}";
+  postJson(endpoint("/api/devices/heartbeat"), body);
+}
+
+void sendSmokeEvent(float value, const char* eventCode) {
+  if (!backendEnabled()) {
+    return;
+  }
+  String body = String("{") +
+                "\"node_id\":\"" + NODE_ID + "\"," +
+                "\"event\":\"" + eventCode + "\"," +
+                "\"location\":\"" + NODE_LOCATION + "\"," +
+                "\"value\":" + String(value, 3) + "}";
+  bool ok = postJson(endpoint("/api/sensors/event"), body);
+  if (ok) {
+    Serial.printf("[HTTP] event=%s value=%.3f\n", eventCode, value);
+  }
 }
 
 void handleWiFiStateChange() {
@@ -124,7 +635,9 @@ void handleWiFiStateChange() {
 #endif
     WiFi.setSleep(false);
     wifiConnectAttempts = 0;
-    Serial.printf("[WiFi] connected ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    registrationOk = false;
+    Serial.printf("[WiFi] got ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(),
+                  WiFi.RSSI());
     sendRegister();
   } else if (!connected && wasWiFiConnected) {
     Serial.println("[WiFi] disconnected");
@@ -133,35 +646,267 @@ void handleWiFiStateChange() {
   wasWiFiConnected = connected;
 }
 
-void sendRegister() {
-  lastRegisterAttemptMs = millis();
-  String body = String("{") +
-    "\"node_id\":\"" + NODE_ID + "\"," +
-    "\"label\":\"" + NODE_LABEL + "\"," +
-    "\"device_type\":\"smoke\"," +
-    "\"location\":\"" + NODE_LOCATION + "\"}";
-  bool ok = postJson(endpoint("/api/devices/register"), body);
-  registrationOk = ok;
-  Serial.printf("[HTTP] register %s\n", ok ? "ok" : "failed");
+void sendCorsHeaders() {
+  provisionServer.sendHeader("Access-Control-Allow-Origin", "*");
+  provisionServer.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  provisionServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  provisionServer.sendHeader("Access-Control-Max-Age", "600");
 }
 
-void sendHeartbeat() {
-  String body = String("{") +
-    "\"node_id\":\"" + NODE_ID + "\"," +
-    "\"note\":\"heartbeat\"}";
-  postJson(endpoint("/api/devices/heartbeat"), body);
+void sendJsonResponse(int statusCode, const String& body) {
+  sendCorsHeaders();
+  provisionServer.send(statusCode, "application/json", body);
 }
 
-void sendSmokeEvent(float value, const char* eventCode) {
-  String body = String("{") +
-    "\"node_id\":\"" + NODE_ID + "\"," +
-    "\"event\":\"" + eventCode + "\"," +
-    "\"location\":\"" + NODE_LOCATION + "\"," +
-    "\"value\":" + String(value, 3) + "}";
-  bool ok = postJson(endpoint("/api/sensors/event"), body);
-  if (ok) {
-    Serial.printf("[HTTP] event=%s value=%.3f\n", eventCode, value);
+void handleProvisionOptions() {
+  sendCorsHeaders();
+  provisionServer.send(204, "text/plain", "");
+}
+
+bool extractJsonStringField(const String& json, const char* key, String& value) {
+  if (!key || key[0] == '\0') {
+    return false;
   }
+
+  String marker = String("\"") + key + "\"";
+  int markerPos = json.indexOf(marker);
+  if (markerPos < 0) {
+    return false;
+  }
+
+  int colonPos = json.indexOf(':', markerPos + marker.length());
+  if (colonPos < 0) {
+    return false;
+  }
+
+  int i = colonPos + 1;
+  while (i < static_cast<int>(json.length()) &&
+         isspace(static_cast<unsigned char>(json.charAt(i)))) {
+    ++i;
+  }
+  if (i >= static_cast<int>(json.length()) || json.charAt(i) != '"') {
+    return false;
+  }
+
+  ++i;
+  value = "";
+  bool escaping = false;
+  while (i < static_cast<int>(json.length())) {
+    char c = json.charAt(i++);
+    if (escaping) {
+      if (c == 'n') {
+        value += '\n';
+      } else if (c == 'r') {
+        value += '\r';
+      } else if (c == 't') {
+        value += '\t';
+      } else {
+        value += c;
+      }
+      escaping = false;
+      continue;
+    }
+
+    if (c == '\\') {
+      escaping = true;
+      continue;
+    }
+    if (c == '"') {
+      return true;
+    }
+    value += c;
+  }
+
+  return false;
+}
+
+void handleProvisionInfo() {
+  String payload = String("{\"ok\":true") +
+                   ",\"node_id\":\"" + NODE_ID + "\"" +
+                   ",\"node_type\":\"" + NODE_TYPE + "\"" +
+                   ",\"firmware_version\":\"" + FIRMWARE_VERSION + "\"" +
+                   ",\"chip_id\":\"" + chipIdHex() + "\"" +
+                   ",\"setup_ap\":{\"ssid\":\"" + jsonEscape(setupApSsid) +
+                   "\",\"ip\":\"" + WiFi.softAPIP().toString() +
+                   "\",\"open\":true}}";
+  sendJsonResponse(200, payload);
+}
+
+void handleProvisionStatus() {
+  bool staConnected = WiFi.status() == WL_CONNECTED;
+  String staIp = staConnected ? WiFi.localIP().toString() : String("");
+  String setupIp = setupApActive ? WiFi.softAPIP().toString() : String("");
+  String mdnsHost = "";
+
+  String payload = String("{\"ok\":true") +
+                   ",\"node_id\":\"" + NODE_ID + "\"" +
+                   ",\"mode\":\"" + activeModeText() + "\"" +
+                   ",\"provision_state\":\"" + provisionStateText() + "\"" +
+                   ",\"setup_ap\":{\"active\":" +
+                   (setupApActive ? "true" : "false") +
+                   ",\"ssid\":\"" + jsonEscape(setupApSsid) + "\"" +
+                   ",\"ip\":\"" + setupIp + "\"" +
+                   ",\"expires_in_sec\":" + String(setupApRemainingSec()) + "}" +
+                   ",\"sta\":{\"configured\":" +
+                   (hasRuntimeWiFiConfig() ? "true" : "false") +
+                   ",\"connected\":" + (staConnected ? "true" : "false") +
+                   ",\"ssid\":\"" + jsonEscape(runtimeWiFiSsid) + "\"" +
+                   ",\"ip\":\"" + staIp + "\"" +
+                   ",\"rssi\":" +
+                   (staConnected ? String(WiFi.RSSI()) : String("null")) +
+                   ",\"last_error\":\"" + jsonEscape(lastProvisionError) +
+                   "\",\"last_disconnect_reason\":" +
+                   String(lastDisconnectReason) + "}" +
+                   ",\"mdns\":{\"enabled\":false,\"host\":\"" + mdnsHost +
+                   "\",\"ready\":false}" +
+                   ",\"endpoints\":{\"stream\":\"\",\"capture\":\"\",\"control\":\"\"}" +
+                   ",\"backend_base\":\"" + jsonEscape(runtimeBackendBase) + "\"" +
+                   "}";
+  sendJsonResponse(200, payload);
+}
+
+void handleProvisionScan() {
+  int count = WiFi.scanNetworks();
+  String payload = "{\"ok\":true,\"networks\":[";
+  bool first = true;
+
+  if (count > 0) {
+    for (int i = 0; i < count; ++i) {
+      String ssid = WiFi.SSID(i);
+      ssid.trim();
+      if (ssid.length() == 0) {
+        continue;
+      }
+      if (!first) {
+        payload += ",";
+      }
+      first = false;
+
+      bool secure = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+      payload += String("{\"ssid\":\"") + jsonEscape(ssid) +
+                 "\",\"rssi\":" + String(WiFi.RSSI(i)) +
+                 ",\"secure\":" + (secure ? "true" : "false") +
+                 ",\"channel\":" + String(WiFi.channel(i)) + "}";
+    }
+  }
+
+  payload += "]}";
+  WiFi.scanDelete();
+  sendJsonResponse(200, payload);
+}
+
+void handleProvisionWifi() {
+  String body = provisionServer.arg("plain");
+  String ssid;
+  String password;
+  String hostname;
+  String backendBase;
+
+  if (!extractJsonStringField(body, "ssid", ssid)) {
+    sendJsonResponse(
+        400,
+        "{\"ok\":false,\"error\":\"invalid_input\",\"detail\":\"ssid is required\"}");
+    return;
+  }
+  extractJsonStringField(body, "password", password);
+  if (!extractJsonStringField(body, "hostname", hostname)) {
+    hostname = runtimeHostname;
+  }
+  if (!extractJsonStringField(body, "backend_base", backendBase)) {
+    backendBase = runtimeBackendBase;
+  }
+
+  ssid.trim();
+  hostname = sanitizeHostname(hostname);
+  backendBase = sanitizeBackendBase(backendBase);
+
+  if (!isConfiguredValue(ssid)) {
+    sendJsonResponse(
+        400,
+        "{\"ok\":false,\"error\":\"invalid_input\",\"detail\":\"ssid must be configured\"}");
+    return;
+  }
+
+  if (!saveProvisioningToStorage(ssid, password, hostname, backendBase)) {
+    sendJsonResponse(500,
+                     "{\"ok\":false,\"error\":\"storage_error\",\"detail\":\"failed to store provisioning\"}");
+    return;
+  }
+
+  runtimeWiFiSsid = ssid;
+  runtimeWiFiPassword = password;
+  runtimeHostname = hostname;
+  runtimeBackendBase = backendBase;
+  forceSetupApOnBoot = false;
+  setupApExpired = false;
+  lastProvisionError = "";
+  beginWiFiConnection();
+
+  sendJsonResponse(200,
+                   "{\"ok\":true,\"accepted\":true,\"provision_state\":\"connecting\",\"detail\":\"credentials saved\"}");
+}
+
+void handleProvisionReset() {
+  clearProvisioningStorage();
+  setForceSetupApFlag(true);
+
+  runtimeWiFiSsid = "";
+  runtimeWiFiPassword = "";
+  runtimeHostname = sanitizeHostname(String(WIFI_HOSTNAME));
+  runtimeBackendBase = sanitizeBackendBase(String(BACKEND_BASE));
+  forceSetupApOnBoot = true;
+  setupApExpired = false;
+  registrationOk = false;
+
+  WiFi.disconnect(true, true);
+  delay(50);
+  startSetupAP("reset");
+
+  sendJsonResponse(
+      200,
+      "{\"ok\":true,\"accepted\":true,\"detail\":\"provisioning cleared; setup AP enabled\"}");
+}
+
+void setupProvisionServerRoutes() {
+  if (provisionServerRoutesReady) {
+    return;
+  }
+
+  provisionServer.on("/", HTTP_GET, []() {
+    sendCorsHeaders();
+    provisionServer.send(
+        200, "text/html",
+        "<html><body><h3>smoke_node2 setup node ready</h3><p>Use "
+        "<a href='/api/provision/status'>/api/provision/status</a></p></body></html>");
+  });
+  provisionServer.on("/api/provision/info", HTTP_GET, handleProvisionInfo);
+  provisionServer.on("/api/provision/status", HTTP_GET, handleProvisionStatus);
+  provisionServer.on("/api/provision/scan", HTTP_GET, handleProvisionScan);
+  provisionServer.on("/api/provision/wifi", HTTP_OPTIONS, handleProvisionOptions);
+  provisionServer.on("/api/provision/wifi", HTTP_POST, handleProvisionWifi);
+  provisionServer.on("/api/provision/reset", HTTP_OPTIONS, handleProvisionOptions);
+  provisionServer.on("/api/provision/reset", HTTP_POST, handleProvisionReset);
+
+  provisionServerRoutesReady = true;
+}
+
+void startProvisionServer() {
+  if (provisionServerRunning) {
+    return;
+  }
+  setupProvisionServerRoutes();
+  provisionServer.begin();
+  provisionServerRunning = true;
+  Serial.println("[HTTP] provisioning server started");
+}
+
+void stopProvisionServer() {
+  if (!provisionServerRunning) {
+    return;
+  }
+  provisionServer.stop();
+  provisionServerRunning = false;
+  Serial.println("[HTTP] provisioning server stopped");
 }
 
 void setup() {
@@ -173,44 +918,73 @@ void setup() {
   delay(250);
   Serial.println("\n[BOOT] Smoke node 2 HTTP start");
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.setAutoReconnect(false);
-  WiFi.persistent(false);
+  WiFi.onEvent(onWiFiEvent);
+  loadRuntimeConfigFromStorage();
 
-  beginWiFiConnection();
+  if (!forceSetupApOnBoot && hasRuntimeWiFiConfig()) {
+    connectWiFiBlocking();
+  } else {
+    startSetupAP(forceSetupApOnBoot ? "forced_setup" : "unconfigured");
+  }
 }
 
 void loop() {
-  ensureWiFi();
+  handleSetupApTimeout();
+  maintainWiFiConnection();
+
+  if (pendingDisableSetupAp && setupApActive && WiFi.status() == WL_CONNECTED) {
+    bool graceElapsed =
+        (setupApDisableAtMs == 0) ||
+        (static_cast<int32_t>(millis() - setupApDisableAtMs) >= 0);
+    if (graceElapsed) {
+      stopSetupAP(false);
+    }
+  }
+
+  bool shouldServeHttp = setupApActive || (WiFi.status() == WL_CONNECTED);
+  if (shouldServeHttp) {
+    if (!provisionServerRunning) {
+      startProvisionServer();
+    }
+  } else if (provisionServerRunning) {
+    stopProvisionServer();
+  }
+  if (provisionServerRunning) {
+    provisionServer.handleClient();
+  }
+
   handleWiFiStateChange();
 
   if (WiFi.status() != WL_CONNECTED) {
-    unsigned long now = millis();
+    uint32_t now = millis();
     if ((uint32_t)(now - lastWiFiStatusLogMs) >= 2000) {
-      Serial.printf("[WiFi] waiting status=%d attempt=%u\n", (int)WiFi.status(), (unsigned)(wifiConnectAttempts + 1));
+      Serial.printf("[WiFi] waiting status=%s attempt=%u\n",
+                    wifiStatusText(WiFi.status()),
+                    static_cast<unsigned>(wifiConnectAttempts + 1));
       lastWiFiStatusLogMs = now;
     }
-    delay(50);
+    delay(20);
     return;
   }
 
-  unsigned long now = millis();
+  uint32_t now = millis();
 
-  if (!registrationOk && (uint32_t)(now - lastRegisterAttemptMs) >= REGISTER_RETRY_INTERVAL_MS) {
+  if (backendEnabled() && !registrationOk &&
+      (uint32_t)(now - lastRegisterAttemptMs) >= REGISTER_RETRY_INTERVAL_MS) {
     sendRegister();
   }
 
-  if (now - lastHeartbeatMs >= 15000) {
+  if (backendEnabled() && (now - lastHeartbeatMs) >= HEARTBEAT_INTERVAL_MS) {
     sendHeartbeat();
     lastHeartbeatMs = now;
   }
 
-  if (now - lastReadingMs >= 5000) {
-    // Replace with real MQ-2 ADC reading and threshold logic.
-    float simulated = (float)(esp_random() % 1000) / 1000.0;
-    const char* eventCode = simulated > 0.70 ? "SMOKE_HIGH" : "SMOKE_NORMAL";
+  if ((now - lastReadingMs) >= SENSOR_REPORT_INTERVAL_MS) {
+    float simulated = static_cast<float>(esp_random() % 1000) / 1000.0f;
+    const char* eventCode = simulated > 0.70f ? "SMOKE_HIGH" : "SMOKE_NORMAL";
     sendSmokeEvent(simulated, eventCode);
     lastReadingMs = now;
   }
+
+  delay(20);
 }

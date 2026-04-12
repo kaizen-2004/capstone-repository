@@ -2,20 +2,124 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import cv2
+import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 
 from ..core.auth import get_current_user
 from ..core.config import Settings
 from ..db import store
-from ..schemas.api import CameraControlRequest
+from ..schemas.api import (
+    CameraControlRequest,
+    CameraOnboardingApplyRequest,
+    RuntimeSettingUpdateRequest,
+)
 
 router = APIRouter(tags=["ui"])
+
+PROVISIONABLE_NODE_IDS = ("cam_door", "door_force", "smoke_node1", "smoke_node2")
+PROVISION_RESET_TIMEOUT_SECONDS = 4.0
+FACE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.35
+
+
+def _face_debug_enabled_for_node(node_id: str, requested: bool) -> bool:
+    _ = node_id
+    return bool(requested)
+
+
+def _known_node_ip_map() -> dict[str, str]:
+    node_ip_map: dict[str, str] = {}
+    for row in store.list_devices():
+        node_id = str(row.get("node_id") or "").strip().lower()
+        if node_id not in PROVISIONABLE_NODE_IDS:
+            continue
+        ip = str(row.get("ip_address") or "").strip()
+        if ip:
+            node_ip_map[node_id] = ip
+    return node_ip_map
+
+
+def _direct_http_stream_url(node_id: str) -> str:
+    normalized_node = node_id.strip().lower()
+    for row in store.list_cameras():
+        row_node = str(row.get("node_id") or "").strip().lower()
+        if row_node != normalized_node:
+            continue
+        source_url = str(row.get("rtsp_url") or "").strip()
+        source_lower = source_url.lower()
+        if source_lower.startswith(("http://", "https://")) and source_lower.endswith(
+            "/stream"
+        ):
+            return source_url
+        return ""
+    return ""
+
+
+async def _request_node_reprovision_reset(
+    client: httpx.AsyncClient, node_id: str, ip_address: str
+) -> dict[str, str]:
+    endpoint = f"http://{ip_address}/api/provision/reset"
+    try:
+        response = await client.post(
+            endpoint, json={"clear_wifi": True, "clear_backend": True}
+        )
+    except httpx.TimeoutException:
+        return {
+            "node_id": node_id,
+            "ip": ip_address,
+            "status": "timeout",
+            "detail": "Timed out while requesting node reset",
+        }
+    except Exception as exc:
+        return {
+            "node_id": node_id,
+            "ip": ip_address,
+            "status": "error",
+            "detail": f"Failed to reach node reset endpoint: {exc}",
+        }
+
+    payload: dict[str, Any] = {}
+    try:
+        parsed = response.json()
+        if isinstance(parsed, dict):
+            payload = cast(dict[str, Any], parsed)
+    except Exception:
+        payload = {}
+
+    if response.status_code >= 400:
+        detail = (
+            str(payload.get("detail") or payload.get("error") or "")
+            or f"HTTP {response.status_code}"
+        )
+        if response.status_code == 404:
+            detail = "Provisioning reset endpoint not found on node firmware"
+        return {
+            "node_id": node_id,
+            "ip": ip_address,
+            "status": "error",
+            "detail": detail,
+        }
+
+    accepted = bool(payload.get("accepted", payload.get("ok", True)))
+    detail = str(payload.get("detail") or "Provisioning reset accepted")
+    return {
+        "node_id": node_id,
+        "ip": ip_address,
+        "status": "accepted" if accepted else "error",
+        "detail": detail,
+    }
 
 
 def _safe_json(value: str | None) -> dict[str, Any]:
@@ -79,6 +183,9 @@ def _event_to_ui(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _runtime_settings(settings: Settings) -> list[dict[str, str]]:
+    telegram_snapshot_cooldown = store.get_setting(
+        "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS"
+    ) or str(settings.telegram_snapshot_cooldown_seconds)
     items = [
         {
             "key": "SENSOR_EVENT_URL",
@@ -146,6 +253,11 @@ def _runtime_settings(settings: Settings) -> list[dict[str, str]]:
             "description": "Minimum seconds between repeated intruder trigger events per node",
         },
         {
+            "key": "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS",
+            "value": str(telegram_snapshot_cooldown),
+            "description": "Minimum seconds between Telegram snapshot sends per source node and alert type",
+        },
+        {
             "key": "EVENT_RETENTION_DAYS",
             "value": str(settings.event_retention_days),
             "description": "Event retention window",
@@ -187,21 +299,83 @@ def ui_nodes_live(request: Request) -> dict:
     devices = store.list_devices()
     cameras = store.list_cameras()
 
+    now_iso = datetime.now(timezone.utc).isoformat()
+    camera_defaults = {
+        "cam_indoor": {
+            "label": "Indoor RTSP Camera",
+            "location": "Living Room",
+        },
+        "cam_door": {
+            "label": "Door RTSP Camera",
+            "location": "Door Entrance Area",
+        },
+    }
+
+    device_by_node: dict[str, dict[str, Any]] = {
+        str(row.get("node_id") or "").strip().lower(): row for row in devices
+    }
+    camera_by_node: dict[str, dict[str, Any]] = {
+        str(row.get("node_id") or "").strip().lower(): row for row in cameras
+    }
+
+    camera_status_by_node: dict[str, str] = {
+        node_id: (
+            "online"
+            if str(row.get("status") or "").strip().lower() == "online"
+            else "offline"
+        )
+        for node_id, row in camera_by_node.items()
+    }
+
     sensor_statuses = []
     for row in devices:
+        node_id = str(row.get("node_id") or "").strip().lower()
+        if str(row.get("device_type") or "").strip().lower() == "camera":
+            continue
         sensor_statuses.append(
             {
-                "id": str(row["node_id"]),
+                "id": node_id,
                 "name": str(row["label"]),
                 "location": str(row.get("location") or "System"),
                 "type": "force"
                 if str(row.get("device_type")) == "force"
                 else ("camera" if str(row.get("device_type")) == "camera" else "smoke"),
                 "status": "online" if str(row.get("status")) == "online" else "offline",
-                "last_update": str(
-                    row.get("last_seen_ts") or datetime.now(timezone.utc).isoformat()
-                ),
+                "last_update": str(row.get("last_seen_ts") or now_iso),
                 "note": str(row.get("note") or ""),
+            }
+        )
+
+    for camera_node in ("cam_indoor", "cam_door"):
+        cam_row = camera_by_node.get(camera_node, {})
+        device_row = device_by_node.get(camera_node, {})
+        defaults = camera_defaults[camera_node]
+        display_status = camera_status_by_node.get(camera_node, "offline")
+
+        runtime_error = str(cam_row.get("last_error") or "").strip()
+        device_note = str(device_row.get("note") or "").strip()
+        if runtime_error:
+            note = runtime_error
+        elif device_note and device_note.lower() != "heartbeat":
+            note = device_note
+        elif display_status == "online":
+            note = "stream active"
+        else:
+            note = "stream unavailable"
+
+        sensor_statuses.append(
+            {
+                "id": camera_node,
+                "name": str(cam_row.get("label") or defaults["label"]),
+                "location": str(cam_row.get("location") or defaults["location"]),
+                "type": "camera",
+                "status": display_status,
+                "last_update": str(
+                    cam_row.get("last_seen_ts")
+                    or device_row.get("last_seen_ts")
+                    or now_iso
+                ),
+                "note": note,
             }
         )
 
@@ -228,7 +402,7 @@ def ui_nodes_live(request: Request) -> dict:
             "id": "camera_manager",
             "name": "RTSP Camera Manager",
             "status": "online"
-            if any(str(cam.get("status")) == "online" for cam in cameras)
+            if any(status == "online" for status in camera_status_by_node.values())
             else "warning",
             "endpoint": "RTSP pull workers",
             "last_update": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -238,17 +412,18 @@ def ui_nodes_live(request: Request) -> dict:
 
     camera_feeds = []
     for cam in cameras:
-        node_id = str(cam.get("node_id") or "")
+        node_id = str(cam.get("node_id") or "").strip().lower()
+        display_status = camera_status_by_node.get(node_id, "offline")
         camera_feeds.append(
             {
                 "location": str(cam.get("location") or ""),
                 "node_id": node_id,
-                "status": "online" if str(cam.get("status")) == "online" else "offline",
+                "status": display_status,
                 "quality": "720p",
                 "fps": int(cam.get("fps_target") or settings.camera_processing_fps),
                 "latency_ms": 120,
                 "stream_path": f"/camera/stream/{node_id}",
-                "stream_available": str(cam.get("status")) == "online",
+                "stream_available": display_status == "online",
             }
         )
 
@@ -316,18 +491,186 @@ def ui_settings_live(request: Request) -> dict:
     }
 
 
+@router.post("/api/ui/settings/runtime")
+def ui_runtime_setting_update(
+    payload: RuntimeSettingUpdateRequest, request: Request
+) -> dict:
+    get_current_user(request)
+    key = payload.key.strip().upper()
+    value = payload.value.strip()
+
+    if key != "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS":
+        raise HTTPException(status_code=400, detail="unsupported runtime setting")
+
+    try:
+        cooldown_seconds = int(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="value must be an integer") from exc
+
+    if cooldown_seconds < 10 or cooldown_seconds > 3600:
+        raise HTTPException(
+            status_code=400,
+            detail="value must be between 10 and 3600 seconds",
+        )
+
+    store.upsert_setting(key, str(cooldown_seconds))
+    return {
+        "ok": True,
+        "key": key,
+        "value": str(cooldown_seconds),
+        "description": "Minimum seconds between Telegram snapshot sends per source node and alert type",
+    }
+
+
 @router.post("/api/ui/camera/control")
 def ui_camera_control(payload: CameraControlRequest, request: Request) -> dict:
     get_current_user(request)
     cmd = payload.command.strip().lower()
-    if cmd not in {"flash_on", "flash_off", "status"}:
+    if cmd not in {"flash_on", "flash_off", "flash_pulse", "status"}:
         raise HTTPException(status_code=400, detail="unsupported camera command")
+    controller = getattr(request.app.state, "camera_http_controller", None)
+    if controller is None:
+        raise HTTPException(
+            status_code=503, detail="camera control service unavailable"
+        )
+    result = controller.send_command(payload.node_id, cmd)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.detail)
     return {
         "ok": True,
         "node_id": payload.node_id,
         "command": cmd,
-        "topic": f"http://local-camera-control/{payload.node_id}/{cmd}",
-        "detail": "RTSP IP cameras do not expose flash command in core phase; command acknowledged as stub.",
+        "topic": result.endpoint,
+        "detail": result.detail,
+    }
+
+
+@router.post("/api/ui/onboarding/camera/apply")
+def ui_onboarding_camera_apply(
+    payload: CameraOnboardingApplyRequest, request: Request
+) -> dict:
+    get_current_user(request)
+
+    node_id = payload.node_id.strip().lower()
+    stream_url = payload.stream_url.strip()
+    fallback_stream_url = payload.fallback_stream_url.strip()
+
+    target_url = stream_url or fallback_stream_url
+    if not target_url:
+        raise HTTPException(status_code=400, detail="stream_url is required")
+
+    if not target_url.startswith(("http://", "https://", "rtsp://")):
+        raise HTTPException(
+            status_code=400,
+            detail="stream_url must start with http://, https://, or rtsp://",
+        )
+
+    applier = getattr(request.app.state, "apply_camera_stream_override", None)
+    if not callable(applier):
+        raise HTTPException(
+            status_code=503, detail="camera stream apply service unavailable"
+        )
+
+    try:
+        result = applier(node_id, target_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    result_dict = cast(dict[str, Any], result if isinstance(result, dict) else {})
+
+    camera_runtime = {}
+    camera_manager = getattr(request.app.state, "camera_manager", None)
+    if camera_manager is not None:
+        try:
+            statuses = camera_manager.live_status()
+            for status_row in statuses:
+                if not isinstance(status_row, dict):
+                    continue
+                status_dict = cast(dict[str, Any], status_row)
+                if str(status_dict.get("node_id") or "").strip().lower() != node_id:
+                    continue
+                camera_runtime = {
+                    "status": str(status_dict.get("status") or "offline"),
+                    "last_error": str(status_dict.get("last_error") or ""),
+                }
+                break
+        except Exception:
+            camera_runtime = {}
+
+    return {
+        "ok": True,
+        "applied": True,
+        "node_id": str(result_dict.get("node_id") or node_id),
+        "active_stream_url": str(result_dict.get("active_stream_url") or target_url),
+        "camera_runtime": camera_runtime,
+    }
+
+
+@router.post("/api/ui/onboarding/reprovision-all")
+async def ui_onboarding_reprovision_all(request: Request) -> dict:
+    get_current_user(request)
+
+    known_ips = _known_node_ip_map()
+    results_by_node: dict[str, dict[str, str]] = {}
+    pending_node_ids: list[str] = []
+
+    for node_id in PROVISIONABLE_NODE_IDS:
+        ip_address = known_ips.get(node_id, "")
+        if not ip_address:
+            results_by_node[node_id] = {
+                "node_id": node_id,
+                "ip": "",
+                "status": "offline_no_ip",
+                "detail": "Node has no known LAN IP yet",
+            }
+        else:
+            pending_node_ids.append(node_id)
+
+    if pending_node_ids:
+        timeout = httpx.Timeout(PROVISION_RESET_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            task_results = await asyncio.gather(
+                *[
+                    _request_node_reprovision_reset(client, node_id, known_ips[node_id])
+                    for node_id in pending_node_ids
+                ]
+            )
+        for row in task_results:
+            node_id = str(row.get("node_id") or "").strip().lower()
+            if node_id:
+                results_by_node[node_id] = row
+
+    ordered_results = [
+        results_by_node.get(
+            node_id,
+            {
+                "node_id": node_id,
+                "ip": "",
+                "status": "error",
+                "detail": "Missing result",
+            },
+        )
+        for node_id in PROVISIONABLE_NODE_IDS
+    ]
+
+    accepted_count = sum(
+        1 for row in ordered_results if row.get("status") == "accepted"
+    )
+    offline_count = sum(
+        1 for row in ordered_results if row.get("status") == "offline_no_ip"
+    )
+    failed_count = len(ordered_results) - accepted_count - offline_count
+
+    return {
+        "ok": True,
+        "requested_nodes": list(PROVISIONABLE_NODE_IDS),
+        "results": ordered_results,
+        "summary": {
+            "accepted": accepted_count,
+            "offline_no_ip": offline_count,
+            "failed": failed_count,
+        },
     }
 
 
@@ -374,8 +717,8 @@ def camera_frame(node_id: str, request: Request, face_debug: bool = False) -> Re
     if frame is None:
         raise HTTPException(status_code=404, detail="camera frame unavailable")
 
-    if face_debug:
-        _draw_face_debug_overlay(request, frame)
+    if _face_debug_enabled_for_node(node_id, face_debug):
+        _draw_face_debug_overlay(request, node_id, frame)
 
     ok, encoded = cv2.imencode(".jpg", frame)
     if not ok:
@@ -391,9 +734,33 @@ def camera_frame(node_id: str, request: Request, face_debug: bool = False) -> Re
     )
 
 
-def _draw_face_debug_overlay(request: Request, frame: Any) -> None:
+def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None:
     try:
-        verdict = request.app.state.face_service.classify_frame_with_bbox(frame)
+        normalized_node = node_id.strip().lower() or "unknown"
+        cache_raw = getattr(request.app.state, "face_debug_cache", None)
+        cache: dict[str, dict[str, Any]]
+        if isinstance(cache_raw, dict):
+            cache = cast(dict[str, dict[str, Any]], cache_raw)
+        else:
+            cache = {}
+            request.app.state.face_debug_cache = cache
+
+        now = time.monotonic()
+        cached_entry = cache.get(normalized_node)
+        verdict: dict[str, Any] | None = None
+        if isinstance(cached_entry, dict):
+            cached_ts = float(cached_entry.get("ts") or 0.0)
+            cached_verdict = cached_entry.get("verdict")
+            if (now - cached_ts) <= FACE_DEBUG_CLASSIFY_INTERVAL_SECONDS and isinstance(
+                cached_verdict, dict
+            ):
+                verdict = cast(dict[str, Any], cached_verdict)
+
+        if verdict is None:
+            latest = request.app.state.face_service.classify_frame_with_bbox(frame)
+            verdict = latest if isinstance(latest, dict) else {}
+            cache[normalized_node] = {"ts": now, "verdict": verdict}
+
         bbox = verdict.get("bbox")
         if isinstance(bbox, list) and len(bbox) == 4:
             x, y, w, h = [int(value) for value in bbox]
@@ -439,10 +806,18 @@ async def camera_stream(
     node_id: str,
     request: Request,
     face_debug: bool = False,
-    fps: int = 12,
-) -> StreamingResponse:
+    fps: int = 20,
+) -> Response:
     get_current_user(request)
-    target_fps = max(2, min(30, int(fps)))
+    normalized_node = node_id.strip().lower()
+    face_debug_enabled = _face_debug_enabled_for_node(normalized_node, face_debug)
+
+    if normalized_node == "cam_door" and not face_debug_enabled:
+        direct_stream_url = _direct_http_stream_url(normalized_node)
+        if direct_stream_url:
+            return RedirectResponse(url=direct_stream_url, status_code=307)
+
+    target_fps = max(4, min(30, int(fps)))
     frame_wait = 1.0 / float(target_fps)
 
     async def _stream_bytes():
@@ -455,8 +830,8 @@ async def camera_stream(
                 await asyncio.sleep(0.15)
                 continue
 
-            if face_debug:
-                _draw_face_debug_overlay(request, frame)
+            if face_debug_enabled:
+                _draw_face_debug_overlay(request, node_id, frame)
 
             ok, encoded = cv2.imencode(".jpg", frame)
             if not ok:

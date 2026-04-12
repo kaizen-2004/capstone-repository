@@ -38,7 +38,7 @@ export function LiveMonitoring() {
     fallbackDetectionPipelines,
   );
   const [frameRefreshTick, setFrameRefreshTick] = useState(() => Date.now());
-  const [faceDebugOverlay, setFaceDebugOverlay] = useState(true);
+  const [faceDebugOverlay, setFaceDebugOverlay] = useState(false);
   const [expandedFeed, setExpandedFeed] = useState<
     { location: Room; nodeId: string; streamPath?: string } | null
   >(null);
@@ -253,10 +253,12 @@ export function LiveMonitoring() {
     }
     const separator = path.includes('?') ? '&' : '?';
     const isStream = path.includes('/camera/stream/');
+    const faceDebugForPath = faceDebugOverlay;
     if (isStream) {
-      return faceDebugOverlay ? `${path}${separator}face_debug=1` : path;
+      const debugPart = faceDebugForPath ? '&face_debug=1' : '';
+      return `${path}${separator}fps=20${debugPart}`;
     }
-    const debugPart = faceDebugOverlay ? '&face_debug=1' : '';
+    const debugPart = faceDebugForPath ? '&face_debug=1' : '';
     return `${path}${separator}frame_tick=${frameRefreshTick}${debugPart}`;
   };
 

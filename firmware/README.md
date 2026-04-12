@@ -12,8 +12,10 @@ Flash these sketches:
    - `firmware/http/smoke_node1_http/smoke_node1_http.ino`
 3. Smoke node 2:
    - `firmware/http/smoke_node2_http/smoke_node2_http.ino`
+4. Door camera when using ESP32-CAM AI Thinker:
+   - `firmware/http/cam_door_esp32cam/cam_door_esp32cam.ino`
 
-Cameras are RTSP IP cameras and do not use ESP32-CAM firmware in active architecture.
+For ESP32-CAM door-camera replacement, set `CAMERA_DOOR_RTSP` to `http://<camera-ip>:81/stream` before starting the backend.
 
 ## Backend Runtime
 

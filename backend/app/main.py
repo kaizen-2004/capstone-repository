@@ -16,6 +16,7 @@ from .modules.event_engine import EventEngine
 from .modules.face_service import FaceService
 from .modules.fire_service import FireService
 from .services.camera_manager import CameraConfig, CameraManager
+from .services.camera_http_control import CameraHttpController
 from .services.notification_dispatcher import NotificationDispatcher
 from .services.remote_access import LinkResolver, MdnsPublisher
 from .services.supervisor import Supervisor
@@ -27,6 +28,15 @@ def _seed_default_settings() -> None:
     store.upsert_setting("camera_processing_strategy", "event_triggered")
     store.upsert_setting("mobile_push_enabled", "true")
     store.upsert_setting("mobile_telegram_fallback_enabled", "true")
+
+
+def _camera_stream_setting_key(node_id: str) -> str | None:
+    normalized = node_id.strip().lower()
+    if normalized == "cam_door":
+        return "CAMERA_DOOR_STREAM_URL"
+    if normalized == "cam_indoor":
+        return "CAMERA_INDOOR_STREAM_URL"
+    return None
 
 
 @asynccontextmanager
@@ -50,6 +60,54 @@ async def lifespan(app: FastAPI):
         "cam_indoor": "Living Room",
         "cam_door": "Door Entrance Area",
     }
+
+    def resolve_camera_stream(node_id: str, default_url: str) -> str:
+        setting_key = _camera_stream_setting_key(node_id)
+        override = (store.get_setting(setting_key) if setting_key else "") or ""
+        override = override.strip()
+        return override if override else default_url
+
+    def resolve_camera_fps_target(node_id: str, source_url: str) -> int:
+        _ = node_id
+        target = settings.camera_processing_fps
+        normalized_source = source_url.strip().lower()
+        if normalized_source.startswith(
+            ("http://", "https://")
+        ) and normalized_source.endswith("/stream"):
+            return max(target, 18)
+        return target
+
+    def build_rtsp_camera_sources() -> dict[str, str]:
+        return {
+            "cam_indoor": resolve_camera_stream(
+                "cam_indoor", settings.camera_indoor_rtsp
+            ),
+            "cam_door": resolve_camera_stream("cam_door", settings.camera_door_rtsp),
+        }
+
+    def build_rtsp_camera_configs(
+        sources: dict[str, str],
+    ) -> list[CameraConfig]:
+        return [
+            CameraConfig(
+                node_id="cam_indoor",
+                label=camera_labels["cam_indoor"],
+                location=camera_locations["cam_indoor"],
+                rtsp_url=sources["cam_indoor"],
+                fps_target=resolve_camera_fps_target(
+                    "cam_indoor", sources["cam_indoor"]
+                ),
+                source_mode="rtsp",
+            ),
+            CameraConfig(
+                node_id="cam_door",
+                label=camera_labels["cam_door"],
+                location=camera_locations["cam_door"],
+                rtsp_url=sources["cam_door"],
+                fps_target=resolve_camera_fps_target("cam_door", sources["cam_door"]),
+                source_mode="rtsp",
+            ),
+        ]
 
     mirrored_camera_node: str | None = None
     camera_configs: list[CameraConfig] = []
@@ -114,30 +172,8 @@ async def lifespan(app: FastAPI):
                 ]
             )
     else:
-        camera_sources = {
-            "cam_indoor": settings.camera_indoor_rtsp,
-            "cam_door": settings.camera_door_rtsp,
-        }
-        camera_configs.extend(
-            [
-                CameraConfig(
-                    node_id="cam_indoor",
-                    label=camera_labels["cam_indoor"],
-                    location=camera_locations["cam_indoor"],
-                    rtsp_url=settings.camera_indoor_rtsp,
-                    fps_target=settings.camera_processing_fps,
-                    source_mode="rtsp",
-                ),
-                CameraConfig(
-                    node_id="cam_door",
-                    label=camera_labels["cam_door"],
-                    location=camera_locations["cam_door"],
-                    rtsp_url=settings.camera_door_rtsp,
-                    fps_target=settings.camera_processing_fps,
-                    source_mode="rtsp",
-                ),
-            ]
-        )
+        camera_sources = build_rtsp_camera_sources()
+        camera_configs.extend(build_rtsp_camera_configs(camera_sources))
 
     for node_id in ("cam_indoor", "cam_door"):
         store.upsert_camera(
@@ -145,7 +181,7 @@ async def lifespan(app: FastAPI):
             camera_labels[node_id],
             camera_locations[node_id],
             camera_sources[node_id],
-            settings.camera_processing_fps,
+            resolve_camera_fps_target(node_id, camera_sources[node_id]),
         )
 
     if mirrored_camera_node is not None:
@@ -160,6 +196,42 @@ async def lifespan(app: FastAPI):
 
     camera_manager = CameraManager(storage_snapshot_root=settings.snapshot_root)
     camera_manager.configure(camera_configs)
+    camera_http_controller = CameraHttpController(settings=settings)
+
+    def apply_camera_stream_override(node_id: str, stream_url: str) -> dict[str, str]:
+        normalized_node = node_id.strip().lower()
+        if normalized_node not in {"cam_door", "cam_indoor"}:
+            raise ValueError("unsupported camera node")
+        if camera_source_mode == "webcam":
+            raise RuntimeError("camera stream override unavailable in webcam mode")
+
+        clean_url = stream_url.strip()
+        if not clean_url:
+            raise ValueError("stream_url is required")
+
+        setting_key = _camera_stream_setting_key(normalized_node)
+        if not setting_key:
+            raise ValueError("unsupported camera node")
+
+        store.upsert_setting(setting_key, clean_url)
+
+        updated_sources = build_rtsp_camera_sources()
+        camera_manager.configure(build_rtsp_camera_configs(updated_sources))
+        camera_manager.start()
+
+        for runtime_node in ("cam_indoor", "cam_door"):
+            store.upsert_camera(
+                runtime_node,
+                camera_labels[runtime_node],
+                camera_locations[runtime_node],
+                updated_sources[runtime_node],
+                resolve_camera_fps_target(runtime_node, updated_sources[runtime_node]),
+            )
+
+        return {
+            "node_id": normalized_node,
+            "active_stream_url": updated_sources[normalized_node],
+        }
 
     face_service = FaceService(
         sample_root=settings.face_samples_root,
@@ -175,11 +247,14 @@ async def lifespan(app: FastAPI):
     )
     event_engine = EventEngine(
         camera_manager=camera_manager,
+        camera_http_controller=camera_http_controller,
         face_service=face_service,
         fire_service=fire_service,
         notification_dispatcher=notification_dispatcher,
         intruder_event_cooldown_seconds=settings.intruder_event_cooldown_seconds,
     )
+    app.state.camera_http_controller = camera_http_controller
+    app.state.apply_camera_stream_override = apply_camera_stream_override
 
     supervisor = Supervisor(
         node_offline_seconds=settings.node_offline_seconds,

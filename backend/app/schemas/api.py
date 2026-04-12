@@ -83,3 +83,14 @@ class MobileNotificationPreferencesRequest(BaseModel):
     push_enabled: bool | None = None
     telegram_fallback_enabled: bool | None = None
     quiet_hours: dict[str, Any] | None = None
+
+
+class RuntimeSettingUpdateRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=64)
+    value: str = Field(min_length=1, max_length=64)
+
+
+class CameraOnboardingApplyRequest(BaseModel):
+    node_id: str = Field(min_length=1, max_length=64)
+    stream_url: str = Field(min_length=1, max_length=512)
+    fallback_stream_url: str = Field(default="", max_length=512)

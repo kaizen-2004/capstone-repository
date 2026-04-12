@@ -56,6 +56,16 @@ class NotificationDispatcher:
         self._last_access_observed_fingerprint = ""
         self._last_snapshot_sent_at_by_key: dict[str, float] = {}
 
+    def _telegram_snapshot_cooldown_seconds(self) -> int:
+        raw = store.get_setting("TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS")
+        if raw is None:
+            return self.telegram_snapshot_cooldown_seconds
+        try:
+            parsed = int(str(raw).strip())
+        except ValueError:
+            return self.telegram_snapshot_cooldown_seconds
+        return max(0, parsed)
+
     @property
     def push_available(self) -> bool:
         return bool(webpush and self.vapid_public_key and self.vapid_private_key)
@@ -285,7 +295,7 @@ class NotificationDispatcher:
         return f"{source_node}:{alert_type}"
 
     def _should_suppress_snapshot(self, alert: dict[str, Any]) -> tuple[bool, float]:
-        cooldown_seconds = float(self.telegram_snapshot_cooldown_seconds)
+        cooldown_seconds = float(self._telegram_snapshot_cooldown_seconds())
         if cooldown_seconds <= 0.0:
             return False, 0.0
 

@@ -5,8 +5,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import cv2
+import httpx
 import numpy as np
 
 from ..db import store
@@ -31,6 +33,7 @@ class CameraWorker:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._capture: cv2.VideoCapture | None = None
+        self._http_client: httpx.Client | None = None
         self._last_frame: np.ndarray | None = None
         self._last_seen = 0.0
         self._status = "offline"
@@ -60,11 +63,75 @@ class CameraWorker:
             except Exception:
                 pass
 
+        client = self._http_client
+        self._http_client = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
     def _connect(self) -> bool:
         self._release_capture()
         if self.config.source_mode == "webcam":
             return self._connect_webcam()
         return self._connect_rtsp()
+
+    def _http_snapshot_url(self) -> str:
+        if self.config.source_mode != "rtsp":
+            return ""
+
+        source = (self.config.rtsp_url or "").strip()
+        if not source:
+            return ""
+
+        parsed = urlparse(source)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return ""
+
+        path = parsed.path or ""
+        if not path.endswith("/stream"):
+            return ""
+
+        # ESP32-CAM stream is usually :81/stream while capture is on :80 (/capture).
+        port = parsed.port
+        include_port = port not in {None, 80, 81, 443}
+        netloc = parsed.hostname if not include_port else f"{parsed.hostname}:{port}"
+        return urlunparse((parsed.scheme, netloc, "/capture", "", "", ""))
+
+    def _capture_http_snapshot(self, snapshot_url: str) -> np.ndarray | None:
+        client = self._http_client
+        if client is None:
+            client = httpx.Client(
+                timeout=httpx.Timeout(3.0, connect=1.0),
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+            )
+            self._http_client = client
+
+        try:
+            response = client.get(snapshot_url)
+        except Exception:
+            try:
+                client.close()
+            except Exception:
+                pass
+            client = httpx.Client(
+                timeout=httpx.Timeout(3.0, connect=1.0),
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+            )
+            self._http_client = client
+            response = client.get(snapshot_url)
+
+        if response.status_code >= 400:
+            self._last_error = f"http snapshot status={response.status_code}"
+            return None
+
+        arr = np.frombuffer(response.content, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            self._last_error = "http snapshot decode failed"
+            return None
+        return frame
 
     def _connect_rtsp(self) -> bool:
         if not self.config.rtsp_url:
@@ -73,7 +140,26 @@ class CameraWorker:
             store.set_camera_runtime(self.config.node_id, "offline", self._last_error)
             return False
 
-        cap = cv2.VideoCapture(self.config.rtsp_url)
+        source_url = (self.config.rtsp_url or "").strip()
+        parsed = urlparse(source_url)
+        open_url = source_url
+        if parsed.scheme == "rtsp":
+            query = parsed.query
+            if "rtsp_transport=" not in query:
+                query = f"{query}&rtsp_transport=tcp" if query else "rtsp_transport=tcp"
+            if "fflags=" not in query:
+                query = f"{query}&fflags=nobuffer" if query else "fflags=nobuffer"
+            if "max_delay=" not in query:
+                query = f"{query}&max_delay=0" if query else "max_delay=0"
+            open_url = urlunparse(parsed._replace(query=query))
+
+        cap = cv2.VideoCapture(open_url, cv2.CAP_FFMPEG)
+        if not cap.isOpened() and open_url != source_url:
+            cap.release()
+            cap = cv2.VideoCapture(source_url, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            cap.release()
+            cap = cv2.VideoCapture(source_url)
         if not cap.isOpened():
             self._status = "offline"
             self._last_error = "unable to open RTSP stream"
@@ -83,6 +169,11 @@ class CameraWorker:
             except Exception:
                 pass
             return False
+
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
 
         self._capture = cap
         self._status = "online"
@@ -134,15 +225,52 @@ class CameraWorker:
     def _run(self) -> None:
         reconnect_wait = 4.0
         frame_period = 1.0 / max(1, int(self.config.fps_target))
+        snapshot_url = self._http_snapshot_url()
+
         while not self._stop.is_set():
+            if snapshot_url:
+                started_at = time.perf_counter()
+                try:
+                    frame = self._capture_http_snapshot(snapshot_url)
+                except Exception as exc:
+                    frame = None
+                    self._last_error = f"http snapshot failed: {exc}"
+
+                if frame is None:
+                    self._status = "offline"
+                    store.set_camera_runtime(
+                        self.config.node_id,
+                        "offline",
+                        self._last_error or "http snapshot failed",
+                    )
+                    self._stop.wait(min(reconnect_wait, frame_period * 2.0))
+                    continue
+
+                with self._lock:
+                    self._last_frame = frame
+                    self._last_seen = time.time()
+                    self._status = "online"
+                    self._last_error = ""
+                store.set_camera_runtime(self.config.node_id, "online", "")
+                elapsed = time.perf_counter() - started_at
+                remaining_wait = max(0.0, frame_period - elapsed)
+                self._stop.wait(remaining_wait)
+                continue
+
             if self._capture is None and not self._connect():
                 self._stop.wait(reconnect_wait)
                 continue
 
             try:
-                ok, frame = (
-                    self._capture.read() if self._capture is not None else (False, None)
-                )
+                if self._capture is None:
+                    ok, frame = (False, None)
+                else:
+                    if self.config.source_mode == "rtsp":
+                        # Drop queued frames aggressively to keep latency low.
+                        for _ in range(2):
+                            if not self._capture.grab():
+                                break
+                    ok, frame = self._capture.read()
             except Exception as exc:
                 ok = False
                 frame = None
