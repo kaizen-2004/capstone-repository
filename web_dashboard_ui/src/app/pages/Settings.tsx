@@ -1,14 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
   Camera,
-  Check,
   Database,
   Link2,
   Save,
   Send,
   Shield,
-  Upload,
   User,
   UserPlus,
   Wifi,
@@ -16,6 +14,7 @@ import {
 } from 'lucide-react';
 import {
   captureFaceTrainingSample,
+  captureFaceTrainingSampleFromNode,
   createFaceProfile,
   deleteFaceProfile,
   fetchFaceTrainingStatus,
@@ -40,45 +39,111 @@ import {
   type RuntimeSetting,
 } from '../data/mockData';
 
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('Failed to read file.'));
-    reader.readAsDataURL(file);
-  });
+type GuidedPoseId = 'center' | 'left' | 'right' | 'up' | 'down';
+
+type GuidedPoseStep = {
+  id: GuidedPoseId;
+  label: string;
+  instruction: string;
+  quota: number;
+};
+
+const GUIDED_POSE_PLAN: GuidedPoseStep[] = [
+  {
+    id: 'center',
+    label: 'Center',
+    instruction: 'Stay still and keep your face centered inside the guide.',
+    quota: 12,
+  },
+  {
+    id: 'left',
+    label: 'Left',
+    instruction: 'Slowly turn your face to the left and hold still.',
+    quota: 8,
+  },
+  {
+    id: 'right',
+    label: 'Right',
+    instruction: 'Slowly turn your face to the right and hold still.',
+    quota: 8,
+  },
+  {
+    id: 'up',
+    label: 'Up',
+    instruction: 'Raise your chin slightly and keep your face in the guide.',
+    quota: 6,
+  },
+  {
+    id: 'down',
+    label: 'Down',
+    instruction: 'Lower your chin slightly and keep your face in the guide.',
+    quota: 6,
+  },
+];
+
+const GUIDED_CAPTURE_TARGET = 40;
+const GUIDED_CAPTURE_INTERVAL_MS = 1000;
+
+function emptyGuidedPoseCounts(): Record<GuidedPoseId, number> {
+  return {
+    center: 0,
+    left: 0,
+    right: 0,
+    up: 0,
+    down: 0,
+  };
 }
 
-function readBlobAsDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('Failed to read captured frame.'));
-    reader.readAsDataURL(blob);
-  });
+function distributeGuidedPoseCounts(totalAccepted: number): {
+  counts: Record<GuidedPoseId, number>;
+  currentIndex: number;
+} {
+  const next = emptyGuidedPoseCounts();
+  let remaining = Math.max(0, totalAccepted);
+  let currentIndex = GUIDED_POSE_PLAN.length - 1;
+
+  for (let index = 0; index < GUIDED_POSE_PLAN.length; index += 1) {
+    const step = GUIDED_POSE_PLAN[index];
+    const acceptedForStep = Math.min(step.quota, remaining);
+    next[step.id] = acceptedForStep;
+    remaining = Math.max(0, remaining - acceptedForStep);
+    if (acceptedForStep < step.quota) {
+      currentIndex = index;
+      break;
+    }
+  }
+
+  return { counts: next, currentIndex };
 }
 
 export function Settings() {
   const [authorizedProfiles, setAuthorizedProfiles] = useState<AuthorizedProfile[]>(fallbackAuthorizedProfiles);
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSetting[]>(fallbackRuntimeSettings);
+  const [runtimeDrafts, setRuntimeDrafts] = useState<Record<string, string>>({});
+  const [runtimeSaveMessages, setRuntimeSaveMessages] = useState<Record<string, string>>({});
+  const [runtimeSavingKey, setRuntimeSavingKey] = useState<string | null>(null);
+  const [runtimeSecretReplaceMode, setRuntimeSecretReplaceMode] = useState<Record<string, boolean>>({});
   const [showAddUserModal, setShowAddUserModal] = useState(false);
   const [newUserName, setNewUserName] = useState('');
   const [newUserRole, setNewUserRole] = useState('Family Member');
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
-  const [uploadProgress, setUploadProgress] = useState(0);
   const [trainingStatus, setTrainingStatus] = useState<FaceTrainingStatus | null>(null);
   const [trainingComplete, setTrainingComplete] = useState(false);
   const [trainingMessage, setTrainingMessage] = useState('');
   const [trainingError, setTrainingError] = useState('');
-  const [trainingInputMode, setTrainingInputMode] = useState<'upload' | 'camera'>('upload');
   const [trainingCameraSource, setTrainingCameraSource] = useState<'device' | 'system'>('device');
+  const [showSystemCameraFallback, setShowSystemCameraFallback] = useState(false);
   const [trainingSystemCameraNode, setTrainingSystemCameraNode] = useState<'cam_indoor' | 'cam_door'>('cam_indoor');
   const [systemPreviewTick, setSystemPreviewTick] = useState(() => Date.now());
   const [isCameraStarting, setIsCameraStarting] = useState(false);
   const [isCameraLive, setIsCameraLive] = useState(false);
   const [isCapturingSample, setIsCapturingSample] = useState(false);
   const [capturedSamples, setCapturedSamples] = useState(0);
-  const [isUploading, setIsUploading] = useState(false);
+  const [isGuidedCaptureActive, setIsGuidedCaptureActive] = useState(false);
+  const [guidedPoseCounts, setGuidedPoseCounts] = useState<Record<GuidedPoseId, number>>(emptyGuidedPoseCounts());
+  const [guidedStepIndex, setGuidedStepIndex] = useState(0);
+  const [sessionBaseSampleCount, setSessionBaseSampleCount] = useState(0);
+  const [autoTrainStarted, setAutoTrainStarted] = useState(false);
+  const [requiresManualTrainRetry, setRequiresManualTrainRetry] = useState(false);
   const [isTraining, setIsTraining] = useState(false);
   const [isSavingUser, setIsSavingUser] = useState(false);
   const [deletingFaceId, setDeletingFaceId] = useState<number | null>(null);
@@ -94,6 +159,7 @@ export function Settings() {
   const [telegramSnapshotMessage, setTelegramSnapshotMessage] = useState('');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
+  const captureLoopBusyRef = useRef(false);
 
   const stopCameraStream = () => {
     const stream = cameraStreamRef.current;
@@ -107,19 +173,33 @@ export function Settings() {
     setIsCameraLive(false);
   };
 
-  const startCameraStream = async () => {
+  const syncRuntimeDrafts = useCallback((items: RuntimeSetting[]) => {
+    setRuntimeDrafts((previous) => {
+      const next = { ...previous };
+      for (const item of items) {
+        if (!(item.key in next)) {
+          next[item.key] = item.secret ? '' : item.value;
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  const startCameraStream = useCallback(async () => {
     if (trainingCameraSource !== 'device') {
-      return;
+      return false;
     }
     if (cameraStreamRef.current) {
-      return;
+      return true;
     }
     if (!navigator.mediaDevices?.getUserMedia) {
+      setShowSystemCameraFallback(true);
       setTrainingError(
-        'Device camera capture is unavailable in this browser context. Use System Camera Feed or Upload Images.',
+        'Device camera is unavailable in this browser context. If you are inside Telegram, open the dashboard in your phone browser over HTTPS. System Camera Feed fallback is now available.',
       );
-      return;
+      return false;
     }
+
     setIsCameraStarting(true);
     setTrainingError('');
     try {
@@ -128,8 +208,8 @@ export function Settings() {
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: 'user' },
-            width: { ideal: 640 },
-            height: { ideal: 480 },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
           },
           audio: false,
         });
@@ -142,111 +222,164 @@ export function Settings() {
         await videoRef.current.play();
       }
       setIsCameraLive(true);
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Camera access denied or unavailable.';
-      setTrainingError(`Unable to start device camera: ${message}. Try System Camera Feed capture.`);
+      setShowSystemCameraFallback(true);
+      setTrainingError(
+        `Unable to start device camera: ${message}. If opened from Telegram, try browser mode. System Camera Feed fallback is available.`,
+      );
       stopCameraStream();
+      return false;
     } finally {
       setIsCameraStarting(false);
     }
-  };
+  }, [trainingCameraSource]);
 
   const captureFrameDataUrl = () => {
     const video = videoRef.current;
     if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) {
       return '';
     }
+
+    const maxWidth = 640;
+    const scale = Math.min(1, maxWidth / video.videoWidth);
+    const outputWidth = Math.max(1, Math.round(video.videoWidth * scale));
+    const outputHeight = Math.max(1, Math.round(video.videoHeight * scale));
+
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    canvas.width = outputWidth;
+    canvas.height = outputHeight;
     const context = canvas.getContext('2d');
     if (!context) {
       return '';
     }
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.92);
+    context.drawImage(video, 0, 0, outputWidth, outputHeight);
+    return canvas.toDataURL('image/jpeg', 0.86);
   };
 
-  const handleCaptureFromDeviceCamera = async () => {
-    const cleanName = newUserName.trim();
-    if (!cleanName) {
-      setTrainingError('Enter the user name before capturing samples.');
-      return;
+  const applyGuidedProgress = useCallback((status: FaceTrainingStatus, startedCount: number) => {
+    const acceptedThisSession = Math.max(0, status.count - startedCount);
+    const boundedAccepted = Math.min(GUIDED_CAPTURE_TARGET, acceptedThisSession);
+    const { counts, currentIndex } = distributeGuidedPoseCounts(boundedAccepted);
+    setCapturedSamples(boundedAccepted);
+    setGuidedPoseCounts(counts);
+    setGuidedStepIndex(currentIndex);
+  }, []);
+
+  const runTrainingAttempt = useCallback(async () => {
+    const result = await trainFaceModel();
+    if (!result.ok) {
+      throw new Error(result.message || 'Face model training failed.');
     }
-    if (!isCameraLive) {
-      setTrainingError('Start the camera before capturing.');
-      return;
-    }
-    const imageData = captureFrameDataUrl();
-    if (!imageData) {
-      setTrainingError('Camera frame not ready. Wait a moment and try again.');
+  }, []);
+
+  const runMandatoryAutoTraining = useCallback(async () => {
+    if (autoTrainStarted || isTraining) {
       return;
     }
 
-    setIsCapturingSample(true);
-    setTrainingError('');
-    setTrainingMessage('');
+    setAutoTrainStarted(true);
+    setRequiresManualTrainRetry(false);
     setTrainingComplete(false);
-    try {
-      const status = await captureFaceTrainingSample(cleanName, imageData);
-      setTrainingStatus(status);
-      setCapturedSamples((previous) => previous + 1);
-      setTrainingMessage(
-        `Captured sample accepted. Current total: ${status.count}.`,
-      );
-    } catch {
-      setTrainingError('Capture failed validation. Keep face centered, clear, and well lit.');
-    } finally {
-      setIsCapturingSample(false);
-    }
-  };
-
-  const handleCaptureFromSystemCamera = async () => {
-    const cleanName = newUserName.trim();
-    if (!cleanName) {
-      setTrainingError('Enter the user name before capturing samples.');
-      return;
-    }
-
-    setIsCapturingSample(true);
+    setIsTraining(true);
     setTrainingError('');
-    setTrainingMessage('');
-    setTrainingComplete(false);
+
     try {
-      const response = await fetch(
-        `/camera/frame/${trainingSystemCameraNode}?capture_tick=${Date.now()}`,
-        {
-          method: 'GET',
-          cache: 'no-store',
-        },
-      );
-      if (!response.ok) {
-        throw new Error(`camera frame unavailable (${response.status})`);
+      try {
+        setTrainingMessage('Target reached. Training model...');
+        await runTrainingAttempt();
+        setTrainingComplete(true);
+        setTrainingMessage('Face model training completed. Authorized profile is ready.');
+      } catch (firstError) {
+        const firstMessage = firstError instanceof Error ? firstError.message : 'Face model training failed.';
+        setTrainingMessage(`Training failed (${firstMessage}). Retrying once...`);
+        await runTrainingAttempt();
+        setTrainingComplete(true);
+        setTrainingMessage('Face model training completed after one retry.');
       }
-      const frameBlob = await response.blob();
-      const imageData = await readBlobAsDataUrl(frameBlob);
-      const status = await captureFaceTrainingSample(cleanName, imageData);
-      setTrainingStatus(status);
-      setCapturedSamples((previous) => previous + 1);
-      setTrainingMessage(`Captured sample accepted. Current total: ${status.count}.`);
-      setSystemPreviewTick(Date.now());
-    } catch {
-      setTrainingError('Unable to capture from system camera feed. Ensure the selected camera feed is online.');
-    } finally {
-      setIsCapturingSample(false);
-    }
-  };
 
-  const handleCaptureSample = async () => {
-    if (trainingCameraSource === 'system') {
-      await handleCaptureFromSystemCamera();
+      if (newUserName.trim()) {
+        try {
+          const refreshed = await fetchFaceTrainingStatus(newUserName.trim());
+          setTrainingStatus(refreshed);
+        } catch {
+          // Keep current status when refresh fails.
+        }
+      }
+    } catch (secondError) {
+      const message = secondError instanceof Error ? secondError.message : 'Face model training failed.';
+      setTrainingError(`${message} Click Retry Train to try again.`);
+      setTrainingMessage('Auto-training failed after one retry. Manual retry is required.');
+      setRequiresManualTrainRetry(true);
+      setTrainingComplete(false);
+    } finally {
+      setIsTraining(false);
+    }
+  }, [autoTrainStarted, isTraining, newUserName, runTrainingAttempt]);
+
+  const captureFromActiveSource = useCallback(async () => {
+    const cleanName = newUserName.trim();
+    if (!cleanName || !isGuidedCaptureActive) {
       return;
     }
-    await handleCaptureFromDeviceCamera();
-  };
+    if (captureLoopBusyRef.current || isTraining) {
+      return;
+    }
+    if (trainingCameraSource === 'device' && !isCameraLive) {
+      return;
+    }
+
+    captureLoopBusyRef.current = true;
+    setIsCapturingSample(true);
+    setTrainingError('');
+    setTrainingComplete(false);
+
+    try {
+      let status: FaceTrainingStatus;
+      if (trainingCameraSource === 'system') {
+        status = await captureFaceTrainingSampleFromNode(cleanName, trainingSystemCameraNode);
+      } else {
+        const imageData = captureFrameDataUrl();
+        if (!imageData) {
+          throw new Error('camera_frame_not_ready');
+        }
+        status = await captureFaceTrainingSample(cleanName, imageData);
+      }
+
+      setTrainingStatus(status);
+      applyGuidedProgress(status, sessionBaseSampleCount);
+
+      const acceptedThisSession = Math.max(0, status.count - sessionBaseSampleCount);
+      if (acceptedThisSession >= GUIDED_CAPTURE_TARGET) {
+        setIsGuidedCaptureActive(false);
+        await runMandatoryAutoTraining();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (trainingCameraSource === 'device') {
+        setTrainingError(`Capture rejected (${message || 'validation'}). Keep your face inside the guide and stay steady.`);
+      } else {
+        setTrainingError('System camera capture failed. Check selected feed availability and alignment.');
+      }
+    } finally {
+      setIsCapturingSample(false);
+      captureLoopBusyRef.current = false;
+    }
+  }, [
+    newUserName,
+    isGuidedCaptureActive,
+    isTraining,
+    trainingCameraSource,
+    isCameraLive,
+    trainingSystemCameraNode,
+    applyGuidedProgress,
+    sessionBaseSampleCount,
+    runMandatoryAutoTraining,
+  ]);
 
   useEffect(() => {
-    if (trainingInputMode !== 'camera' || trainingCameraSource !== 'system') {
+    if (trainingCameraSource !== 'system') {
       return undefined;
     }
     const timer = window.setInterval(() => {
@@ -255,13 +388,25 @@ export function Settings() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [trainingInputMode, trainingCameraSource]);
+  }, [trainingCameraSource]);
 
   useEffect(() => {
-    if (trainingInputMode !== 'camera' || trainingCameraSource !== 'device') {
+    if (!isGuidedCaptureActive) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      void captureFromActiveSource();
+    }, GUIDED_CAPTURE_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [isGuidedCaptureActive, captureFromActiveSource]);
+
+  useEffect(() => {
+    if (trainingCameraSource !== 'device') {
       stopCameraStream();
     }
-  }, [trainingInputMode, trainingCameraSource]);
+  }, [trainingCameraSource]);
 
   const loadSettings = async () => {
     try {
@@ -273,6 +418,7 @@ export function Settings() {
       ]);
       setAuthorizedProfiles(live.authorizedProfiles);
       setRuntimeSettings(live.runtimeSettings);
+      syncRuntimeDrafts(live.runtimeSettings);
       const snapshotCooldown = live.runtimeSettings.find(
         (setting) => setting.key === 'TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS',
       );
@@ -303,6 +449,7 @@ export function Settings() {
         }
         setAuthorizedProfiles(live.authorizedProfiles);
         setRuntimeSettings(live.runtimeSettings);
+        syncRuntimeDrafts(live.runtimeSettings);
         const snapshotCooldown = live.runtimeSettings.find(
           (setting) => setting.key === 'TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS',
         );
@@ -358,23 +505,44 @@ export function Settings() {
     [runtimeSettings],
   );
 
+  const runtimeEditableSettings = useMemo(
+    () => runtimeSettings.filter((setting) => setting.editable !== false),
+    [runtimeSettings],
+  );
+
+  const runtimeNonSecretSettings = useMemo(
+    () => runtimeEditableSettings.filter((setting) => !setting.secret),
+    [runtimeEditableSettings],
+  );
+
+  const runtimeSecretSettings = useMemo(
+    () => runtimeEditableSettings.filter((setting) => setting.secret),
+    [runtimeEditableSettings],
+  );
+
   const resetAddUserModal = () => {
     stopCameraStream();
     setShowAddUserModal(false);
     setNewUserName('');
     setNewUserRole('Family Member');
-    setSelectedFiles([]);
-    setUploadProgress(0);
     setTrainingStatus(null);
     setTrainingComplete(false);
     setTrainingMessage('');
     setTrainingError('');
-    setTrainingInputMode('upload');
+    setTrainingCameraSource('device');
+    setShowSystemCameraFallback(false);
+    setTrainingSystemCameraNode('cam_indoor');
+    setSystemPreviewTick(Date.now());
     setCapturedSamples(0);
+    setSessionBaseSampleCount(0);
+    setGuidedPoseCounts(emptyGuidedPoseCounts());
+    setGuidedStepIndex(0);
+    setIsGuidedCaptureActive(false);
     setIsCameraStarting(false);
     setIsCameraLive(false);
     setIsCapturingSample(false);
-    setIsUploading(false);
+    setAutoTrainStarted(false);
+    setRequiresManualTrainRetry(false);
     setIsTraining(false);
     setIsSavingUser(false);
   };
@@ -388,75 +556,68 @@ export function Settings() {
     try {
       const status = await fetchFaceTrainingStatus(cleanName);
       setTrainingStatus(status);
+      if (isGuidedCaptureActive) {
+        applyGuidedProgress(status, sessionBaseSampleCount);
+      }
     } catch {
       setTrainingError('Unable to refresh training status.');
     }
   };
 
-  const handleUploadImages = async () => {
+  const handleStartGuidedCapture = async () => {
     const cleanName = newUserName.trim();
     if (!cleanName) {
-      setTrainingError('Enter the user name before uploading images.');
-      return;
-    }
-    if (selectedFiles.length === 0) {
-      setTrainingError('Select one or more face images first.');
+      setTrainingError('Enter the user name before starting guided capture.');
       return;
     }
 
-    setIsUploading(true);
     setTrainingError('');
     setTrainingMessage('');
     setTrainingComplete(false);
-    setUploadProgress(0);
+    setRequiresManualTrainRetry(false);
+    setAutoTrainStarted(false);
 
-    let successCount = 0;
-    for (let index = 0; index < selectedFiles.length; index += 1) {
-      const file = selectedFiles[index];
-      try {
-        const dataUrl = await readFileAsDataUrl(file);
-        const status = await captureFaceTrainingSample(cleanName, dataUrl);
-        setTrainingStatus(status);
-        successCount += 1;
-      } catch {
-        setTrainingError(`Some files failed validation. Keep face centered and well lit.`);
-      }
-      setUploadProgress(Math.round(((index + 1) / selectedFiles.length) * 100));
-    }
-
+    let status: FaceTrainingStatus;
     try {
-      const latestStatus = await fetchFaceTrainingStatus(cleanName);
-      setTrainingStatus(latestStatus);
-      if (successCount > 0) {
-        setTrainingMessage(
-          `${successCount} sample${successCount > 1 ? 's' : ''} accepted. Current total: ${latestStatus.count}.`,
-        );
-      }
+      status = await fetchFaceTrainingStatus(cleanName);
+      setTrainingStatus(status);
     } catch {
-      // Keep latest local training status if refresh fails.
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  const handleStartTraining = async () => {
-    if (!trainingStatus?.ready || isTraining) {
+      setTrainingError('Unable to start guided capture because status refresh failed.');
       return;
     }
+
+    if (trainingCameraSource === 'device') {
+      const cameraReady = await startCameraStream();
+      if (!cameraReady) {
+        return;
+      }
+    }
+
+    setSessionBaseSampleCount(status.count);
+    setCapturedSamples(0);
+    setGuidedPoseCounts(emptyGuidedPoseCounts());
+    setGuidedStepIndex(0);
+    setIsGuidedCaptureActive(true);
+    setTrainingMessage('Guided auto-capture started. Follow each on-screen instruction.');
+  };
+
+  const handleManualRetryTraining = async () => {
+    if (isTraining) {
+      return;
+    }
+
     setIsTraining(true);
     setTrainingError('');
-    setTrainingMessage('');
+    setTrainingMessage('Retrying training...');
     try {
-      const result = await trainFaceModel();
-      if (!result.ok) {
-        throw new Error(result.message || 'Face model training failed.');
-      }
+      await runTrainingAttempt();
       setTrainingComplete(true);
-      setTrainingMessage('Face recognition model retraining completed successfully.');
+      setRequiresManualTrainRetry(false);
+      setTrainingMessage('Face model training completed successfully.');
       await handleRefreshTrainingStatus();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Face model training failed.';
-      setTrainingError(message);
+      setTrainingError(`${message} Click Retry Train to try again.`);
       setTrainingComplete(false);
     } finally {
       setIsTraining(false);
@@ -569,9 +730,117 @@ export function Settings() {
     }
   };
 
+  const isRuntimeBoolOn = (setting: RuntimeSetting): boolean => {
+    const fallback = String(setting.value || '').trim().toLowerCase();
+    const source = String(runtimeDrafts[setting.key] ?? fallback).trim().toLowerCase();
+    return source === 'true' || source === '1' || source === 'yes' || source === 'on' || source === 'enabled';
+  };
+
+  const handleRuntimeDraftChange = (key: string, value: string) => {
+    setRuntimeDrafts((previous) => ({
+      ...previous,
+      [key]: value,
+    }));
+  };
+
+  const handleRuntimeSecretReplaceToggle = (key: string, enabled: boolean) => {
+    setRuntimeSecretReplaceMode((previous) => ({
+      ...previous,
+      [key]: enabled,
+    }));
+    if (!enabled) {
+      setRuntimeDrafts((previous) => ({
+        ...previous,
+        [key]: '',
+      }));
+      setRuntimeSaveMessages((previous) => ({
+        ...previous,
+        [key]: '',
+      }));
+    }
+  };
+
+  const handleSaveRuntimeSetting = async (setting: RuntimeSetting) => {
+    if (setting.editable === false || runtimeSavingKey) {
+      return;
+    }
+
+    const key = setting.key;
+    const draftValue = runtimeDrafts[key] ?? (setting.secret ? '' : setting.value);
+    const normalizedValue = setting.inputType === 'switch'
+      ? (draftValue.trim().toLowerCase() === 'true' ? 'true' : 'false')
+      : draftValue.trim();
+
+    if (setting.secret && !runtimeSecretReplaceMode[key]) {
+      handleRuntimeSecretReplaceToggle(key, true);
+      return;
+    }
+
+    if (setting.secret && !normalizedValue) {
+      setRuntimeSaveMessages((previous) => ({
+        ...previous,
+        [key]: 'Enter a value before saving replacement.',
+      }));
+      return;
+    }
+
+    setRuntimeSavingKey(key);
+    setRuntimeSaveMessages((previous) => ({
+      ...previous,
+      [key]: '',
+    }));
+    try {
+      const result = await updateRuntimeSetting(key, normalizedValue);
+      setRuntimeSettings((previous) =>
+        previous.map((item) => {
+          if (item.key !== key) {
+            return item;
+          }
+          return {
+            ...item,
+            value: result.secret ? '' : result.value,
+            configured: result.secret ? result.configured : item.configured,
+          };
+        }),
+      );
+      setRuntimeDrafts((previous) => ({
+        ...previous,
+        [key]: result.secret ? '' : result.value,
+      }));
+      if (result.secret) {
+        handleRuntimeSecretReplaceToggle(key, false);
+      }
+      setRuntimeSaveMessages((previous) => ({
+        ...previous,
+        [key]: setting.secret
+          ? (result.configured ? 'Secret updated.' : 'Secret cleared.')
+          : 'Saved.',
+      }));
+      window.setTimeout(() => {
+        setRuntimeSaveMessages((previous) => ({
+          ...previous,
+          [key]: '',
+        }));
+      }, 3000);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to save setting.';
+      setRuntimeSaveMessages((previous) => ({
+        ...previous,
+        [key]: message,
+      }));
+    } finally {
+      setRuntimeSavingKey(null);
+    }
+  };
+
   const mobileRemoteRoute = mobileRemoteStatus?.route || '/dashboard/remote/mobile';
   const mobileRemoteUrl = remoteLinks?.preferredUrl ||
     (typeof window !== 'undefined' ? `${window.location.origin}${mobileRemoteRoute}` : mobileRemoteRoute);
+  const guidedStep = GUIDED_POSE_PLAN[Math.min(guidedStepIndex, GUIDED_POSE_PLAN.length - 1)];
+  const guidedProgressPercent = Math.max(
+    0,
+    Math.min(100, Math.round((capturedSamples / GUIDED_CAPTURE_TARGET) * 100)),
+  );
 
   const addUserModal = (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
@@ -579,7 +848,7 @@ export function Settings() {
         <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
           <div>
             <h3 className="text-lg font-semibold text-gray-900">Add New Authorized User</h3>
-            <p className="text-sm text-gray-600 mt-1">Upload samples and retrain the face model.</p>
+            <p className="text-sm text-gray-600 mt-1">Guided auto-capture with mandatory retraining.</p>
           </div>
           <button
             onClick={resetAddUserModal}
@@ -639,226 +908,159 @@ export function Settings() {
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <h5 className="font-medium text-blue-900 mb-2">Training Guidelines</h5>
               <ul className="text-sm text-blue-800 space-y-1">
-                <li>Use either uploaded photos or live camera capture.</li>
-                <li>Use moderate lighting and avoid motion blur.</li>
-                <li>Keep the full face visible (no masks/sunglasses).</li>
+                <li>Auto-capture target: 40 accepted samples in guided poses.</li>
+                <li>Follow prompts exactly: Center, Left, Right, Up, Down.</li>
+                <li>Keep your full face inside the on-screen template.</li>
+                <li>Training starts automatically after target is reached.</li>
               </ul>
             </div>
 
             <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1">
               <button
                 onClick={() => {
-                  setTrainingInputMode('upload');
-                  setTrainingError('');
-                  setTrainingMessage('');
-                  stopCameraStream();
-                }}
-                className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
-                  trainingInputMode === 'upload'
-                    ? 'bg-white text-blue-700 border border-blue-200'
-                    : 'text-gray-600 hover:text-gray-900'
-                }`}
-              >
-                Upload Images
-              </button>
-              <button
-                onClick={() => {
-                  setTrainingInputMode('camera');
+                  setTrainingCameraSource('device');
                   setTrainingError('');
                   setTrainingMessage('');
                 }}
                 className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
-                  trainingInputMode === 'camera'
+                  trainingCameraSource === 'device'
                     ? 'bg-white text-blue-700 border border-blue-200'
                     : 'text-gray-600 hover:text-gray-900'
                 }`}
               >
-                Capture Camera
+                Device Camera
               </button>
+              {showSystemCameraFallback && (
+                <button
+                  onClick={() => {
+                    setTrainingCameraSource('system');
+                    setTrainingError('');
+                    setTrainingMessage('Using System Camera Feed fallback mode.');
+                  }}
+                  className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
+                    trainingCameraSource === 'system'
+                      ? 'bg-white text-blue-700 border border-blue-200'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  System Camera Feed
+                </button>
+              )}
             </div>
-
-            {trainingInputMode === 'upload' ? (
-              <>
-                <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
-                  <Camera className="w-10 h-10 text-gray-400 mx-auto mb-3" />
-                  <p className="text-sm text-gray-700 mb-3">
-                    Select one or more images. Each image is validated before being accepted.
-                  </p>
-                  <input
-                    id="face-upload"
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    className="hidden"
+            <div className="border-2 border-dashed border-gray-300 rounded-lg p-4">
+              {trainingCameraSource === 'system' && showSystemCameraFallback ? (
+                <div className="mb-3 flex items-center justify-center gap-2">
+                  <label className="text-xs text-gray-700">Feed</label>
+                  <select
+                    value={trainingSystemCameraNode}
                     onChange={(event) => {
-                      const files = event.target.files ? Array.from(event.target.files) : [];
-                      setSelectedFiles(files);
-                      setUploadProgress(0);
-                      setTrainingError('');
-                      setTrainingMessage('');
+                      setTrainingSystemCameraNode(event.target.value as 'cam_indoor' | 'cam_door');
+                      setSystemPreviewTick(Date.now());
                     }}
-                  />
-                  <label
-                    htmlFor="face-upload"
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors cursor-pointer"
+                    className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
-                    <Upload className="w-4 h-4" />
-                    Select Images
-                  </label>
+                    <option value="cam_indoor">cam_indoor</option>
+                    <option value="cam_door">cam_door</option>
+                  </select>
                 </div>
+              ) : null}
 
-                {selectedFiles.length > 0 && (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="font-medium text-gray-900">
-                        {selectedFiles.length} image{selectedFiles.length > 1 ? 's' : ''} selected
-                      </span>
-                      <span className="text-gray-600">
-                        {trainingStatus ? `Current samples: ${trainingStatus.count}` : 'No samples yet'}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-5 gap-2">
-                      {selectedFiles.slice(0, 10).map((file) => (
-                        <div
-                          key={`${file.name}-${file.lastModified}`}
-                          className="aspect-square bg-gray-100 rounded-lg flex items-center justify-center relative"
-                        >
-                          <Camera className="w-5 h-5 text-gray-500" />
-                          <div className="absolute top-1 right-1 w-5 h-5 bg-white/90 rounded-full flex items-center justify-center">
-                            <Check className="w-3 h-3 text-green-600" />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="border-2 border-dashed border-gray-300 rounded-lg p-4">
-                <div className="mb-3 flex flex-wrap items-center gap-2 justify-center">
-                  <button
-                    onClick={() => {
-                      setTrainingCameraSource('device');
-                      setTrainingError('');
-                    }}
-                    className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
-                      trainingCameraSource === 'device'
-                        ? 'bg-white text-blue-700 border border-blue-200'
-                        : 'text-gray-600 bg-gray-100 hover:text-gray-900'
-                    }`}
-                  >
-                    Device Camera
-                  </button>
-                  <button
-                    onClick={() => {
-                      setTrainingCameraSource('system');
-                      setTrainingError('');
-                    }}
-                    className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
-                      trainingCameraSource === 'system'
-                        ? 'bg-white text-blue-700 border border-blue-200'
-                        : 'text-gray-600 bg-gray-100 hover:text-gray-900'
-                    }`}
-                  >
-                    System Camera Feed
-                  </button>
-                </div>
-
+              <div className="relative aspect-video bg-gray-900 rounded-lg overflow-hidden mb-3 flex items-center justify-center">
                 {trainingCameraSource === 'device' ? (
                   <>
-                    <div className="relative aspect-video bg-gray-900 rounded-lg overflow-hidden mb-3 flex items-center justify-center">
-                      <video
-                        ref={videoRef}
-                        className={`w-full h-full object-cover ${isCameraLive ? '' : 'hidden'}`}
-                        muted
-                        playsInline
-                      />
-                      {!isCameraLive && (
-                        <div className="text-center text-gray-300 px-4">
-                          <Camera className="w-10 h-10 mx-auto mb-2 text-gray-500" />
-                          <p className="text-sm">Start camera to preview and capture face samples.</p>
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex flex-wrap gap-3 justify-center">
-                      <button
-                        onClick={() => void startCameraStream()}
-                        disabled={isCameraStarting || isCameraLive}
-                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
-                      >
-                        {isCameraStarting ? 'Starting Camera...' : isCameraLive ? 'Camera Ready' : 'Start Camera'}
-                      </button>
-                      <button
-                        onClick={stopCameraStream}
-                        disabled={!isCameraLive || isCameraStarting || isCapturingSample}
-                        className="px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors disabled:text-gray-400"
-                      >
-                        Stop Camera
-                      </button>
-                    </div>
-                    <p className="text-xs text-gray-600 text-center mt-3">
-                      If browser permission is blocked, switch to System Camera Feed.
-                    </p>
+                    <video
+                      ref={videoRef}
+                      className={`w-full h-full object-cover ${isCameraLive ? '' : 'hidden'}`}
+                      muted
+                      playsInline
+                    />
+                    {!isCameraLive && (
+                      <div className="text-center text-gray-300 px-4">
+                        <Camera className="w-10 h-10 mx-auto mb-2 text-gray-500" />
+                        <p className="text-sm">Start camera to begin guided capture.</p>
+                      </div>
+                    )}
                   </>
                 ) : (
-                  <>
-                    <div className="mb-3 flex items-center justify-center gap-2">
-                      <label className="text-xs text-gray-700">Feed</label>
-                      <select
-                        value={trainingSystemCameraNode}
-                        onChange={(event) => {
-                          setTrainingSystemCameraNode(event.target.value as 'cam_indoor' | 'cam_door');
-                          setSystemPreviewTick(Date.now());
-                        }}
-                        className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      >
-                        <option value="cam_indoor">cam_indoor</option>
-                        <option value="cam_door">cam_door</option>
-                      </select>
-                    </div>
-                    <div className="relative aspect-video bg-gray-900 rounded-lg overflow-hidden mb-3 flex items-center justify-center">
-                      <img
-                        src={`/camera/frame/${trainingSystemCameraNode}?sample_tick=${systemPreviewTick}`}
-                        alt={`${trainingSystemCameraNode} training preview`}
-                        className="w-full h-full object-cover"
-                        onError={() => {
-                          setTrainingError('Selected system camera feed is unavailable.');
-                        }}
-                      />
-                    </div>
-                    <div className="flex flex-wrap gap-3 justify-center">
-                      <button
-                        onClick={() => {
-                          setSystemPreviewTick(Date.now());
-                          setTrainingError('');
-                        }}
-                        className="px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
-                      >
-                        Refresh Preview
-                      </button>
-                    </div>
-                    <p className="text-xs text-gray-600 text-center mt-3">
-                      Uses your backend live feed. No browser camera permission required.
-                    </p>
-                  </>
+                  <img
+                    src={`/camera/frame/${trainingSystemCameraNode}?sample_tick=${systemPreviewTick}`}
+                    alt={`${trainingSystemCameraNode} training preview`}
+                    className="w-full h-full object-cover"
+                    onError={() => {
+                      setTrainingError('Selected system camera feed is unavailable.');
+                    }}
+                  />
+                )}
+
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                  <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                    <ellipse cx="50" cy="50" rx="24" ry="33" fill="none" stroke="rgba(56, 189, 248, 0.95)" strokeWidth="1.4" strokeDasharray="4 2" />
+                  </svg>
+                </div>
+                <p className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 rounded-full bg-black/55 px-3 py-1 text-[11px] text-white">
+                  Keep your face inside the guide shape
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-3 justify-center">
+                <button
+                  onClick={() => void startCameraStream()}
+                  disabled={trainingCameraSource !== 'device' || isCameraStarting || isCameraLive}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+                >
+                  {isCameraStarting ? 'Starting Camera...' : isCameraLive ? 'Camera Ready' : 'Start Camera'}
+                </button>
+                <button
+                  onClick={stopCameraStream}
+                  disabled={trainingCameraSource !== 'device' || !isCameraLive || isCameraStarting || isCapturingSample}
+                  className="px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors disabled:text-gray-400"
+                >
+                  Stop Camera
+                </button>
+                {trainingCameraSource === 'system' && (
+                  <button
+                    onClick={() => {
+                      setSystemPreviewTick(Date.now());
+                      setTrainingError('');
+                    }}
+                    className="px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                  >
+                    Refresh Preview
+                  </button>
                 )}
               </div>
-            )}
+              <p className="text-xs text-gray-600 text-center mt-3">
+                {trainingCameraSource === 'system'
+                  ? 'Fallback mode: using backend camera feed when device camera is unavailable.'
+                  : 'Device camera is the default for guided auto-capture.'}
+              </p>
+            </div>
 
-            {trainingInputMode === 'upload' && isUploading && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="font-medium text-gray-900">Uploading samples</span>
-                  <span className="text-gray-600">{uploadProgress}%</span>
-                </div>
-                <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-blue-600 transition-all duration-300"
-                    style={{ width: `${uploadProgress}%` }}
-                  />
-                </div>
+            <div className="rounded-lg border border-gray-200 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-medium text-gray-900">Guided progress</p>
+                <p className="text-sm text-gray-600">{capturedSamples}/{GUIDED_CAPTURE_TARGET}</p>
               </div>
-            )}
+              <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-600 transition-all duration-300"
+                  style={{ width: `${guidedProgressPercent}%` }}
+                />
+              </div>
+              <p className="text-sm text-blue-800 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+                {isGuidedCaptureActive
+                  ? `Current instruction: ${guidedStep.instruction}`
+                  : 'Current instruction: Start guided capture to begin automated sampling.'}
+              </p>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                {GUIDED_POSE_PLAN.map((step) => (
+                  <div key={step.id} className="rounded-md border border-gray-200 px-2 py-2 bg-gray-50">
+                    <p className="font-medium text-gray-800">{step.label}</p>
+                    <p className="text-gray-600">{guidedPoseCounts[step.id]}/{step.quota}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
 
             {trainingStatus && (
               <div className="rounded-lg border border-gray-200 p-4 text-sm">
@@ -872,32 +1074,23 @@ export function Settings() {
             )}
 
             <div className="flex flex-wrap gap-3">
-              {trainingInputMode === 'upload' ? (
-                <button
-                  onClick={() => void handleUploadImages()}
-                  disabled={isUploading || selectedFiles.length === 0}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
-                >
-                  {isUploading ? 'Uploading...' : 'Upload Samples'}
-                </button>
-              ) : (
-                <button
-                  onClick={() => void handleCaptureSample()}
-                  disabled={
-                    isCameraStarting ||
-                    isCapturingSample ||
-                    isTraining ||
-                    (trainingCameraSource === 'device' && !isCameraLive)
-                  }
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
-                >
-                  {isCapturingSample
-                    ? 'Capturing...'
-                    : trainingCameraSource === 'system'
-                      ? 'Capture From Feed'
-                      : 'Capture Sample'}
-                </button>
-              )}
+              <button
+                onClick={() => void handleStartGuidedCapture()}
+                disabled={isGuidedCaptureActive || isTraining || isCapturingSample || !newUserName.trim()}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+              >
+                {isGuidedCaptureActive ? 'Guided Capture Active' : 'Start Guided Auto-Capture'}
+              </button>
+              <button
+                onClick={() => {
+                  setIsGuidedCaptureActive(false);
+                  setTrainingMessage('Guided capture paused.');
+                }}
+                disabled={!isGuidedCaptureActive || isTraining}
+                className="px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors disabled:text-gray-400"
+              >
+                Stop Guided Capture
+              </button>
               <button
                 onClick={() => void handleRefreshTrainingStatus()}
                 disabled={!newUserName.trim()}
@@ -905,16 +1098,18 @@ export function Settings() {
               >
                 Refresh Status
               </button>
-              <button
-                onClick={() => void handleStartTraining()}
-                disabled={!trainingStatus?.ready || isTraining || isUploading || isCapturingSample}
-                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
-              >
-                {isTraining ? 'Training...' : 'Start Training'}
-              </button>
+              {requiresManualTrainRetry && (
+                <button
+                  onClick={() => void handleManualRetryTraining()}
+                  disabled={isTraining}
+                  className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+                >
+                  {isTraining ? 'Retrying...' : 'Retry Train'}
+                </button>
+              )}
             </div>
 
-            {trainingInputMode === 'camera' && capturedSamples > 0 && (
+            {capturedSamples > 0 && (
               <p className="text-sm text-gray-600">
                 Captures this session: {capturedSamples}
               </p>
@@ -1181,6 +1376,155 @@ export function Settings() {
               Monitored scope: {systemProfile.monitoredAreas.join(' and ')}. Contract preserved:{' '}
               {systemProfile.apiContract}.
             </p>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
+          <div className="flex items-center gap-3 mb-4 sm:mb-6">
+            <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
+              <Database className="w-5 h-5 text-blue-600" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-gray-900">Runtime Variable Overrides</h3>
+              <p className="text-sm text-gray-600">Update selected .env-backed runtime values without editing .env.</p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {runtimeNonSecretSettings.map((setting) => {
+              const currentDraft = runtimeDrafts[setting.key] ?? setting.value;
+              const saving = runtimeSavingKey === setting.key;
+              const message = runtimeSaveMessages[setting.key] || '';
+              return (
+                <div key={setting.key} className="rounded-lg border border-gray-200 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] sm:text-sm font-mono text-gray-900 break-all">{setting.key}</p>
+                    <div className="flex items-center gap-2 text-xs text-gray-600">
+                      <span className="rounded-full bg-gray-100 px-2 py-0.5">{setting.group || 'Runtime'}</span>
+                      <span className="rounded-full bg-green-50 text-green-700 px-2 py-0.5">
+                        {setting.liveApply ? 'Live' : 'Restart'}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-600 mt-1">{setting.description}</p>
+
+                  <div className="mt-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+                    {setting.inputType === 'switch' ? (
+                      <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                        <input
+                          type="checkbox"
+                          className="sr-only peer"
+                          checked={isRuntimeBoolOn(setting)}
+                          onChange={(event) => {
+                            handleRuntimeDraftChange(setting.key, event.target.checked ? 'true' : 'false');
+                          }}
+                          disabled={Boolean(runtimeSavingKey)}
+                        />
+                        <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-100 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600 peer-disabled:opacity-60" />
+                      </label>
+                    ) : (
+                      <input
+                        type={setting.inputType === 'number' ? 'number' : 'text'}
+                        min={setting.min}
+                        max={setting.max}
+                        step={setting.step || (setting.inputType === 'number' ? 1 : undefined)}
+                        value={currentDraft}
+                        onChange={(event) => {
+                          handleRuntimeDraftChange(setting.key, event.target.value);
+                        }}
+                        disabled={Boolean(runtimeSavingKey)}
+                        className="w-full sm:w-72 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                      />
+                    )}
+
+                    <button
+                      onClick={() => {
+                        void handleSaveRuntimeSetting(setting);
+                      }}
+                      disabled={Boolean(runtimeSavingKey)}
+                      className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                    >
+                      {saving ? 'Saving...' : 'Save'}
+                    </button>
+                  </div>
+                  {message ? <p className="mt-2 text-xs text-gray-700 break-words">{message}</p> : null}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="mt-6">
+            <h4 className="font-medium text-gray-900 mb-3">Secrets (Configured / Replace)</h4>
+            <div className="space-y-3">
+              {runtimeSecretSettings.map((setting) => {
+                const key = setting.key;
+                const replacing = Boolean(runtimeSecretReplaceMode[key]);
+                const saving = runtimeSavingKey === key;
+                const message = runtimeSaveMessages[key] || '';
+                const configured = Boolean(setting.configured);
+                const draft = runtimeDrafts[key] ?? '';
+
+                return (
+                  <div key={key} className="rounded-lg border border-gray-200 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-[11px] sm:text-sm font-mono text-gray-900 break-all">{key}</p>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs ${
+                          configured ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'
+                        }`}
+                      >
+                        {configured ? 'Configured' : 'Unconfigured'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-600 mt-1">{setting.description}</p>
+
+                    {!replacing ? (
+                      <button
+                        onClick={() => {
+                          handleRuntimeSecretReplaceToggle(key, true);
+                        }}
+                        disabled={Boolean(runtimeSavingKey)}
+                        className="mt-3 px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60"
+                      >
+                        Replace
+                      </button>
+                    ) : (
+                      <div className="mt-3 flex flex-col sm:flex-row sm:items-center gap-2">
+                        <input
+                          type="password"
+                          value={draft}
+                          onChange={(event) => {
+                            handleRuntimeDraftChange(key, event.target.value);
+                          }}
+                          placeholder="Enter replacement value"
+                          disabled={Boolean(runtimeSavingKey)}
+                          className="w-full sm:w-80 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                        />
+                        <button
+                          onClick={() => {
+                            void handleSaveRuntimeSetting(setting);
+                          }}
+                          disabled={Boolean(runtimeSavingKey)}
+                          className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                        >
+                          {saving ? 'Saving...' : 'Save'}
+                        </button>
+                        <button
+                          onClick={() => {
+                            handleRuntimeSecretReplaceToggle(key, false);
+                          }}
+                          disabled={Boolean(runtimeSavingKey)}
+                          className="px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                    {message ? <p className="mt-2 text-xs text-gray-700 break-words">{message}</p> : null}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
 

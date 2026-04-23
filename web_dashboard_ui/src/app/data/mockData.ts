@@ -99,6 +99,15 @@ export interface RuntimeSetting {
   key: string;
   value: string;
   description: string;
+  editable?: boolean;
+  secret?: boolean;
+  configured?: boolean;
+  group?: string;
+  inputType?: 'text' | 'number' | 'switch' | 'secret';
+  liveApply?: boolean;
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 export const systemProfile = {
@@ -367,7 +376,7 @@ export const cameraFeeds: CameraFeed[] = [
 
 export const detectionPipelines: DetectionPipeline[] = [
   {
-    name: 'Face Recognition (OpenCV LBPH)',
+    name: 'Face Recognition (YuNet + SFace)',
     state: 'active',
     detail: 'Authorized vs unknown classification running',
   },

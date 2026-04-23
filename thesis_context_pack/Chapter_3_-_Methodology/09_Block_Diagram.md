@@ -2,12 +2,48 @@
 
 Figure 7. Block Diagram
 
-The block diagram presents the current integrated architecture using a split-host setup: **Raspberry Pi 2** for server hosting (dashboard/API/database/alerts) and a **second-hand laptop** for face-recognition and visual flame-detection processing. The system monitors two areas: **Living Room** and **Door Entrance Area**.
+The block diagram below presents the integrated architecture of the prototype. The system monitors two areas: **Living Room** and **Door Entrance Area**. It combines camera inputs, smoke-sensing nodes, a door-force node, local monitoring services, and optional remote access layers. Raspberry Pi 2 is represented as an optional deployment component for local edge hosting.
 
-- Indoor monitoring uses a **USB UVC webcam** with IR support (local capture source).
-- Outdoor monitoring uses an **ESP32-CAM** over **HTTP MJPEG** on local Wi-Fi/LAN.
-- Smoke events are provided by two ESP32-C3 nodes: `mq2_living` and `mq2_door`.
-- Door-force events are provided by `door_force` (ESP32-C3 + GY-LSM6DS3).
-- Sensor nodes send data via **HTTP POST + JSON** to `POST /api/sensors/event`.
+```text
++-------------------+      +-------------------+
+| Camera Input A    |      | Camera Input B    |
+| Living Room       |      | Door Entrance     |
++-------------------+      +-------------------+
+          |                           |
+          +-------------+-------------+
+                        |
+                        v
+              +-----------------------+
+              | Detection Modules     |
+              | - Face Recognition    |
+              | - Fire Confirmation   |
+              +-----------------------+
+                        |
+                        v
++-------------------+   +-----------------------+   +-------------------+
+| Smoke Node 1      |-->| Event / Fusion Engine |<--| Smoke Node 2      |
+| Living Room       |   | - Intruder Logic      |   | Door Entrance     |
++-------------------+   | - Fire Logic          |   +-------------------+
+                        | - Alert Decisions     |
++-------------------+   +-----------------------+
+| Door-Force Node   |--------------->|
+| Door Entrance     |                v
++-------------------+      +---------------------------+
+                           | Local Monitoring Services |
+                           | - Alerts / ACK            |
+                           | - Logs / Snapshots        |
+                           | - Daily Summaries         |
+                           | - Dashboard               |
+                           +---------------------------+
+                                        |
+                                        v
+                           +---------------------------+
+                           | Optional Remote Layers    |
+                           | Mobile / Telegram / LAN   |
+                           +---------------------------+
 
-The Raspberry Pi 2 host performs event logging, fusion-based alerting, and dashboard rendering, while the second-hand laptop executes vision inference. Alerts are persistent on the local interface, with optional remote delivery/access layers.
+                           +---------------------------+
+                           | Raspberry Pi 2            |
+                           | Optional Local Edge Host  |
+                           +---------------------------+
+```

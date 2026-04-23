@@ -2,19 +2,19 @@
 
 Figure X. Updated Conceptual Framework for the Real-Time Intruder and Fire Monitoring Alert System
 
-This conceptual framework follows the five-phase engineering flow used in Chapter 3 and aligns with the current implementation baseline: Raspberry Pi as the primary host, MQTT-based sensor transport, and dual-area monitoring (Living Room and Door Entrance Area).
+This conceptual framework follows the five-phase engineering flow used in Chapter 3 and aligns with the current implementation baseline: dual-area monitoring (Living Room and Door Entrance Area), HTTP-based sensor-event ingestion, event-driven camera analysis, and flexible local deployment in which Raspberry Pi 2 may be used for local edge hosting when needed.
 
 ## Phase 1: System Architecture and Component Design
 
 1. Define the system scope by identifying target threats: unauthorized persons (intruders) and fire-related events.
-2. Design the integrated architecture using Raspberry Pi (primary host), indoor and outdoor night-vision ESP32-CAM units, two smoke-sensor nodes, and one door-force sensor node.
+2. Design the integrated architecture using camera inputs, smoke-sensor nodes, one door-force sensor node, local monitoring services, and optional deployment support from Raspberry Pi 2.
 3. Plan physical deployment, node placement, monitored zones, and notification recipients.
 
 **Phase 1 Output:** Finalized architecture, deployment map, and node/area assignments.
 
 ## Phase 2: Core Algorithm and Subsystem Development
 
-4. Develop and benchmark the face pipeline (OpenCV face detection + LBPH recognition) for authorized-vs-unknown classification.
+4. Develop and benchmark the face pipeline (OpenCV YuNet face detector + SFace recognizer) for authorized-vs-unknown classification.
 5. Create the visual flame detection algorithm for indoor camera input.
 6. Construct and calibrate smoke and door-force sensor subsystems, including firmware event publishing.
 7. Test subsystem-level detection behavior and latency under controlled conditions.
@@ -24,8 +24,8 @@ This conceptual framework follows the five-phase engineering flow used in Chapte
 ## Phase 3: System Integration and Multi-Sensor Intelligence Layer
 
 8. Implement multi-criteria fire verification that requires both visual flame evidence and smoke evidence within the configured fusion window.
-9. Integrate ESP32 nodes and Raspberry Pi services through MQTT (`publish -> broker -> ingest bridge -> POST /api/sensors/event`).
-10. Develop the Python-based monitoring interface (Flask backend + dashboard) for event logs, alerts, and face/sensor management workflows.
+9. Integrate sensing nodes and monitoring services through HTTP event ingestion (`POST /api/sensors/event`).
+10. Develop the monitoring interface for event logs, alerts, settings, daily summaries, and face-management workflows.
 11. Construct the notification framework for persistent mobile alerts and operator acknowledgment handling.
 
 **Phase 3 Output:** Fully integrated local-first monitoring stack with fusion logic, persistent alerts, and event logging.
@@ -49,3 +49,26 @@ This conceptual framework follows the five-phase engineering flow used in Chapte
 ## End-to-End Conceptual Flow
 
 `Phase 1 (Design) -> Phase 2 (Module Development) -> Phase 3 (Integration + Fusion) -> Phase 4 (Deployment + Operational Testing) -> Phase 5 (Evaluation + Documentation)`
+
+## ASCII Flow
+
+```text
+PHASE 1
+Design scope, architecture, deployment options
+        |
+        v
+PHASE 2
+Develop face, smoke, door-force, and fire-confirmation modules
+        |
+        v
+PHASE 3
+Integrate sensor events, camera analysis, fusion logic, and alerts
+        |
+        v
+PHASE 4
+Run repeated scenario tests, tune thresholds, refine workflows
+        |
+        v
+PHASE 5
+Analyze results, summarize findings, prepare Chapters 4 and 5
+```

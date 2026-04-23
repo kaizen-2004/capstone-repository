@@ -4,6 +4,19 @@ Use this map to avoid flashing the wrong sketch.
 
 ## Active Mode (HTTP over Wi-Fi)
 
+Node onboarding/setup AP provisioning is removed.
+Configure Wi-Fi and backend values in one shared header before upload.
+
+Edit this file:
+
+- `firmware/http/common/network_config.h`
+
+Required values:
+
+- `THESIS_WIFI_SSID`
+- `THESIS_WIFI_PASSWORD`
+- `THESIS_BACKEND_BASE` (example: `http://192.168.1.8:8765`)
+
 Flash these sketches:
 
 1. Door-force node:

@@ -17,8 +17,15 @@ def _safe_text(value: Any, fallback: str = "") -> str:
 class TelegramNotifier:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.bot_token = settings.telegram_bot_token.strip()
-        self.chat_id = settings.telegram_chat_id.strip()
+        self.bot_token = ""
+        self.chat_id = ""
+        self._endpoint = ""
+        self._photo_endpoint = ""
+        self.apply_credentials(settings.telegram_bot_token, settings.telegram_chat_id)
+
+    def apply_credentials(self, bot_token: str, chat_id: str) -> None:
+        self.bot_token = str(bot_token or "").strip()
+        self.chat_id = str(chat_id or "").strip()
         self._endpoint = (
             f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
             if self.bot_token

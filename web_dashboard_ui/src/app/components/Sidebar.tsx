@@ -7,7 +7,6 @@ import {
   Radio, 
   BarChart3, 
   Settings,
-  Router,
   X,
   LogOut
 } from 'lucide-react';
@@ -19,7 +18,6 @@ const navigation = [
   { name: 'Events & Alerts', href: '/events', icon: Bell },
   { name: 'Sensors & Nodes', href: '/sensors', icon: Radio },
   { name: 'Statistics', href: '/statistics', icon: BarChart3 },
-  { name: 'Node Onboarding', href: '/onboarding', icon: Router },
   { name: 'Settings', href: '/settings', icon: Settings },
 ];
 

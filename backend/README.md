@@ -35,7 +35,12 @@ Override using env vars:
 - `CAMERA_INDOOR_WEBCAM_INDEX` (default `0`)
 - `CAMERA_DOOR_WEBCAM_INDEX` (default `1`, auto-fallback to `0` if unavailable)
 - `CAMERA_PROCESSING_FPS` (default `12`)
-- `FACE_MATCH_THRESHOLD` (default `68`; `80-90` is useful for temporary webcam validation)
+- `FACE_COSINE_THRESHOLD` (default `0.52`; higher is stricter)
+- `FACE_DETECTOR_MODEL_PATH` (default `backend/storage/models/face/face_detection_yunet_2023mar.onnx`)
+- `FACE_RECOGNIZER_MODEL_PATH` (default `backend/storage/models/face/face_recognition_sface_2021dec.onnx`)
+- `FACE_DETECT_SCORE_THRESHOLD` (default `0.90`)
+- `FACE_DETECT_NMS_THRESHOLD` (default `0.30`)
+- `FACE_DETECT_TOP_K` (default `5000`)
 - `AUTHORIZED_PRESENCE_LOGGING_ENABLED` (default `false`; logs authorized re-entry when a recognized face appears in camera view)
 - `AUTHORIZED_PRESENCE_SCAN_SECONDS` (default `2`)
 - `AUTHORIZED_PRESENCE_COOLDOWN_SECONDS` (default `20`)
@@ -63,6 +68,7 @@ Notes:
 
 - Backend auto-loads project root `.env` by default.
 - Override env file path using `THESIS_ENV_FILE=/absolute/path/to/file.env`.
+- Dashboard runtime settings can override selected `.env` values (including Telegram/WebPush fields) at runtime.
 
 ## Core APIs
 

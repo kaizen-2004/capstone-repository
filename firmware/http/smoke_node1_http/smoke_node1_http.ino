@@ -1,20 +1,21 @@
 #include <HTTPClient.h>
-#include <Preferences.h>
-#include <WebServer.h>
 #include <WiFi.h>
 
-// Compile-time fallback values.
-static const char* WIFI_SSID = "";
-static const char* WIFI_PASSWORD = "";
-static const char* WIFI_HOSTNAME = "smoke-node1";
-static const char* BACKEND_BASE = "";
+#include "../common/network_config.h"
 
-// Node metadata.
+// Network values are shared across all node sketches.
+// Edit firmware/http/common/network_config.h for hotspot/LAN changes.
+static const char* WIFI_SSID = THESIS_WIFI_SSID;
+static const char* WIFI_PASSWORD = THESIS_WIFI_PASSWORD;
+static const char* WIFI_HOSTNAME = "smoke-node1";
+static const char* BACKEND_BASE = THESIS_BACKEND_BASE;
+
+// Node identity is intentionally per-sketch and must stay unique.
 static const char* NODE_ID = "smoke_node1";
 static const char* NODE_LABEL = "Smoke Sensor Node 1";
 static const char* NODE_LOCATION = "Living Room";
 static const char* NODE_TYPE = "smoke";
-static const char* FIRMWARE_VERSION = "smoke_node1_http_v2_provision";
+static const char* FIRMWARE_VERSION = "smoke_node1_http_v3_manual_wifi";
 
 // Adaptive TX power profile:
 // - start with moderate TX for join attempts
@@ -42,11 +43,6 @@ static const char* FIRMWARE_VERSION = "smoke_node1_http_v2_provision";
 #define WIFI_TX_POWER_RUNTIME WIFI_TX_POWER_CONNECT_INITIAL
 #endif
 
-// Provisioning behavior.
-static const uint32_t SETUP_AP_TIMEOUT_MS = 600000;  // 10 minutes
-static const uint32_t SETUP_AP_POST_CONNECT_GRACE_MS = 30000;  // 30 seconds
-static const char* SETUP_AP_PREFIX = "Thesis-Setup";
-
 // Connectivity/retry timing.
 static const uint32_t WIFI_RETRY_INTERVAL_MS = 15000;
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
@@ -57,17 +53,8 @@ static const uint8_t WIFI_ESCALATE_AFTER_ATTEMPTS = 2;
 static const uint32_t HEARTBEAT_INTERVAL_MS = 15000;
 static const uint32_t SENSOR_REPORT_INTERVAL_MS = 5000;
 
-// NVS keys.
-static const char* NVS_NAMESPACE = "th_prov";
-static const char* NVS_WIFI_SSID = "wifi_ssid";
-static const char* NVS_WIFI_PASS = "wifi_pass";
-static const char* NVS_HOSTNAME = "hostname";
-static const char* NVS_BACKEND_BASE = "backend_base";
-static const char* NVS_FORCE_SETUP_AP = "force_ap";
-
 enum ProvisionState {
   PROVISION_UNCONFIGURED = 0,
-  PROVISION_AP_SETUP,
   PROVISION_CONNECTING,
   PROVISION_CONNECTED,
   PROVISION_CONNECT_FAILED,
@@ -81,14 +68,6 @@ String runtimeHostname;
 String runtimeBackendBase;
 String lastProvisionError;
 
-bool forceSetupApOnBoot = false;
-bool setupApActive = false;
-bool setupApExpired = false;
-String setupApSsid;
-uint32_t setupApStartedMs = 0;
-bool pendingDisableSetupAp = false;
-uint32_t setupApDisableAtMs = 0;
-
 uint32_t lastHeartbeatMs = 0;
 uint32_t lastReadingMs = 0;
 uint32_t lastWiFiAttemptMs = 0;
@@ -99,10 +78,6 @@ uint8_t wifiConnectAttempts = 0;
 uint8_t lastDisconnectReason = 0;
 bool wasWiFiConnected = false;
 bool registrationOk = false;
-
-WebServer provisionServer(80);
-bool provisionServerRoutesReady = false;
-bool provisionServerRunning = false;
 
 String sanitizeHostname(const String& raw) {
   String out;
@@ -175,25 +150,6 @@ String sanitizeBackendBase(const String& baseRaw) {
   return base;
 }
 
-String jsonEscape(const String& in) {
-  String out;
-  out.reserve(in.length() + 8);
-  for (size_t i = 0; i < in.length(); ++i) {
-    char c = in.charAt(i);
-    if (c == '\\' || c == '"') {
-      out += '\\';
-      out += c;
-    } else if (c == '\n') {
-      out += "\\n";
-    } else if (c == '\r') {
-      out += "\\r";
-    } else {
-      out += c;
-    }
-  }
-  return out;
-}
-
 const char* wifiStatusText(wl_status_t s) {
   switch (s) {
     case WL_IDLE_STATUS:
@@ -219,8 +175,6 @@ String provisionStateText() {
   switch (provisionState) {
     case PROVISION_UNCONFIGURED:
       return "unconfigured";
-    case PROVISION_AP_SETUP:
-      return "ap_setup";
     case PROVISION_CONNECTING:
       return "connecting";
     case PROVISION_CONNECTED:
@@ -232,50 +186,8 @@ String provisionStateText() {
   }
 }
 
-String chipIdSuffix() {
-  uint64_t chipId = ESP.getEfuseMac();
-  char suffix[7];
-  snprintf(suffix, sizeof(suffix), "%06llX", chipId & 0xFFFFFFULL);
-  return String(suffix);
-}
-
-String chipIdHex() {
-  uint64_t chipId = ESP.getEfuseMac();
-  char buf[13];
-  snprintf(buf, sizeof(buf), "%012llX", chipId);
-  return String(buf);
-}
-
-String buildSetupApSsid() {
-  return String(SETUP_AP_PREFIX) + "-" + chipIdSuffix();
-}
-
 bool hasRuntimeWiFiConfig() {
   return isConfiguredValue(runtimeWiFiSsid);
-}
-
-String activeModeText() {
-  if (setupApActive && WiFi.status() == WL_CONNECTED) {
-    return "ap_sta";
-  }
-  if (setupApActive) {
-    return "ap";
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    return "sta";
-  }
-  return "idle";
-}
-
-uint32_t setupApRemainingSec() {
-  if (!setupApActive) {
-    return 0;
-  }
-  uint32_t elapsed = millis() - setupApStartedMs;
-  if (elapsed >= SETUP_AP_TIMEOUT_MS) {
-    return 0;
-  }
-  return (SETUP_AP_TIMEOUT_MS - elapsed) / 1000;
 }
 
 bool backendEnabled() {
@@ -294,141 +206,6 @@ void loadRuntimeConfigFromStorage() {
   runtimeWiFiPassword = String(WIFI_PASSWORD);
   runtimeHostname = sanitizeHostname(String(WIFI_HOSTNAME));
   runtimeBackendBase = sanitizeBackendBase(String(BACKEND_BASE));
-
-  Preferences prefs;
-  if (prefs.begin(NVS_NAMESPACE, true)) {
-    String storedSsid = prefs.getString(NVS_WIFI_SSID, "");
-    String storedPass = prefs.getString(NVS_WIFI_PASS, "");
-    String storedHostname = prefs.getString(NVS_HOSTNAME, "");
-    String storedBackendBase = sanitizeBackendBase(prefs.getString(NVS_BACKEND_BASE, ""));
-    forceSetupApOnBoot = prefs.getBool(NVS_FORCE_SETUP_AP, false);
-    prefs.end();
-
-    if (isConfiguredValue(storedSsid)) {
-      runtimeWiFiSsid = storedSsid;
-      runtimeWiFiPassword = storedPass;
-    }
-    if (isConfiguredValue(storedHostname)) {
-      runtimeHostname = sanitizeHostname(storedHostname);
-    }
-    if (isConfiguredValue(storedBackendBase)) {
-      runtimeBackendBase = storedBackendBase;
-    }
-    if (forceSetupApOnBoot) {
-      runtimeWiFiSsid = "";
-      runtimeWiFiPassword = "";
-    }
-  }
-}
-
-bool saveProvisioningToStorage(const String& ssid, const String& password,
-                              const String& hostname,
-                              const String& backendBase) {
-  Preferences prefs;
-  if (!prefs.begin(NVS_NAMESPACE, false)) {
-    return false;
-  }
-  prefs.putString(NVS_WIFI_SSID, ssid);
-  prefs.putString(NVS_WIFI_PASS, password);
-  prefs.putString(NVS_HOSTNAME, hostname);
-  prefs.putString(NVS_BACKEND_BASE, backendBase);
-  prefs.putBool(NVS_FORCE_SETUP_AP, false);
-  prefs.end();
-  return true;
-}
-
-void clearProvisioningStorage() {
-  Preferences prefs;
-  if (!prefs.begin(NVS_NAMESPACE, false)) {
-    return;
-  }
-  prefs.remove(NVS_WIFI_SSID);
-  prefs.remove(NVS_WIFI_PASS);
-  prefs.remove(NVS_HOSTNAME);
-  prefs.remove(NVS_BACKEND_BASE);
-  prefs.remove(NVS_FORCE_SETUP_AP);
-  prefs.end();
-}
-
-void setForceSetupApFlag(bool enabled) {
-  Preferences prefs;
-  if (!prefs.begin(NVS_NAMESPACE, false)) {
-    return;
-  }
-  prefs.putBool(NVS_FORCE_SETUP_AP, enabled);
-  prefs.end();
-}
-
-void startSetupAP(const String& reason) {
-  if (setupApActive) {
-    return;
-  }
-
-  setupApSsid = buildSetupApSsid();
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.setSleep(false);
-
-  bool ok = WiFi.softAP(setupApSsid.c_str());
-  if (!ok) {
-    Serial.println("[PROV] failed to start setup AP");
-    return;
-  }
-
-  setupApActive = true;
-  setupApExpired = false;
-  setupApStartedMs = millis();
-  provisionState = PROVISION_AP_SETUP;
-  lastProvisionError = reason;
-  pendingDisableSetupAp = false;
-  setupApDisableAtMs = 0;
-
-  Serial.printf("[PROV] setup AP active ssid=%s ip=%s\n", setupApSsid.c_str(),
-                WiFi.softAPIP().toString().c_str());
-}
-
-void stopSetupAP(bool markExpired) {
-  if (!setupApActive) {
-    return;
-  }
-
-  WiFi.softAPdisconnect(true);
-  setupApActive = false;
-  setupApSsid = "";
-  setupApStartedMs = 0;
-  pendingDisableSetupAp = false;
-  setupApDisableAtMs = 0;
-  if (markExpired) {
-    setupApExpired = true;
-  }
-
-  if (WiFi.status() == WL_CONNECTED || hasRuntimeWiFiConfig()) {
-    WiFi.mode(WIFI_STA);
-  }
-
-  Serial.println("[PROV] setup AP stopped");
-}
-
-void handleSetupApTimeout() {
-  if (!setupApActive) {
-    return;
-  }
-  if (pendingDisableSetupAp && WiFi.status() == WL_CONNECTED) {
-    return;
-  }
-  if ((millis() - setupApStartedMs) < SETUP_AP_TIMEOUT_MS) {
-    return;
-  }
-
-  Serial.println("[PROV] setup AP timed out (10 minutes)");
-  stopSetupAP(true);
-  if (WiFi.status() != WL_CONNECTED) {
-    lastProvisionError = "setup_ap_timeout";
-    if (!hasRuntimeWiFiConfig()) {
-      provisionState = PROVISION_UNCONFIGURED;
-    } else {
-      provisionState = PROVISION_CONNECT_FAILED;
-    }
-  }
 }
 
 #if defined(WIFI_TX_POWER_CONNECT_INITIAL) && defined(WIFI_TX_POWER_CONNECT_ESCALATED)
@@ -445,7 +222,7 @@ void beginWiFiConnection() {
     return;
   }
 
-  WiFi.mode(setupApActive ? WIFI_AP_STA : WIFI_STA);
+  WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
@@ -486,9 +263,6 @@ void connectWiFiBlocking() {
 
   provisionState = PROVISION_CONNECT_FAILED;
   lastProvisionError = "wifi_connect_timeout";
-  if (!setupApActive) {
-    startSetupAP("connect_failed");
-  }
 }
 
 void maintainWiFiConnection() {
@@ -517,10 +291,6 @@ void maintainWiFiConnection() {
     wifiConnectAttempts++;
   }
 
-  if (!setupApActive && !setupApExpired) {
-    startSetupAP("connect_retry");
-  }
-
   Serial.printf("[WiFi] reconnecting status=%s\n", wifiStatusText(status));
   WiFi.disconnect();
   delay(20);
@@ -538,19 +308,11 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       provisionState = PROVISION_CONNECTED;
       lastProvisionError = "";
-      if (setupApActive) {
-        pendingDisableSetupAp = true;
-        setupApDisableAtMs = millis() + SETUP_AP_POST_CONNECT_GRACE_MS;
-      }
       Serial.printf("[WiFi] connected ip=%s rssi=%d\n",
                     WiFi.localIP().toString().c_str(), WiFi.RSSI());
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       lastDisconnectReason = info.wifi_sta_disconnected.reason;
-      if (pendingDisableSetupAp) {
-        pendingDisableSetupAp = false;
-        setupApDisableAtMs = 0;
-      }
       if (hasRuntimeWiFiConfig()) {
         provisionState = PROVISION_CONNECT_FAILED;
         lastProvisionError = "wifi_disconnected";
@@ -646,269 +408,6 @@ void handleWiFiStateChange() {
   wasWiFiConnected = connected;
 }
 
-void sendCorsHeaders() {
-  provisionServer.sendHeader("Access-Control-Allow-Origin", "*");
-  provisionServer.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  provisionServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
-  provisionServer.sendHeader("Access-Control-Max-Age", "600");
-}
-
-void sendJsonResponse(int statusCode, const String& body) {
-  sendCorsHeaders();
-  provisionServer.send(statusCode, "application/json", body);
-}
-
-void handleProvisionOptions() {
-  sendCorsHeaders();
-  provisionServer.send(204, "text/plain", "");
-}
-
-bool extractJsonStringField(const String& json, const char* key, String& value) {
-  if (!key || key[0] == '\0') {
-    return false;
-  }
-
-  String marker = String("\"") + key + "\"";
-  int markerPos = json.indexOf(marker);
-  if (markerPos < 0) {
-    return false;
-  }
-
-  int colonPos = json.indexOf(':', markerPos + marker.length());
-  if (colonPos < 0) {
-    return false;
-  }
-
-  int i = colonPos + 1;
-  while (i < static_cast<int>(json.length()) &&
-         isspace(static_cast<unsigned char>(json.charAt(i)))) {
-    ++i;
-  }
-  if (i >= static_cast<int>(json.length()) || json.charAt(i) != '"') {
-    return false;
-  }
-
-  ++i;
-  value = "";
-  bool escaping = false;
-  while (i < static_cast<int>(json.length())) {
-    char c = json.charAt(i++);
-    if (escaping) {
-      if (c == 'n') {
-        value += '\n';
-      } else if (c == 'r') {
-        value += '\r';
-      } else if (c == 't') {
-        value += '\t';
-      } else {
-        value += c;
-      }
-      escaping = false;
-      continue;
-    }
-
-    if (c == '\\') {
-      escaping = true;
-      continue;
-    }
-    if (c == '"') {
-      return true;
-    }
-    value += c;
-  }
-
-  return false;
-}
-
-void handleProvisionInfo() {
-  String payload = String("{\"ok\":true") +
-                   ",\"node_id\":\"" + NODE_ID + "\"" +
-                   ",\"node_type\":\"" + NODE_TYPE + "\"" +
-                   ",\"firmware_version\":\"" + FIRMWARE_VERSION + "\"" +
-                   ",\"chip_id\":\"" + chipIdHex() + "\"" +
-                   ",\"setup_ap\":{\"ssid\":\"" + jsonEscape(setupApSsid) +
-                   "\",\"ip\":\"" + WiFi.softAPIP().toString() +
-                   "\",\"open\":true}}";
-  sendJsonResponse(200, payload);
-}
-
-void handleProvisionStatus() {
-  bool staConnected = WiFi.status() == WL_CONNECTED;
-  String staIp = staConnected ? WiFi.localIP().toString() : String("");
-  String setupIp = setupApActive ? WiFi.softAPIP().toString() : String("");
-  String mdnsHost = "";
-
-  String payload = String("{\"ok\":true") +
-                   ",\"node_id\":\"" + NODE_ID + "\"" +
-                   ",\"mode\":\"" + activeModeText() + "\"" +
-                   ",\"provision_state\":\"" + provisionStateText() + "\"" +
-                   ",\"setup_ap\":{\"active\":" +
-                   (setupApActive ? "true" : "false") +
-                   ",\"ssid\":\"" + jsonEscape(setupApSsid) + "\"" +
-                   ",\"ip\":\"" + setupIp + "\"" +
-                   ",\"expires_in_sec\":" + String(setupApRemainingSec()) + "}" +
-                   ",\"sta\":{\"configured\":" +
-                   (hasRuntimeWiFiConfig() ? "true" : "false") +
-                   ",\"connected\":" + (staConnected ? "true" : "false") +
-                   ",\"ssid\":\"" + jsonEscape(runtimeWiFiSsid) + "\"" +
-                   ",\"ip\":\"" + staIp + "\"" +
-                   ",\"rssi\":" +
-                   (staConnected ? String(WiFi.RSSI()) : String("null")) +
-                   ",\"last_error\":\"" + jsonEscape(lastProvisionError) +
-                   "\",\"last_disconnect_reason\":" +
-                   String(lastDisconnectReason) + "}" +
-                   ",\"mdns\":{\"enabled\":false,\"host\":\"" + mdnsHost +
-                   "\",\"ready\":false}" +
-                   ",\"endpoints\":{\"stream\":\"\",\"capture\":\"\",\"control\":\"\"}" +
-                   ",\"backend_base\":\"" + jsonEscape(runtimeBackendBase) + "\"" +
-                   "}";
-  sendJsonResponse(200, payload);
-}
-
-void handleProvisionScan() {
-  int count = WiFi.scanNetworks();
-  String payload = "{\"ok\":true,\"networks\":[";
-  bool first = true;
-
-  if (count > 0) {
-    for (int i = 0; i < count; ++i) {
-      String ssid = WiFi.SSID(i);
-      ssid.trim();
-      if (ssid.length() == 0) {
-        continue;
-      }
-      if (!first) {
-        payload += ",";
-      }
-      first = false;
-
-      bool secure = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
-      payload += String("{\"ssid\":\"") + jsonEscape(ssid) +
-                 "\",\"rssi\":" + String(WiFi.RSSI(i)) +
-                 ",\"secure\":" + (secure ? "true" : "false") +
-                 ",\"channel\":" + String(WiFi.channel(i)) + "}";
-    }
-  }
-
-  payload += "]}";
-  WiFi.scanDelete();
-  sendJsonResponse(200, payload);
-}
-
-void handleProvisionWifi() {
-  String body = provisionServer.arg("plain");
-  String ssid;
-  String password;
-  String hostname;
-  String backendBase;
-
-  if (!extractJsonStringField(body, "ssid", ssid)) {
-    sendJsonResponse(
-        400,
-        "{\"ok\":false,\"error\":\"invalid_input\",\"detail\":\"ssid is required\"}");
-    return;
-  }
-  extractJsonStringField(body, "password", password);
-  if (!extractJsonStringField(body, "hostname", hostname)) {
-    hostname = runtimeHostname;
-  }
-  if (!extractJsonStringField(body, "backend_base", backendBase)) {
-    backendBase = runtimeBackendBase;
-  }
-
-  ssid.trim();
-  hostname = sanitizeHostname(hostname);
-  backendBase = sanitizeBackendBase(backendBase);
-
-  if (!isConfiguredValue(ssid)) {
-    sendJsonResponse(
-        400,
-        "{\"ok\":false,\"error\":\"invalid_input\",\"detail\":\"ssid must be configured\"}");
-    return;
-  }
-
-  if (!saveProvisioningToStorage(ssid, password, hostname, backendBase)) {
-    sendJsonResponse(500,
-                     "{\"ok\":false,\"error\":\"storage_error\",\"detail\":\"failed to store provisioning\"}");
-    return;
-  }
-
-  runtimeWiFiSsid = ssid;
-  runtimeWiFiPassword = password;
-  runtimeHostname = hostname;
-  runtimeBackendBase = backendBase;
-  forceSetupApOnBoot = false;
-  setupApExpired = false;
-  lastProvisionError = "";
-  beginWiFiConnection();
-
-  sendJsonResponse(200,
-                   "{\"ok\":true,\"accepted\":true,\"provision_state\":\"connecting\",\"detail\":\"credentials saved\"}");
-}
-
-void handleProvisionReset() {
-  clearProvisioningStorage();
-  setForceSetupApFlag(true);
-
-  runtimeWiFiSsid = "";
-  runtimeWiFiPassword = "";
-  runtimeHostname = sanitizeHostname(String(WIFI_HOSTNAME));
-  runtimeBackendBase = sanitizeBackendBase(String(BACKEND_BASE));
-  forceSetupApOnBoot = true;
-  setupApExpired = false;
-  registrationOk = false;
-
-  WiFi.disconnect(true, true);
-  delay(50);
-  startSetupAP("reset");
-
-  sendJsonResponse(
-      200,
-      "{\"ok\":true,\"accepted\":true,\"detail\":\"provisioning cleared; setup AP enabled\"}");
-}
-
-void setupProvisionServerRoutes() {
-  if (provisionServerRoutesReady) {
-    return;
-  }
-
-  provisionServer.on("/", HTTP_GET, []() {
-    sendCorsHeaders();
-    provisionServer.send(
-        200, "text/html",
-        "<html><body><h3>smoke_node1 setup node ready</h3><p>Use "
-        "<a href='/api/provision/status'>/api/provision/status</a></p></body></html>");
-  });
-  provisionServer.on("/api/provision/info", HTTP_GET, handleProvisionInfo);
-  provisionServer.on("/api/provision/status", HTTP_GET, handleProvisionStatus);
-  provisionServer.on("/api/provision/scan", HTTP_GET, handleProvisionScan);
-  provisionServer.on("/api/provision/wifi", HTTP_OPTIONS, handleProvisionOptions);
-  provisionServer.on("/api/provision/wifi", HTTP_POST, handleProvisionWifi);
-  provisionServer.on("/api/provision/reset", HTTP_OPTIONS, handleProvisionOptions);
-  provisionServer.on("/api/provision/reset", HTTP_POST, handleProvisionReset);
-
-  provisionServerRoutesReady = true;
-}
-
-void startProvisionServer() {
-  if (provisionServerRunning) {
-    return;
-  }
-  setupProvisionServerRoutes();
-  provisionServer.begin();
-  provisionServerRunning = true;
-  Serial.println("[HTTP] provisioning server started");
-}
-
-void stopProvisionServer() {
-  if (!provisionServerRunning) {
-    return;
-  }
-  provisionServer.stop();
-  provisionServerRunning = false;
-  Serial.println("[HTTP] provisioning server stopped");
-}
-
 void setup() {
   Serial.begin(115200);
   unsigned long serialWaitStartMs = millis();
@@ -921,37 +420,17 @@ void setup() {
   WiFi.onEvent(onWiFiEvent);
   loadRuntimeConfigFromStorage();
 
-  if (!forceSetupApOnBoot && hasRuntimeWiFiConfig()) {
+  if (hasRuntimeWiFiConfig()) {
     connectWiFiBlocking();
   } else {
-    startSetupAP(forceSetupApOnBoot ? "forced_setup" : "unconfigured");
+    provisionState = PROVISION_UNCONFIGURED;
+    lastProvisionError = "manual_wifi_config_required";
+    Serial.println("[WiFi] manual config required: set WIFI_SSID/WIFI_PASSWORD/BACKEND_BASE before upload");
   }
 }
 
 void loop() {
-  handleSetupApTimeout();
   maintainWiFiConnection();
-
-  if (pendingDisableSetupAp && setupApActive && WiFi.status() == WL_CONNECTED) {
-    bool graceElapsed =
-        (setupApDisableAtMs == 0) ||
-        (static_cast<int32_t>(millis() - setupApDisableAtMs) >= 0);
-    if (graceElapsed) {
-      stopSetupAP(false);
-    }
-  }
-
-  bool shouldServeHttp = setupApActive || (WiFi.status() == WL_CONNECTED);
-  if (shouldServeHttp) {
-    if (!provisionServerRunning) {
-      startProvisionServer();
-    }
-  } else if (provisionServerRunning) {
-    stopProvisionServer();
-  }
-  if (provisionServerRunning) {
-    provisionServer.handleClient();
-  }
 
   handleWiFiStateChange();
 

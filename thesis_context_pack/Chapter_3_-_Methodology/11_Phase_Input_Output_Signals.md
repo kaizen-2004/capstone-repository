@@ -2,9 +2,9 @@
 
 This table set aligns with the current implemented baseline:
 - 2 monitored areas: **Living Room**, **Door Entrance Area**
-- Indoor **USB UVC** camera + outdoor **ESP32-CAM (HTTP MJPEG)**
-- Sensor uplink via **HTTP POST + JSON** to `POST /api/sensors/event`
-- Raspberry Pi 2 as server host, second-hand laptop as vision-processing host
+- two night-vision-capable camera inputs
+- sensor uplink via **HTTP POST + JSON** to `POST /api/sensors/event`
+- flexible local deployment arrangement with **Raspberry Pi 2** available as an optional edge-hosting component
 
 ## Phase 1: System Context, Scope, and Architecture Design
 
@@ -14,7 +14,7 @@ This table set aligns with the current implemented baseline:
 | Condo layout constraints | Number of monitored areas, entry points, camera positions | count |
 | Threat profile inputs | Intruder and fire scenario categories | category |
 | Hardware capability inputs | Host, camera, and node technical specs | specification sheet (N/A) |
-| Platform constraint input | Server host class (Raspberry Pi 2) and vision host class (second-hand laptop) | category |
+| Platform constraint input | Available local host class, optional Raspberry Pi 2 edge-hosting role, and sensor/camera node classes | category |
 | Communication design input | Sensor-to-server protocol choice | protocol type (N/A) |
 
 ### Output Signals

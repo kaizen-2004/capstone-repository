@@ -165,3 +165,59 @@ def test_remote_access_and_integration_status_routes() -> None:
         assert send_payload["ok"] is True
         assert "sent" in send_payload
         assert "status" in send_payload
+
+
+def test_runtime_settings_update_and_secret_replace_flow() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        update_threshold = client.post(
+            "/api/ui/settings/runtime",
+            json={"key": "FACE_COSINE_THRESHOLD", "value": "0.61"},
+        )
+        assert update_threshold.status_code == 200
+        update_payload = update_threshold.json()
+        assert update_payload["ok"] is True
+        assert update_payload["key"] == "FACE_COSINE_THRESHOLD"
+        assert update_payload["value"] == "0.61"
+
+        update_camera_timeout = client.post(
+            "/api/ui/settings/runtime",
+            json={"key": "CAMERA_OFFLINE_SECONDS", "value": "55"},
+        )
+        assert update_camera_timeout.status_code == 200
+        timeout_payload = update_camera_timeout.json()
+        assert timeout_payload["ok"] is True
+        assert timeout_payload["key"] == "CAMERA_OFFLINE_SECONDS"
+        assert timeout_payload["value"] == "55"
+
+        update_secret = client.post(
+            "/api/ui/settings/runtime",
+            json={"key": "TELEGRAM_BOT_TOKEN", "value": "token_for_test_only"},
+        )
+        assert update_secret.status_code == 200
+        secret_payload = update_secret.json()
+        assert secret_payload["ok"] is True
+        assert secret_payload["key"] == "TELEGRAM_BOT_TOKEN"
+        assert secret_payload["secret"] is True
+        assert secret_payload["configured"] is True
+        assert secret_payload["value"] == ""
+
+        settings_live = client.get("/api/ui/settings/live")
+        assert settings_live.status_code == 200
+        runtime_settings = settings_live.json()["runtime_settings"]
+
+        threshold_row = next(
+            row for row in runtime_settings if row.get("key") == "FACE_COSINE_THRESHOLD"
+        )
+        assert threshold_row["value"] == "0.61"
+
+        secret_row = next(
+            row for row in runtime_settings if row.get("key") == "TELEGRAM_BOT_TOKEN"
+        )
+        assert secret_row["secret"] is True
+        assert secret_row["configured"] is True
+        assert secret_row["value"] == ""

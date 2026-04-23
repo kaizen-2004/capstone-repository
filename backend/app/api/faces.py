@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
+
+import cv2
 from fastapi import APIRouter, HTTPException, Request
 
 from ..core.auth import get_current_user
 from ..db import store
-from ..schemas.api import CaptureFaceRequest, CreateFaceRequest
+from ..schemas.api import CaptureFaceFromNodeRequest, CaptureFaceRequest, CreateFaceRequest
 
 router = APIRouter(tags=["faces"])
 
@@ -44,8 +47,21 @@ def create_face(payload: CreateFaceRequest, request: Request) -> dict:
 @router.delete("/api/faces/{face_id}")
 def delete_face(face_id: int, request: Request) -> dict:
     get_current_user(request)
+    face = store.get_face(face_id)
+    if face is None:
+        raise HTTPException(status_code=404, detail="face not found")
+
     if not store.delete_face(face_id):
         raise HTTPException(status_code=404, detail="face not found")
+
+    face_service = request.app.state.face_service
+    face_service.remove_identity(str(face.get("name") or ""))
+    # Best effort rebuild so in-memory templates stay aligned with DB state.
+    try:
+        face_service.train()
+    except Exception:
+        pass
+
     return {"ok": True}
 
 
@@ -60,6 +76,35 @@ def face_capture(payload: CaptureFaceRequest, request: Request) -> dict:
     get_current_user(request)
     try:
         status = request.app.state.face_service.capture_sample(payload.name, payload.image, source="phone_upload")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return status
+
+
+@router.post("/api/training/face/capture-node")
+def face_capture_from_node(payload: CaptureFaceFromNodeRequest, request: Request) -> dict:
+    get_current_user(request)
+    node_id = str(payload.node_id or "").strip().lower()
+    if not node_id:
+        raise HTTPException(status_code=400, detail="node_id is required")
+
+    frame = request.app.state.camera_manager.snapshot_frame(node_id)
+    if frame is None:
+        raise HTTPException(status_code=404, detail="camera frame unavailable")
+
+    ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    if not ok:
+        raise HTTPException(status_code=500, detail="failed to encode camera frame")
+
+    image_data = base64.b64encode(encoded.tobytes()).decode("ascii")
+    image_data_url = f"data:image/jpeg;base64,{image_data}"
+
+    try:
+        status = request.app.state.face_service.capture_sample(
+            payload.name,
+            image_data_url,
+            source=f"camera_node:{node_id}",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return status

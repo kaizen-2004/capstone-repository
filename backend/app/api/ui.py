@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import cv2
-import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
@@ -23,32 +22,18 @@ from ..core.config import Settings
 from ..db import store
 from ..schemas.api import (
     CameraControlRequest,
-    CameraOnboardingApplyRequest,
     RuntimeSettingUpdateRequest,
 )
 
 router = APIRouter(tags=["ui"])
 
-PROVISIONABLE_NODE_IDS = ("cam_door", "door_force", "smoke_node1", "smoke_node2")
-PROVISION_RESET_TIMEOUT_SECONDS = 4.0
 FACE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.35
+FIRE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.35
 
 
 def _face_debug_enabled_for_node(node_id: str, requested: bool) -> bool:
     _ = node_id
     return bool(requested)
-
-
-def _known_node_ip_map() -> dict[str, str]:
-    node_ip_map: dict[str, str] = {}
-    for row in store.list_devices():
-        node_id = str(row.get("node_id") or "").strip().lower()
-        if node_id not in PROVISIONABLE_NODE_IDS:
-            continue
-        ip = str(row.get("ip_address") or "").strip()
-        if ip:
-            node_ip_map[node_id] = ip
-    return node_ip_map
 
 
 def _direct_http_stream_url(node_id: str) -> str:
@@ -65,61 +50,6 @@ def _direct_http_stream_url(node_id: str) -> str:
             return source_url
         return ""
     return ""
-
-
-async def _request_node_reprovision_reset(
-    client: httpx.AsyncClient, node_id: str, ip_address: str
-) -> dict[str, str]:
-    endpoint = f"http://{ip_address}/api/provision/reset"
-    try:
-        response = await client.post(
-            endpoint, json={"clear_wifi": True, "clear_backend": True}
-        )
-    except httpx.TimeoutException:
-        return {
-            "node_id": node_id,
-            "ip": ip_address,
-            "status": "timeout",
-            "detail": "Timed out while requesting node reset",
-        }
-    except Exception as exc:
-        return {
-            "node_id": node_id,
-            "ip": ip_address,
-            "status": "error",
-            "detail": f"Failed to reach node reset endpoint: {exc}",
-        }
-
-    payload: dict[str, Any] = {}
-    try:
-        parsed = response.json()
-        if isinstance(parsed, dict):
-            payload = cast(dict[str, Any], parsed)
-    except Exception:
-        payload = {}
-
-    if response.status_code >= 400:
-        detail = (
-            str(payload.get("detail") or payload.get("error") or "")
-            or f"HTTP {response.status_code}"
-        )
-        if response.status_code == 404:
-            detail = "Provisioning reset endpoint not found on node firmware"
-        return {
-            "node_id": node_id,
-            "ip": ip_address,
-            "status": "error",
-            "detail": detail,
-        }
-
-    accepted = bool(payload.get("accepted", payload.get("ok", True)))
-    detail = str(payload.get("detail") or "Provisioning reset accepted")
-    return {
-        "node_id": node_id,
-        "ip": ip_address,
-        "status": "accepted" if accepted else "error",
-        "detail": detail,
-    }
 
 
 def _safe_json(value: str | None) -> dict[str, Any]:
@@ -182,103 +112,474 @@ def _event_to_ui(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _runtime_settings(settings: Settings) -> list[dict[str, str]]:
-    telegram_snapshot_cooldown = store.get_setting(
-        "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS"
-    ) or str(settings.telegram_snapshot_cooldown_seconds)
-    items = [
-        {
-            "key": "SENSOR_EVENT_URL",
-            "value": "http://127.0.0.1:8765/api/sensors/event",
-            "description": "HTTP sensor event ingest endpoint",
-        },
-        {
-            "key": "CAMERA_SOURCE_MODE",
-            "value": str(settings.camera_source_mode),
-            "description": "Active camera source backend mode",
-        },
-        {
-            "key": "CAMERA_WEBCAM_SINGLE_NODE",
-            "value": str(settings.camera_webcam_single_node),
-            "description": "Single-webcam mapped node in webcam mode",
-        },
-        {
-            "key": "NODE_OFFLINE_SECONDS",
-            "value": str(settings.node_offline_seconds),
-            "description": "Seconds before sensor node is marked offline",
-        },
-        {
-            "key": "CAMERA_OFFLINE_SECONDS",
-            "value": str(settings.camera_offline_seconds),
-            "description": "Seconds before camera stream is marked disconnected",
-        },
-        {
-            "key": "CAMERA_PROCESSING_FPS",
-            "value": str(settings.camera_processing_fps),
-            "description": "Target processing FPS per camera",
-        },
-        {
-            "key": "FACE_MATCH_THRESHOLD",
-            "value": str(settings.face_match_threshold),
-            "description": "Lower is stricter; higher reduces unknowns in webcam tests",
-        },
-        {
-            "key": "AUTHORIZED_PRESENCE_LOGGING_ENABLED",
-            "value": str(settings.authorized_presence_logging_enabled).lower(),
-            "description": "Auto-log authorized re-entry events from live camera view",
-        },
-        {
-            "key": "AUTHORIZED_PRESENCE_SCAN_SECONDS",
-            "value": str(settings.authorized_presence_scan_seconds),
-            "description": "Face-presence scan interval in seconds",
-        },
-        {
-            "key": "AUTHORIZED_PRESENCE_COOLDOWN_SECONDS",
-            "value": str(settings.authorized_presence_cooldown_seconds),
-            "description": "Cooldown before logging another authorized re-entry",
-        },
-        {
-            "key": "UNKNOWN_PRESENCE_LOGGING_ENABLED",
-            "value": str(settings.unknown_presence_logging_enabled).lower(),
-            "description": "Auto-log unknown-person re-entry events from live camera view",
-        },
-        {
-            "key": "UNKNOWN_PRESENCE_COOLDOWN_SECONDS",
-            "value": str(settings.unknown_presence_cooldown_seconds),
-            "description": "Cooldown before logging another unknown-person re-entry",
-        },
-        {
-            "key": "INTRUDER_EVENT_COOLDOWN_SECONDS",
-            "value": str(settings.intruder_event_cooldown_seconds),
-            "description": "Minimum seconds between repeated intruder trigger events per node",
-        },
-        {
-            "key": "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS",
-            "value": str(telegram_snapshot_cooldown),
-            "description": "Minimum seconds between Telegram snapshot sends per source node and alert type",
-        },
-        {
-            "key": "EVENT_RETENTION_DAYS",
-            "value": str(settings.event_retention_days),
-            "description": "Event retention window",
-        },
-        {
-            "key": "REGULAR_SNAPSHOT_RETENTION_DAYS",
-            "value": str(settings.regular_snapshot_retention_days),
-            "description": "Regular snapshot retention window",
-        },
-        {
-            "key": "CRITICAL_SNAPSHOT_RETENTION_DAYS",
-            "value": str(settings.critical_snapshot_retention_days),
-            "description": "Critical snapshot retention window",
-        },
-        {
-            "key": "TRANSPORT_MODE",
-            "value": "HTTP",
-            "description": "Node transport protocol",
-        },
-    ]
+RUNTIME_SETTING_SPECS: dict[str, dict[str, Any]] = {
+    "FACE_COSINE_THRESHOLD": {
+        "description": "Higher is stricter; lower accepts more matches",
+        "group": "Detection & Fusion",
+        "value_type": "float",
+        "input_type": "number",
+        "min": 0.30,
+        "max": 0.95,
+        "step": 0.01,
+        "live_apply": True,
+    },
+    "FIRE_MODEL_ENABLED": {
+        "description": "Enable continuous camera-frame flame scanning",
+        "group": "Detection & Fusion",
+        "value_type": "bool",
+        "input_type": "switch",
+        "live_apply": True,
+    },
+    "FIRE_MODEL_THRESHOLD": {
+        "description": "Higher is stricter; lower detects easier",
+        "group": "Detection & Fusion",
+        "value_type": "float",
+        "input_type": "number",
+        "min": 0.05,
+        "max": 0.99,
+        "step": 0.01,
+        "live_apply": True,
+    },
+    "INTRUDER_EVENT_COOLDOWN_SECONDS": {
+        "description": "Minimum seconds between repeated intruder trigger events per node",
+        "group": "Detection & Fusion",
+        "value_type": "int",
+        "input_type": "number",
+        "min": 0,
+        "max": 600,
+        "step": 1,
+        "live_apply": True,
+    },
+    "AUTHORIZED_PRESENCE_LOGGING_ENABLED": {
+        "description": "Auto-log authorized re-entry events from live camera view",
+        "group": "Detection & Fusion",
+        "value_type": "bool",
+        "input_type": "switch",
+        "live_apply": True,
+    },
+    "AUTHORIZED_PRESENCE_SCAN_SECONDS": {
+        "description": "Face-presence scan interval in seconds",
+        "group": "Detection & Fusion",
+        "value_type": "int",
+        "input_type": "number",
+        "min": 1,
+        "max": 30,
+        "step": 1,
+        "live_apply": True,
+    },
+    "AUTHORIZED_PRESENCE_COOLDOWN_SECONDS": {
+        "description": "Cooldown before logging another authorized re-entry",
+        "group": "Detection & Fusion",
+        "value_type": "int",
+        "input_type": "number",
+        "min": 5,
+        "max": 600,
+        "step": 1,
+        "live_apply": True,
+    },
+    "UNKNOWN_PRESENCE_LOGGING_ENABLED": {
+        "description": "Auto-log unknown-person re-entry events from live camera view",
+        "group": "Detection & Fusion",
+        "value_type": "bool",
+        "input_type": "switch",
+        "live_apply": True,
+    },
+    "UNKNOWN_PRESENCE_COOLDOWN_SECONDS": {
+        "description": "Cooldown before logging another unknown-person re-entry",
+        "group": "Detection & Fusion",
+        "value_type": "int",
+        "input_type": "number",
+        "min": 5,
+        "max": 600,
+        "step": 1,
+        "live_apply": True,
+    },
+    "NODE_OFFLINE_SECONDS": {
+        "description": "Seconds before sensor node is marked offline",
+        "group": "Retention & Health",
+        "value_type": "int",
+        "input_type": "number",
+        "min": 20,
+        "max": 3600,
+        "step": 1,
+        "live_apply": True,
+    },
+    "CAMERA_OFFLINE_SECONDS": {
+        "description": "Seconds before camera stream is marked disconnected",
+        "group": "Retention & Health",
+        "value_type": "int",
+        "input_type": "number",
+        "min": 10,
+        "max": 600,
+        "step": 1,
+        "live_apply": True,
+    },
+    "EVENT_RETENTION_DAYS": {
+        "description": "Event retention window",
+        "group": "Retention & Health",
+        "value_type": "int",
+        "input_type": "number",
+        "min": 1,
+        "max": 365,
+        "step": 1,
+        "live_apply": True,
+    },
+    "LOG_RETENTION_DAYS": {
+        "description": "System log retention window",
+        "group": "Retention & Health",
+        "value_type": "int",
+        "input_type": "number",
+        "min": 1,
+        "max": 365,
+        "step": 1,
+        "live_apply": True,
+    },
+    "REGULAR_SNAPSHOT_RETENTION_DAYS": {
+        "description": "Regular snapshot retention window",
+        "group": "Retention & Health",
+        "value_type": "int",
+        "input_type": "number",
+        "min": 1,
+        "max": 365,
+        "step": 1,
+        "live_apply": True,
+    },
+    "CRITICAL_SNAPSHOT_RETENTION_DAYS": {
+        "description": "Critical snapshot retention window",
+        "group": "Retention & Health",
+        "value_type": "int",
+        "input_type": "number",
+        "min": 1,
+        "max": 365,
+        "step": 1,
+        "live_apply": True,
+    },
+    "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS": {
+        "description": "Minimum seconds between Telegram snapshot sends per source node and alert type",
+        "group": "Notifications",
+        "value_type": "int",
+        "input_type": "number",
+        "min": 10,
+        "max": 3600,
+        "step": 1,
+        "live_apply": True,
+    },
+    "mobile_remote_enabled": {
+        "description": "Enable mobile remote web interface",
+        "group": "Notifications",
+        "value_type": "bool",
+        "input_type": "switch",
+        "live_apply": True,
+    },
+    "mobile_push_enabled": {
+        "description": "Enable web push delivery for mobile devices",
+        "group": "Notifications",
+        "value_type": "bool",
+        "input_type": "switch",
+        "live_apply": True,
+    },
+    "mobile_telegram_fallback_enabled": {
+        "description": "Allow Telegram fallback when push delivery is unavailable",
+        "group": "Notifications",
+        "value_type": "bool",
+        "input_type": "switch",
+        "live_apply": True,
+    },
+    "TELEGRAM_LINK_NOTIFICATIONS_ENABLED": {
+        "description": "Send remote access links to Telegram on startup and endpoint changes",
+        "group": "Notifications",
+        "value_type": "bool",
+        "input_type": "switch",
+        "live_apply": True,
+    },
+    "TELEGRAM_BOT_TOKEN": {
+        "description": "Telegram bot token used for notifications",
+        "group": "Secrets",
+        "value_type": "str",
+        "input_type": "secret",
+        "secret": True,
+        "live_apply": True,
+    },
+    "TELEGRAM_CHAT_ID": {
+        "description": "Telegram chat id for fallback and link delivery",
+        "group": "Secrets",
+        "value_type": "str",
+        "input_type": "secret",
+        "secret": True,
+        "live_apply": True,
+    },
+    "WEBPUSH_VAPID_PUBLIC_KEY": {
+        "description": "VAPID public key used by web push subscriptions",
+        "group": "Secrets",
+        "value_type": "str",
+        "input_type": "secret",
+        "secret": True,
+        "live_apply": True,
+    },
+    "WEBPUSH_VAPID_PRIVATE_KEY": {
+        "description": "VAPID private key used for web push delivery",
+        "group": "Secrets",
+        "value_type": "str",
+        "input_type": "secret",
+        "secret": True,
+        "live_apply": True,
+    },
+    "WEBPUSH_VAPID_SUBJECT": {
+        "description": "Contact subject used for web push headers",
+        "group": "Secrets",
+        "value_type": "str",
+        "input_type": "text",
+        "secret": True,
+        "live_apply": True,
+    },
+    "SENSOR_EVENT_URL": {
+        "description": "HTTP sensor event ingest endpoint",
+        "group": "Read Only",
+        "value_type": "str",
+        "input_type": "text",
+        "editable": False,
+        "live_apply": False,
+    },
+    "TRANSPORT_MODE": {
+        "description": "Node transport protocol",
+        "group": "Read Only",
+        "value_type": "str",
+        "input_type": "text",
+        "editable": False,
+        "live_apply": False,
+    },
+}
+
+
+def _parse_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "disabled"}:
+        return False
+    raise ValueError("value must be true or false")
+
+
+def _runtime_default_value(key: str, settings: Settings) -> str:
+    if key == "FACE_COSINE_THRESHOLD":
+        return str(settings.face_cosine_threshold)
+    if key == "FIRE_MODEL_ENABLED":
+        return "true" if settings.fire_model_enabled else "false"
+    if key == "FIRE_MODEL_THRESHOLD":
+        return str(settings.fire_model_threshold)
+    if key == "INTRUDER_EVENT_COOLDOWN_SECONDS":
+        return str(settings.intruder_event_cooldown_seconds)
+    if key == "AUTHORIZED_PRESENCE_LOGGING_ENABLED":
+        return "true" if settings.authorized_presence_logging_enabled else "false"
+    if key == "AUTHORIZED_PRESENCE_SCAN_SECONDS":
+        return str(settings.authorized_presence_scan_seconds)
+    if key == "AUTHORIZED_PRESENCE_COOLDOWN_SECONDS":
+        return str(settings.authorized_presence_cooldown_seconds)
+    if key == "UNKNOWN_PRESENCE_LOGGING_ENABLED":
+        return "true" if settings.unknown_presence_logging_enabled else "false"
+    if key == "UNKNOWN_PRESENCE_COOLDOWN_SECONDS":
+        return str(settings.unknown_presence_cooldown_seconds)
+    if key == "NODE_OFFLINE_SECONDS":
+        return str(settings.node_offline_seconds)
+    if key == "CAMERA_OFFLINE_SECONDS":
+        return str(settings.camera_offline_seconds)
+    if key == "EVENT_RETENTION_DAYS":
+        return str(settings.event_retention_days)
+    if key == "LOG_RETENTION_DAYS":
+        return str(settings.log_retention_days)
+    if key == "REGULAR_SNAPSHOT_RETENTION_DAYS":
+        return str(settings.regular_snapshot_retention_days)
+    if key == "CRITICAL_SNAPSHOT_RETENTION_DAYS":
+        return str(settings.critical_snapshot_retention_days)
+    if key == "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS":
+        return str(settings.telegram_snapshot_cooldown_seconds)
+    if key == "mobile_remote_enabled":
+        return "false"
+    if key == "mobile_push_enabled":
+        return "true"
+    if key == "mobile_telegram_fallback_enabled":
+        return "true"
+    if key == "TELEGRAM_LINK_NOTIFICATIONS_ENABLED":
+        return "true" if settings.telegram_link_notifications_enabled else "false"
+    if key == "TELEGRAM_BOT_TOKEN":
+        return settings.telegram_bot_token
+    if key == "TELEGRAM_CHAT_ID":
+        return settings.telegram_chat_id
+    if key == "WEBPUSH_VAPID_PUBLIC_KEY":
+        return settings.webpush_vapid_public_key
+    if key == "WEBPUSH_VAPID_PRIVATE_KEY":
+        return settings.webpush_vapid_private_key
+    if key == "WEBPUSH_VAPID_SUBJECT":
+        return settings.webpush_vapid_subject
+    if key == "SENSOR_EVENT_URL":
+        return "http://127.0.0.1:8765/api/sensors/event"
+    if key == "TRANSPORT_MODE":
+        return "HTTP"
+    return ""
+
+
+def _normalize_runtime_setting_value(key: str, value: str, settings: Settings) -> str:
+    spec = RUNTIME_SETTING_SPECS[key]
+    value_type = str(spec.get("value_type") or "str")
+    raw = value.strip()
+
+    if value_type == "bool":
+        return "true" if _parse_bool(raw) else "false"
+
+    if value_type == "int":
+        parsed = int(raw)
+        min_value = int(spec.get("min", -2147483648))
+        max_value = int(spec.get("max", 2147483647))
+        if parsed < min_value or parsed > max_value:
+            raise ValueError(f"value must be between {min_value} and {max_value}")
+        return str(parsed)
+
+    if value_type == "float":
+        parsed = float(raw)
+        min_value = float(spec.get("min", -1.0e30))
+        max_value = float(spec.get("max", 1.0e30))
+        if parsed < min_value or parsed > max_value:
+            raise ValueError(f"value must be between {min_value} and {max_value}")
+        step = float(spec.get("step", 0.01))
+        decimals = 2 if step >= 0.01 else 4
+        return f"{parsed:.{decimals}f}".rstrip("0").rstrip(".")
+
+    if bool(spec.get("secret")):
+        return raw
+
+    if not raw:
+        default_value = _runtime_default_value(key, settings).strip()
+        if default_value:
+            return default_value
+        raise ValueError("value is required")
+    return raw
+
+
+def _runtime_effective_value(key: str, settings: Settings) -> str:
+    stored = store.get_setting(key)
+    if stored is not None:
+        candidate = str(stored).strip()
+    else:
+        candidate = _runtime_default_value(key, settings).strip()
+
+    try:
+        return _normalize_runtime_setting_value(key, candidate, settings)
+    except Exception:
+        return _normalize_runtime_setting_value(
+            key, _runtime_default_value(key, settings), settings
+        )
+
+
+def _runtime_settings(settings: Settings) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for key, spec in RUNTIME_SETTING_SPECS.items():
+        effective_value = _runtime_effective_value(key, settings)
+        is_secret = bool(spec.get("secret", False))
+
+        item: dict[str, Any] = {
+            "key": key,
+            "value": "" if is_secret else effective_value,
+            "description": str(spec.get("description") or ""),
+            "editable": bool(spec.get("editable", True)),
+            "secret": is_secret,
+            "configured": bool(effective_value) if is_secret else False,
+            "group": str(spec.get("group") or "Runtime"),
+            "input_type": str(spec.get("input_type") or "text"),
+            "live_apply": bool(spec.get("live_apply", False)),
+        }
+        if "min" in spec:
+            item["min"] = spec["min"]
+        if "max" in spec:
+            item["max"] = spec["max"]
+        if "step" in spec:
+            item["step"] = spec["step"]
+        items.append(item)
     return items
+
+
+def _apply_runtime_setting(key: str, value: str, request: Request) -> None:
+    normalized_key = key.strip()
+    event_engine = getattr(request.app.state, "event_engine", None)
+    supervisor = getattr(request.app.state, "supervisor", None)
+    face_service = getattr(request.app.state, "face_service", None)
+    fire_service = getattr(request.app.state, "fire_service", None)
+    notification_dispatcher = getattr(request.app.state, "notification_dispatcher", None)
+
+    if normalized_key == "INTRUDER_EVENT_COOLDOWN_SECONDS" and event_engine is not None:
+        event_engine.intruder_event_cooldown_seconds = max(0, int(value))
+        return
+
+    if normalized_key == "FACE_COSINE_THRESHOLD" and face_service is not None:
+        face_service.cosine_threshold = float(value)
+        return
+
+    if normalized_key == "FIRE_MODEL_ENABLED":
+        enabled = _parse_bool(value)
+        if fire_service is not None:
+            fire_service.enabled = enabled
+        if supervisor is not None:
+            deps_ready = supervisor.camera_manager is not None and supervisor.fire_service is not None
+            supervisor.fire_continuous_detection_enabled = bool(enabled and deps_ready)
+        return
+
+    if normalized_key == "FIRE_MODEL_THRESHOLD" and fire_service is not None:
+        fire_service.threshold = max(0.01, min(0.99, float(value)))
+        return
+
+    if normalized_key == "NODE_OFFLINE_SECONDS" and supervisor is not None:
+        supervisor.node_offline_seconds = max(20, int(value))
+        return
+
+    if normalized_key == "CAMERA_OFFLINE_SECONDS" and supervisor is not None:
+        supervisor.camera_offline_seconds = max(10, int(value))
+        return
+
+    if normalized_key == "EVENT_RETENTION_DAYS" and supervisor is not None:
+        supervisor.event_retention_days = max(1, int(value))
+        return
+
+    if normalized_key == "LOG_RETENTION_DAYS" and supervisor is not None:
+        supervisor.log_retention_days = max(1, int(value))
+        return
+
+    if normalized_key == "REGULAR_SNAPSHOT_RETENTION_DAYS" and supervisor is not None:
+        supervisor.regular_snapshot_retention_days = max(1, int(value))
+        return
+
+    if normalized_key == "CRITICAL_SNAPSHOT_RETENTION_DAYS" and supervisor is not None:
+        supervisor.critical_snapshot_retention_days = max(1, int(value))
+        return
+
+    if normalized_key == "AUTHORIZED_PRESENCE_LOGGING_ENABLED" and supervisor is not None:
+        supervisor.authorized_presence_logging_enabled = _parse_bool(value)
+        supervisor.face_presence_logging_enabled = bool(
+            supervisor.authorized_presence_logging_enabled
+            or supervisor.unknown_presence_logging_enabled
+        )
+        return
+
+    if normalized_key == "UNKNOWN_PRESENCE_LOGGING_ENABLED" and supervisor is not None:
+        supervisor.unknown_presence_logging_enabled = _parse_bool(value)
+        supervisor.face_presence_logging_enabled = bool(
+            supervisor.authorized_presence_logging_enabled
+            or supervisor.unknown_presence_logging_enabled
+        )
+        return
+
+    if normalized_key == "AUTHORIZED_PRESENCE_SCAN_SECONDS" and supervisor is not None:
+        supervisor.authorized_presence_scan_seconds = max(1, int(value))
+        return
+
+    if normalized_key == "AUTHORIZED_PRESENCE_COOLDOWN_SECONDS" and supervisor is not None:
+        supervisor.authorized_presence_cooldown_seconds = max(5, int(value))
+        return
+
+    if normalized_key == "UNKNOWN_PRESENCE_COOLDOWN_SECONDS" and supervisor is not None:
+        supervisor.unknown_presence_cooldown_seconds = max(5, int(value))
+        return
+
+    if notification_dispatcher is not None:
+        notification_dispatcher.apply_runtime_setting(normalized_key, value)
 
 
 @router.get("/api/ui/events/live")
@@ -318,12 +619,25 @@ def ui_nodes_live(request: Request) -> dict:
         str(row.get("node_id") or "").strip().lower(): row for row in cameras
     }
 
+    camera_timeout_seconds = max(10, int(settings.camera_offline_seconds))
+    now_dt = datetime.now(timezone.utc)
+
+    def _camera_is_online(row: dict[str, Any]) -> bool:
+        last_seen_raw = str(row.get("last_seen_ts") or "").strip()
+        if not last_seen_raw:
+            return False
+        try:
+            seen_dt = datetime.fromisoformat(last_seen_raw.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if seen_dt.tzinfo is None:
+            seen_dt = seen_dt.replace(tzinfo=timezone.utc)
+        else:
+            seen_dt = seen_dt.astimezone(timezone.utc)
+        return (now_dt - seen_dt).total_seconds() <= float(camera_timeout_seconds)
+
     camera_status_by_node: dict[str, str] = {
-        node_id: (
-            "online"
-            if str(row.get("status") or "").strip().lower() == "online"
-            else "offline"
-        )
+        node_id: ("online" if _camera_is_online(row) else "offline")
         for node_id, row in camera_by_node.items()
     }
 
@@ -440,9 +754,9 @@ def ui_nodes_live(request: Request) -> dict:
                 "detail": "Door-force/person triggers run selective face matching",
             },
             {
-                "name": "Smoke-First Fire Pipeline",
+                "name": "Continuous Fire Vision Pipeline",
                 "state": "active",
-                "detail": "Smoke threshold triggers indoor camera flame confirmation",
+                "detail": "Camera frames are scanned continuously for flame; smoke warnings remain independent",
             },
             {
                 "name": "Retention Cleanup",
@@ -496,29 +810,40 @@ def ui_runtime_setting_update(
     payload: RuntimeSettingUpdateRequest, request: Request
 ) -> dict:
     get_current_user(request)
-    key = payload.key.strip().upper()
-    value = payload.value.strip()
+    settings: Settings = request.app.state.settings
+    requested_key = payload.key.strip()
 
-    if key != "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS":
+    key = ""
+    for candidate in (requested_key, requested_key.upper(), requested_key.lower()):
+        if candidate in RUNTIME_SETTING_SPECS:
+            key = candidate
+            break
+    if not key:
         raise HTTPException(status_code=400, detail="unsupported runtime setting")
 
+    spec = RUNTIME_SETTING_SPECS[key]
+    if not bool(spec.get("editable", True)):
+        raise HTTPException(status_code=400, detail="runtime setting is read-only")
+
     try:
-        cooldown_seconds = int(value)
+        normalized_value = _normalize_runtime_setting_value(key, payload.value, settings)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail="value must be an integer") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if cooldown_seconds < 10 or cooldown_seconds > 3600:
-        raise HTTPException(
-            status_code=400,
-            detail="value must be between 10 and 3600 seconds",
-        )
+    store.upsert_setting(key, normalized_value)
+    _apply_runtime_setting(key, normalized_value, request)
 
-    store.upsert_setting(key, str(cooldown_seconds))
+    is_secret = bool(spec.get("secret", False))
     return {
         "ok": True,
         "key": key,
-        "value": str(cooldown_seconds),
-        "description": "Minimum seconds between Telegram snapshot sends per source node and alert type",
+        "value": "" if is_secret else normalized_value,
+        "description": str(spec.get("description") or ""),
+        "secret": is_secret,
+        "configured": bool(normalized_value) if is_secret else False,
+        "group": str(spec.get("group") or "Runtime"),
+        "input_type": str(spec.get("input_type") or "text"),
+        "live_apply": bool(spec.get("live_apply", False)),
     }
 
 
@@ -542,135 +867,6 @@ def ui_camera_control(payload: CameraControlRequest, request: Request) -> dict:
         "command": cmd,
         "topic": result.endpoint,
         "detail": result.detail,
-    }
-
-
-@router.post("/api/ui/onboarding/camera/apply")
-def ui_onboarding_camera_apply(
-    payload: CameraOnboardingApplyRequest, request: Request
-) -> dict:
-    get_current_user(request)
-
-    node_id = payload.node_id.strip().lower()
-    stream_url = payload.stream_url.strip()
-    fallback_stream_url = payload.fallback_stream_url.strip()
-
-    target_url = stream_url or fallback_stream_url
-    if not target_url:
-        raise HTTPException(status_code=400, detail="stream_url is required")
-
-    if not target_url.startswith(("http://", "https://", "rtsp://")):
-        raise HTTPException(
-            status_code=400,
-            detail="stream_url must start with http://, https://, or rtsp://",
-        )
-
-    applier = getattr(request.app.state, "apply_camera_stream_override", None)
-    if not callable(applier):
-        raise HTTPException(
-            status_code=503, detail="camera stream apply service unavailable"
-        )
-
-    try:
-        result = applier(node_id, target_url)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    result_dict = cast(dict[str, Any], result if isinstance(result, dict) else {})
-
-    camera_runtime = {}
-    camera_manager = getattr(request.app.state, "camera_manager", None)
-    if camera_manager is not None:
-        try:
-            statuses = camera_manager.live_status()
-            for status_row in statuses:
-                if not isinstance(status_row, dict):
-                    continue
-                status_dict = cast(dict[str, Any], status_row)
-                if str(status_dict.get("node_id") or "").strip().lower() != node_id:
-                    continue
-                camera_runtime = {
-                    "status": str(status_dict.get("status") or "offline"),
-                    "last_error": str(status_dict.get("last_error") or ""),
-                }
-                break
-        except Exception:
-            camera_runtime = {}
-
-    return {
-        "ok": True,
-        "applied": True,
-        "node_id": str(result_dict.get("node_id") or node_id),
-        "active_stream_url": str(result_dict.get("active_stream_url") or target_url),
-        "camera_runtime": camera_runtime,
-    }
-
-
-@router.post("/api/ui/onboarding/reprovision-all")
-async def ui_onboarding_reprovision_all(request: Request) -> dict:
-    get_current_user(request)
-
-    known_ips = _known_node_ip_map()
-    results_by_node: dict[str, dict[str, str]] = {}
-    pending_node_ids: list[str] = []
-
-    for node_id in PROVISIONABLE_NODE_IDS:
-        ip_address = known_ips.get(node_id, "")
-        if not ip_address:
-            results_by_node[node_id] = {
-                "node_id": node_id,
-                "ip": "",
-                "status": "offline_no_ip",
-                "detail": "Node has no known LAN IP yet",
-            }
-        else:
-            pending_node_ids.append(node_id)
-
-    if pending_node_ids:
-        timeout = httpx.Timeout(PROVISION_RESET_TIMEOUT_SECONDS)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            task_results = await asyncio.gather(
-                *[
-                    _request_node_reprovision_reset(client, node_id, known_ips[node_id])
-                    for node_id in pending_node_ids
-                ]
-            )
-        for row in task_results:
-            node_id = str(row.get("node_id") or "").strip().lower()
-            if node_id:
-                results_by_node[node_id] = row
-
-    ordered_results = [
-        results_by_node.get(
-            node_id,
-            {
-                "node_id": node_id,
-                "ip": "",
-                "status": "error",
-                "detail": "Missing result",
-            },
-        )
-        for node_id in PROVISIONABLE_NODE_IDS
-    ]
-
-    accepted_count = sum(
-        1 for row in ordered_results if row.get("status") == "accepted"
-    )
-    offline_count = sum(
-        1 for row in ordered_results if row.get("status") == "offline_no_ip"
-    )
-    failed_count = len(ordered_results) - accepted_count - offline_count
-
-    return {
-        "ok": True,
-        "requested_nodes": list(PROVISIONABLE_NODE_IDS),
-        "results": ordered_results,
-        "summary": {
-            "accepted": accepted_count,
-            "offline_no_ip": offline_count,
-            "failed": failed_count,
-        },
     }
 
 
@@ -747,22 +943,32 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
 
         now = time.monotonic()
         cached_entry = cache.get(normalized_node)
-        verdict: dict[str, Any] | None = None
+        verdicts: list[dict[str, Any]] = []
         if isinstance(cached_entry, dict):
             cached_ts = float(cached_entry.get("ts") or 0.0)
-            cached_verdict = cached_entry.get("verdict")
+            cached_verdicts = cached_entry.get("verdicts")
             if (now - cached_ts) <= FACE_DEBUG_CLASSIFY_INTERVAL_SECONDS and isinstance(
-                cached_verdict, dict
+                cached_verdicts, list
             ):
-                verdict = cast(dict[str, Any], cached_verdict)
+                verdicts = [
+                    cast(dict[str, Any], item)
+                    for item in cached_verdicts
+                    if isinstance(item, dict)
+                ]
 
-        if verdict is None:
-            latest = request.app.state.face_service.classify_frame_with_bbox(frame)
-            verdict = latest if isinstance(latest, dict) else {}
-            cache[normalized_node] = {"ts": now, "verdict": verdict}
+        if not verdicts:
+            latest = request.app.state.face_service.classify_faces_with_bbox(
+                frame, max_faces=5
+            )
+            verdicts = latest if isinstance(latest, list) else []
+            cache[normalized_node] = {"ts": now, "verdicts": verdicts}
 
-        bbox = verdict.get("bbox")
-        if isinstance(bbox, list) and len(bbox) == 4:
+        drawn = 0
+        for verdict in verdicts:
+            bbox = verdict.get("bbox")
+            if not (isinstance(bbox, list) and len(bbox) == 4):
+                continue
+
             x, y, w, h = [int(value) for value in bbox]
             is_authorized = str(verdict.get("result") or "") == "authorized"
             color = (50, 205, 50) if is_authorized else (0, 165, 255)
@@ -783,17 +989,70 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
                 2,
                 cv2.LINE_AA,
             )
-        else:
-            reason = str(verdict.get("reason") or "No face detected")
-            if reason == "no_face_detected":
-                reason = "No face detected"
+            drawn += 1
+
+        if drawn == 0:
             cv2.putText(
                 frame,
-                reason,
+                "No face detected",
                 (12, 26),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.65,
                 (0, 165, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+        fire_cache_raw = getattr(request.app.state, "fire_debug_cache", None)
+        fire_cache: dict[str, dict[str, Any]]
+        if isinstance(fire_cache_raw, dict):
+            fire_cache = cast(dict[str, dict[str, Any]], fire_cache_raw)
+        else:
+            fire_cache = {}
+            request.app.state.fire_debug_cache = fire_cache
+
+        fire_now = time.monotonic()
+        fire_cached_entry = fire_cache.get(normalized_node)
+        fire_result: dict[str, Any] = {}
+        if isinstance(fire_cached_entry, dict):
+            fire_cached_ts = float(fire_cached_entry.get("ts") or 0.0)
+            cached_result = fire_cached_entry.get("result")
+            if (fire_now - fire_cached_ts) <= FIRE_DEBUG_CLASSIFY_INTERVAL_SECONDS and isinstance(
+                cached_result, dict
+            ):
+                fire_result = cast(dict[str, Any], cached_result)
+
+        if not fire_result:
+            latest_fire = request.app.state.fire_service.detect_flame(frame)
+            fire_result = latest_fire if isinstance(latest_fire, dict) else {}
+            fire_cache[normalized_node] = {"ts": fire_now, "result": fire_result}
+
+        fire_score = float(fire_result.get("confidence") or 0.0)
+        fire_detected = bool(fire_result.get("flame"))
+        fire_color = (0, 0, 255) if fire_detected else (60, 180, 255)
+        fire_text = f"FIRE {'YES' if fire_detected else 'NO'} {fire_score:.1f}%"
+        cv2.putText(
+            frame,
+            fire_text,
+            (12, 56),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            fire_color,
+            2,
+            cv2.LINE_AA,
+        )
+
+        fire_bbox = fire_result.get("bbox")
+        if isinstance(fire_bbox, list) and len(fire_bbox) == 4:
+            fx, fy, fw, fh = [int(value) for value in fire_bbox]
+            cv2.rectangle(frame, (fx, fy), (fx + fw, fy + fh), fire_color, 2)
+            cv2.putText(
+                frame,
+                "FLAME REGION",
+                (max(4, fx), max(74, fy - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                fire_color,
                 2,
                 cv2.LINE_AA,
             )

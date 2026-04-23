@@ -54,6 +54,11 @@ class CaptureFaceRequest(BaseModel):
     image: str
 
 
+class CaptureFaceFromNodeRequest(BaseModel):
+    name: str
+    node_id: str = Field(min_length=1, max_length=64)
+
+
 class CameraControlRequest(BaseModel):
     node_id: str
     command: str
@@ -87,10 +92,4 @@ class MobileNotificationPreferencesRequest(BaseModel):
 
 class RuntimeSettingUpdateRequest(BaseModel):
     key: str = Field(min_length=1, max_length=64)
-    value: str = Field(min_length=1, max_length=64)
-
-
-class CameraOnboardingApplyRequest(BaseModel):
-    node_id: str = Field(min_length=1, max_length=64)
-    stream_url: str = Field(min_length=1, max_length=512)
-    fallback_stream_url: str = Field(default="", max_length=512)
+    value: str = Field(min_length=0, max_length=4096)

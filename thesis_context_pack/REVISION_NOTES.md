@@ -1,31 +1,34 @@
-# Revision Notes (2026-03-04)
+# Revision Notes (2026-04-18)
 
-This revision reflects the latest implementation architecture and current deliverables.
+This revision aligns the thesis pack with the current state of the project while preserving flexibility for the final deployment narrative.
 
-## Key updates (current implementation)
-- **Server host platform:** Raspberry Pi **2** (Flask dashboard, API, SQLite logging, and alert lifecycle).
-- **Vision processing host:** **Second-hand laptop** for face recognition and visual flame detection algorithms/runtime.
-- **Monitoring scope:** **2 areas** for controlled testing and demo:
+## Key alignment decisions
+- The thesis pack now covers **Chapters 1 to 5**.
+- Implementation-facing sections were rewritten to describe the system in terms of **functional roles** instead of overcommitting to one fixed host arrangement.
+- **Raspberry Pi 2** remains part of the thesis narrative as an **optional deployment component for local edge hosting**.
+
+## Current system profile reflected in this pack
+- **Monitoring scope:** two monitored areas
   - **Living Room**
   - **Door Entrance Area**
-- **Cameras (2 total):**
-  - **Indoor:** USB **UVC webcam** (local capture source).
-  - **Outdoor:** **ESP32-CAM** on the same Wi-Fi/LAN, sending **MJPEG over HTTP** (dashboard may use periodic JPEG snapshots).
-  - **Night-vision support:** IR illumination LEDs for both cameras.
-- **Smoke/door sensing nodes:** **3x ESP32-C3**
-  - `mq2_living` for Living Room smoke events
-  - `mq2_door` for Door Entrance Area smoke events
-  - `door_force` for forced-entry sensing using **GY-LSM6DS3**
-- **Removed hardware path:** MCP3008 ADC (no longer part of implementation).
-- **Sensor uplink protocol:** **HTTP POST + JSON** to `POST /api/sensors/event` (no MQTT).
+- **Core sensing and monitoring elements:**
+  - night-vision-capable camera inputs
+  - smoke sensing nodes
+  - door-force sensing node
+  - local dashboard, logs, alerts, and summaries
+- **Sensor event transport:** **HTTP POST + JSON** through `POST /api/sensors/event`
+- **Face pipeline:** OpenCV **YuNet + SFace** enrollment, training, and classification flow
+- **Fire pipeline:** **smoke-first** logic with camera-based flame confirmation
+- **Alert workflow:** local alert generation, acknowledgment, persistence, and optional remote delivery layers
 
-## Current software deliverables reflected in this pack
-- Local-first dashboard, history/events pages, ACK workflow, snapshots, and summaries.
-- LBPH face dataset capture/training/retrain flow with runtime model reload.
-- Fusion logic implemented:
-  - **INTRUDER:** two-of-three evidence (outdoor unknown, indoor unknown, door-force).
-  - **FIRE:** flame + smoke evidence within fusion window.
-- Flame false-positive filtering refinements (ratio + blob + hot-core checks).
-- Persistent Telegram alerting/reminder flow (optional remote channel).
+## Chapter 4 and 5 notes
+- **Chapter 4** is scaffolded with table templates and sample narrative text.
+- No fabricated final measured results were inserted.
+- Statistical guidance was updated to favor:
+  - descriptive statistics for technical testing
+  - confusion-matrix metrics for detection modules
+  - weighted mean and standard deviation for optional user evaluation
+  - chi-square only when grouped respondent comparisons are actually conducted
 
-> Note: Chapter 1 and Chapter 3 implementation-focused sections were synchronized to this architecture to avoid conflicting hardware descriptions in future AI sessions.
+## Illustration policy
+- Diagram sections use **ASCII or Markdown-native layouts** for portability and easy editing.

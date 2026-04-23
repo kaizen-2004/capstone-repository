@@ -254,40 +254,41 @@ class EventEngine:
     def _handle_smoke_trigger(
         self, event_id: int, node_id: str, location: str, details: dict[str, Any]
     ) -> int:
-        frame = self.camera_manager.snapshot_frame("cam_indoor")
-        flame_result = {"flame": False, "confidence": 0.0}
+        preferred_camera = "cam_indoor"
+        normalized_location = (location or "").strip().lower()
+        if node_id in {"smoke_node2", "mq2_door"} or "door" in normalized_location:
+            preferred_camera = "cam_door"
+
+        frame = self.camera_manager.snapshot_frame(preferred_camera)
+        camera_node_used = preferred_camera
+        if frame is None and preferred_camera != "cam_indoor":
+            frame = self.camera_manager.snapshot_frame("cam_indoor")
+            camera_node_used = "cam_indoor"
+
         snapshot_path = ""
 
         if frame is not None:
-            flame_result = self.fire_service.detect_flame(frame)
-            prefix = "fire_confirmed" if flame_result["flame"] else "fire_check"
-            snapshot_path = self.camera_manager.save_snapshot(
-                "cam_indoor", frame, prefix
-            )
-
-        if flame_result["flame"]:
-            return self._create_alert(
-                event_id,
-                alert_type="FIRE",
-                severity="critical",
-                title="Fire Alert",
-                description="Smoke anomaly with indoor visual flame confirmation",
-                source_node=node_id,
-                location=location or ROOM_LIVING,
-                snapshot_path=snapshot_path,
-                details={"flame_confirmation": flame_result, **details},
-            )
+            try:
+                snapshot_path = self.camera_manager.save_snapshot(
+                    camera_node_used, frame, "smoke_warning"
+                )
+            except Exception:
+                snapshot_path = ""
 
         return self._create_alert(
             event_id,
             alert_type="SMOKE_WARNING",
             severity="warning",
             title="Smoke Alert",
-            description="Smoke anomaly detected; no visual flame confirmation",
+            description="Smoke anomaly detected from sensor threshold event",
             source_node=node_id,
             location=location or ROOM_LIVING,
             snapshot_path=snapshot_path,
-            details={"flame_confirmation": flame_result, **details},
+            details={
+                **details,
+                "detection_mode": "smoke_sensor_only",
+                "camera_node": camera_node_used,
+            },
         )
 
     def _handle_intruder_trigger(
@@ -327,15 +328,39 @@ class EventEngine:
             "face_present": False,
             "reason": "no_frame",
         }
+        face_results: list[dict[str, Any]] = []
         snapshot_path = ""
         if frame is not None:
-            face_result = self.face_service.classify_frame(frame)
+            face_results = self.face_service.classify_faces_with_bbox(frame, max_faces=5)
+            if face_results:
+                unknown_faces = [
+                    verdict
+                    for verdict in face_results
+                    if str(verdict.get("result") or "").lower() == "unknown"
+                    and bool(verdict.get("face_present"))
+                ]
+                authorized_faces = [
+                    verdict
+                    for verdict in face_results
+                    if str(verdict.get("result") or "").lower() == "authorized"
+                ]
+
+                if unknown_faces:
+                    face_result = unknown_faces[0]
+                elif authorized_faces:
+                    face_result = authorized_faces[0]
+                else:
+                    face_result = face_results[0]
+
             prefix = (
                 "authorized" if face_result.get("result") == "authorized" else "unknown"
             )
-            snapshot_path = self.camera_manager.save_snapshot(
-                primary_node, frame, f"intruder_{prefix}"
-            )
+            try:
+                snapshot_path = self.camera_manager.save_snapshot(
+                    primary_node, frame, f"intruder_{prefix}"
+                )
+            except Exception:
+                snapshot_path = ""
 
         if face_result.get("result") == "authorized":
             store.create_event(
@@ -346,7 +371,7 @@ class EventEngine:
                 severity="normal",
                 title="Authorized Person Detected",
                 description="Face classified as authorized",
-                details={"face": face_result, **details},
+                details={"face": face_result, "faces": face_results, **details},
             )
             return self._create_alert(
                 event_id,
@@ -357,7 +382,7 @@ class EventEngine:
                 source_node=node_id,
                 location=location or ROOM_DOOR,
                 snapshot_path=snapshot_path,
-                details={"face": face_result, **details},
+                details={"face": face_result, "faces": face_results, **details},
                 requires_ack=False,
                 dispatch_notification=True,
             )
@@ -372,7 +397,7 @@ class EventEngine:
                 source_node=node_id,
                 location=location or ROOM_DOOR,
                 snapshot_path=snapshot_path,
-                details={"face": face_result, **details},
+                details={"face": face_result, "faces": face_results, **details},
                 requires_ack=True,
             )
 
@@ -385,7 +410,7 @@ class EventEngine:
             source_node=node_id,
             location=location or ROOM_DOOR,
             snapshot_path=snapshot_path,
-            details={"face": face_result, **details},
+            details={"face": face_result, "faces": face_results, **details},
             requires_ack=True,
         )
 

@@ -31,7 +31,17 @@ class Settings:
     camera_indoor_webcam_index: int
     camera_door_webcam_index: int
     camera_processing_fps: int
-    face_match_threshold: float
+    face_cosine_threshold: float
+    face_detector_model_path: Path
+    face_recognizer_model_path: Path
+    face_detect_score_threshold: float
+    face_detect_nms_threshold: float
+    face_detect_top_k: int
+    fire_model_enabled: bool
+    fire_model_path: Path
+    fire_model_threshold: float
+    fire_model_input_size: int
+    fire_model_fire_class_index: int
     authorized_presence_logging_enabled: bool
     authorized_presence_scan_seconds: int
     authorized_presence_cooldown_seconds: int
@@ -181,7 +191,46 @@ def load_settings() -> Settings:
         camera_indoor_webcam_index=_env_int("CAMERA_INDOOR_WEBCAM_INDEX", 0, 0, 20),
         camera_door_webcam_index=_env_int("CAMERA_DOOR_WEBCAM_INDEX", 1, 0, 20),
         camera_processing_fps=_env_int("CAMERA_PROCESSING_FPS", 12, 5, 20),
-        face_match_threshold=_env_float("FACE_MATCH_THRESHOLD", 68.0, 40.0, 120.0),
+        face_cosine_threshold=_env_float("FACE_COSINE_THRESHOLD", 0.52, 0.30, 0.95),
+        face_detector_model_path=Path(
+            os.environ.get(
+                "FACE_DETECTOR_MODEL_PATH",
+                str(
+                    storage_root
+                    / "models"
+                    / "face"
+                    / "face_detection_yunet_2023mar.onnx"
+                ),
+            )
+        ),
+        face_recognizer_model_path=Path(
+            os.environ.get(
+                "FACE_RECOGNIZER_MODEL_PATH",
+                str(
+                    storage_root
+                    / "models"
+                    / "face"
+                    / "face_recognition_sface_2021dec.onnx"
+                ),
+            )
+        ),
+        face_detect_score_threshold=_env_float(
+            "FACE_DETECT_SCORE_THRESHOLD", 0.90, 0.01, 1.0
+        ),
+        face_detect_nms_threshold=_env_float(
+            "FACE_DETECT_NMS_THRESHOLD", 0.30, 0.01, 1.0
+        ),
+        face_detect_top_k=_env_int("FACE_DETECT_TOP_K", 5000, 1, 50000),
+        fire_model_enabled=_env_bool("FIRE_MODEL_ENABLED", True),
+        fire_model_path=Path(
+            os.environ.get(
+                "FIRE_MODEL_PATH",
+                str(storage_root / "models" / "fire" / "firenet.pb"),
+            )
+        ),
+        fire_model_threshold=_env_float("FIRE_MODEL_THRESHOLD", 0.60, 0.05, 0.99),
+        fire_model_input_size=_env_int("FIRE_MODEL_INPUT_SIZE", 224, 64, 640),
+        fire_model_fire_class_index=_env_int("FIRE_MODEL_FIRE_CLASS_INDEX", 0, 0, 8),
         authorized_presence_logging_enabled=_env_bool(
             "AUTHORIZED_PRESENCE_LOGGING_ENABLED", True
         ),
@@ -228,6 +277,9 @@ def load_settings() -> Settings:
         settings.logs_root,
         settings.face_samples_root,
         settings.models_root,
+        settings.face_detector_model_path.parent,
+        settings.face_recognizer_model_path.parent,
+        settings.fire_model_path.parent,
         settings.db_path.parent,
     ):
         path.mkdir(parents=True, exist_ok=True)

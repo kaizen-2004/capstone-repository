@@ -1,10 +1,10 @@
 # Hardware/Instruments
 
-Raspberry Pi 2 Linux host - local dashboard/API/database/alert server.  
-Second-hand laptop - host for face-recognition and visual flame-detection processing.  
-Indoor USB UVC night-vision camera + IR illumination – supplies frames for indoor monitoring and visual flame detection.  
-Outdoor ESP32-CAM + IR illumination – records facial images at the door and transmits frames over HTTP on the local Wi‑Fi/LAN.  
-Two (2) MQ-2 smoke sensing points – one per monitored area (Living Room and Door Entrance Area).  
-Two (2) ESP32-C3 smoke nodes (`mq2_living`, `mq2_door`) – post smoke readings/events to the server.  
-GY‑LSM6DS3 + one (1) ESP32-C3 door-force node (`door_force`) – identifies forced-entry motion events.  
-Local HDMI display / dashboard – used for alerts and monitoring.
+Raspberry Pi 2 - optional deployment component for local edge hosting.  
+Local host computer - runs monitoring, storage, and development/runtime services during implementation and testing.  
+Indoor-area night-vision-capable camera with IR illumination - supplies frames for interior monitoring and fire-related visual confirmation.  
+Door-area night-vision-capable camera with IR illumination - supplies frames for entrance monitoring and face recognition.  
+Two (2) MQ-2 smoke sensing points - one per monitored area (Living Room and Door Entrance Area).  
+Two (2) ESP32-based smoke nodes - post smoke readings and events to the backend.  
+GY-LSM6DS3 plus one (1) ESP32-based door-force node - identifies forced-entry motion events.  
+Local display or dashboard - used for alerts and monitoring.

@@ -75,7 +75,12 @@ Camera source env vars:
 - `CAMERA_INDOOR_WEBCAM_INDEX` (default `0` when `CAMERA_SOURCE_MODE=webcam`)
 - `CAMERA_DOOR_WEBCAM_INDEX` (default `1`, auto-fallback to index `0` if unavailable)
 - `CAMERA_PROCESSING_FPS` (default `12`)
-- `FACE_MATCH_THRESHOLD` (default `68`; higher values like `85` are less strict for webcam testing)
+- `FACE_COSINE_THRESHOLD` (default `0.52`; higher is stricter)
+- `FACE_DETECTOR_MODEL_PATH` (default `backend/storage/models/face/face_detection_yunet_2023mar.onnx`)
+- `FACE_RECOGNIZER_MODEL_PATH` (default `backend/storage/models/face/face_recognition_sface_2021dec.onnx`)
+- `FACE_DETECT_SCORE_THRESHOLD` (default `0.90`)
+- `FACE_DETECT_NMS_THRESHOLD` (default `0.30`)
+- `FACE_DETECT_TOP_K` (default `5000`)
 - `AUTHORIZED_PRESENCE_LOGGING_ENABLED` (default `false`; when `true`, logs authorized re-entry events from live camera view)
 - `AUTHORIZED_PRESENCE_SCAN_SECONDS` (default `2`; scan interval for authorized presence logging)
 - `AUTHORIZED_PRESENCE_COOLDOWN_SECONDS` (default `20`; minimum seconds between repeated authorized-presence logs)
@@ -92,7 +97,7 @@ export CAMERA_SOURCE_MODE=webcam
 export CAMERA_WEBCAM_SINGLE_NODE=cam_door
 export CAMERA_INDOOR_WEBCAM_INDEX=0
 export CAMERA_DOOR_WEBCAM_INDEX=1
-export FACE_MATCH_THRESHOLD=85
+export FACE_COSINE_THRESHOLD=0.50
 export AUTHORIZED_PRESENCE_LOGGING_ENABLED=true
 export UNKNOWN_PRESENCE_LOGGING_ENABLED=true
 python backend/run_backend.py
@@ -115,6 +120,8 @@ Optional env vars for mobile push:
 - `MDNS_HOSTNAME` (optional override)
 
 `.env` at project root is auto-loaded by backend startup (`backend/run_backend.py` and FastAPI app startup).
+
+Dashboard runtime settings can override selected `.env` keys (including Telegram/WebPush fields) without editing `.env`. `.env` is treated as startup defaults/fallback.
 
 Default admin:
 

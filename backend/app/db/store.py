@@ -906,6 +906,16 @@ def get_face_by_name(name: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def get_face(face_id: int) -> dict[str, Any] | None:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM authorized_faces WHERE id = ? LIMIT 1", (int(face_id),))
+        row = cur.fetchone()
+        conn.close()
+    return dict(row) if row else None
+
+
 def add_face_sample(face_id: int, image_path: str, source: str, quality: float) -> int:
     with _LOCK:
         conn = _conn()

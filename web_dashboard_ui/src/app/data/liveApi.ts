@@ -38,35 +38,11 @@ export interface RuntimeSettingUpdatePayload {
   key: string;
   value: string;
   description: string;
-}
-
-export interface CameraOnboardingApplyPayload {
-  ok: boolean;
-  applied: boolean;
-  nodeId: string;
-  activeStreamUrl: string;
-  cameraRuntime: {
-    status: string;
-    lastError: string;
-  };
-}
-
-export interface ReprovisionNodeResult {
-  nodeId: string;
-  ip: string;
-  status: 'accepted' | 'offline_no_ip' | 'timeout' | 'error';
-  detail: string;
-}
-
-export interface ReprovisionAllNodesPayload {
-  ok: boolean;
-  requestedNodes: string[];
-  results: ReprovisionNodeResult[];
-  summary: {
-    accepted: number;
-    offlineNoIp: number;
-    failed: number;
-  };
+  secret: boolean;
+  configured: boolean;
+  group: string;
+  inputType: RuntimeSetting['inputType'];
+  liveApply: boolean;
 }
 
 export interface AuthUser {
@@ -349,10 +325,24 @@ function mapProfile(raw: Json): AuthorizedProfile {
 }
 
 function mapRuntimeSetting(raw: Json): RuntimeSetting {
+  const inputTypeRaw = String(raw.input_type ?? raw.inputType ?? 'text').toLowerCase();
+  const inputType: RuntimeSetting['inputType'] =
+    inputTypeRaw === 'number' || inputTypeRaw === 'switch' || inputTypeRaw === 'secret'
+      ? (inputTypeRaw as RuntimeSetting['inputType'])
+      : 'text';
   return {
     key: String(raw.key ?? ''),
     value: String(raw.value ?? ''),
     description: String(raw.description ?? ''),
+    editable: raw.editable == null ? true : Boolean(raw.editable),
+    secret: Boolean(raw.secret),
+    configured: Boolean(raw.configured),
+    group: String(raw.group ?? 'Runtime'),
+    inputType,
+    liveApply: Boolean(raw.live_apply ?? raw.liveApply),
+    min: raw.min == null ? undefined : toFloat(raw.min),
+    max: raw.max == null ? undefined : toFloat(raw.max),
+    step: raw.step == null ? undefined : toFloat(raw.step),
   };
 }
 
@@ -433,6 +423,11 @@ export async function updateRuntimeSetting(key: string, value: string): Promise<
     key: String(payload.key ?? key),
     value: String(payload.value ?? value),
     description: String(payload.description ?? ''),
+    secret: Boolean(payload.secret),
+    configured: Boolean(payload.configured),
+    group: String(payload.group ?? 'Runtime'),
+    inputType: String(payload.input_type ?? payload.inputType ?? 'text') as RuntimeSetting['inputType'],
+    liveApply: Boolean(payload.live_apply ?? payload.liveApply),
   };
 }
 
@@ -496,6 +491,18 @@ export async function captureFaceTrainingSample(name: string, imageDataUrl: stri
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, image: imageDataUrl }),
+  });
+  return mapTrainingStatus(payload);
+}
+
+export async function captureFaceTrainingSampleFromNode(
+  name: string,
+  nodeId: 'cam_indoor' | 'cam_door',
+): Promise<FaceTrainingStatus> {
+  const payload = await fetchJson<Json>('/api/training/face/capture-node', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, node_id: nodeId }),
   });
   return mapTrainingStatus(payload);
 }
@@ -682,72 +689,5 @@ export async function sendTelegramAccessLink(): Promise<TelegramAccessLinkSendPa
     sent: Boolean(payload.sent),
     status: String(payload.status ?? ''),
     detail: String(payload.detail ?? ''),
-  };
-}
-
-export async function applyOnboardedCameraStream(input: {
-  nodeId: string;
-  streamUrl: string;
-  fallbackStreamUrl?: string;
-}): Promise<CameraOnboardingApplyPayload> {
-  const payload = await fetchJson<Json>('/api/ui/onboarding/camera/apply', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      node_id: input.nodeId,
-      stream_url: input.streamUrl,
-      fallback_stream_url: input.fallbackStreamUrl ?? '',
-    }),
-  });
-
-  const runtimeRaw = payload.camera_runtime && typeof payload.camera_runtime === 'object'
-    ? (payload.camera_runtime as Json)
-    : {};
-
-  return {
-    ok: Boolean(payload.ok),
-    applied: Boolean(payload.applied),
-    nodeId: String(payload.node_id ?? input.nodeId),
-    activeStreamUrl: String(payload.active_stream_url ?? input.streamUrl),
-    cameraRuntime: {
-      status: String(runtimeRaw.status ?? ''),
-      lastError: String(runtimeRaw.last_error ?? ''),
-    },
-  };
-}
-
-export async function reprovisionAllNodes(): Promise<ReprovisionAllNodesPayload> {
-  const payload = await fetchJson<Json>('/api/ui/onboarding/reprovision-all', {
-    method: 'POST',
-  });
-
-  const requestedNodesRaw = Array.isArray(payload.requested_nodes) ? payload.requested_nodes : [];
-  const resultsRaw = Array.isArray(payload.results) ? payload.results : [];
-  const summaryRaw = payload.summary && typeof payload.summary === 'object'
-    ? (payload.summary as Json)
-    : {};
-
-  return {
-    ok: Boolean(payload.ok),
-    requestedNodes: requestedNodesRaw.map((item) => String(item ?? '').trim()).filter((item) => item.length > 0),
-    results: resultsRaw.map((item) => {
-      const row = item && typeof item === 'object' ? (item as Json) : {};
-      const statusRaw = String(row.status ?? '').toLowerCase();
-      const status: ReprovisionNodeResult['status'] =
-        statusRaw === 'accepted' || statusRaw === 'offline_no_ip' || statusRaw === 'timeout'
-          ? statusRaw
-          : 'error';
-      return {
-        nodeId: String(row.node_id ?? ''),
-        ip: String(row.ip ?? ''),
-        status,
-        detail: String(row.detail ?? ''),
-      };
-    }),
-    summary: {
-      accepted: toInt(summaryRaw.accepted),
-      offlineNoIp: toInt(summaryRaw.offline_no_ip),
-      failed: toInt(summaryRaw.failed),
-    },
   };
 }

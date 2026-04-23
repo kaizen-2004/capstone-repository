@@ -22,12 +22,25 @@ from .services.remote_access import LinkResolver, MdnsPublisher
 from .services.supervisor import Supervisor
 
 
-def _seed_default_settings() -> None:
-    store.upsert_setting("transport_mode", "http")
-    store.upsert_setting("deployment_host", "windows_pc")
-    store.upsert_setting("camera_processing_strategy", "event_triggered")
-    store.upsert_setting("mobile_push_enabled", "true")
-    store.upsert_setting("mobile_telegram_fallback_enabled", "true")
+def _seed_default_settings(settings) -> None:
+    def _seed_once(key: str, value: str) -> None:
+        if store.get_setting(key) is not None:
+            return
+        store.upsert_setting(key, value)
+
+    _seed_once("transport_mode", "http")
+    _seed_once("deployment_host", "windows_pc")
+    _seed_once("camera_processing_strategy", "event_triggered")
+    _seed_once("mobile_push_enabled", "true")
+    _seed_once("mobile_telegram_fallback_enabled", "true")
+    _seed_once(
+        "AUTHORIZED_PRESENCE_LOGGING_ENABLED",
+        "true" if settings.authorized_presence_logging_enabled else "false",
+    )
+    _seed_once(
+        "UNKNOWN_PRESENCE_LOGGING_ENABLED",
+        "true" if settings.unknown_presence_logging_enabled else "false",
+    )
 
 
 def _camera_stream_setting_key(node_id: str) -> str | None:
@@ -49,7 +62,35 @@ async def lifespan(app: FastAPI):
     )
     store.init_db()
     store.ensure_admin_user(settings.admin_username, settings.admin_password)
-    _seed_default_settings()
+    _seed_default_settings(settings)
+
+    def _setting_raw(key: str) -> str | None:
+        value = store.get_setting(key)
+        if value is None:
+            return None
+        return str(value).strip()
+
+    def _setting_bool(key: str, fallback: bool) -> bool:
+        raw = _setting_raw(key)
+        if raw is None:
+            return bool(fallback)
+        return raw.lower() in {"1", "true", "yes", "on", "enabled"}
+
+    def _setting_int(key: str, fallback: int, low: int, high: int) -> int:
+        raw = _setting_raw(key)
+        try:
+            parsed = int(raw) if raw is not None else int(fallback)
+        except ValueError:
+            parsed = int(fallback)
+        return max(low, min(high, parsed))
+
+    def _setting_float(key: str, fallback: float, low: float, high: float) -> float:
+        raw = _setting_raw(key)
+        try:
+            parsed = float(raw) if raw is not None else float(fallback)
+        except ValueError:
+            parsed = float(fallback)
+        return max(low, min(high, parsed))
 
     camera_source_mode = settings.camera_source_mode
     camera_labels = {
@@ -236,9 +277,24 @@ async def lifespan(app: FastAPI):
     face_service = FaceService(
         sample_root=settings.face_samples_root,
         model_root=settings.models_root,
-        match_threshold=settings.face_match_threshold,
+        cosine_threshold=_setting_float(
+            "FACE_COSINE_THRESHOLD", settings.face_cosine_threshold, 0.30, 0.95
+        ),
+        detector_model_path=settings.face_detector_model_path,
+        recognizer_model_path=settings.face_recognizer_model_path,
+        detect_score_threshold=settings.face_detect_score_threshold,
+        detect_nms_threshold=settings.face_detect_nms_threshold,
+        detect_top_k=settings.face_detect_top_k,
     )
-    fire_service = FireService()
+    fire_service = FireService(
+        enabled=_setting_bool("FIRE_MODEL_ENABLED", settings.fire_model_enabled),
+        model_path=settings.fire_model_path,
+        threshold=_setting_float(
+            "FIRE_MODEL_THRESHOLD", settings.fire_model_threshold, 0.05, 0.99
+        ),
+        input_size=settings.fire_model_input_size,
+        fire_class_index=settings.fire_model_fire_class_index,
+    )
     link_resolver = LinkResolver(settings=settings)
     mdns_publisher = MdnsPublisher(settings=settings, resolver=link_resolver)
     notification_dispatcher = NotificationDispatcher(
@@ -251,27 +307,90 @@ async def lifespan(app: FastAPI):
         face_service=face_service,
         fire_service=fire_service,
         notification_dispatcher=notification_dispatcher,
-        intruder_event_cooldown_seconds=settings.intruder_event_cooldown_seconds,
+        intruder_event_cooldown_seconds=_setting_int(
+            "INTRUDER_EVENT_COOLDOWN_SECONDS",
+            settings.intruder_event_cooldown_seconds,
+            0,
+            600,
+        ),
     )
     app.state.camera_http_controller = camera_http_controller
     app.state.apply_camera_stream_override = apply_camera_stream_override
 
     supervisor = Supervisor(
-        node_offline_seconds=settings.node_offline_seconds,
-        event_retention_days=settings.event_retention_days,
-        log_retention_days=settings.log_retention_days,
+        node_offline_seconds=_setting_int(
+            "NODE_OFFLINE_SECONDS", settings.node_offline_seconds, 20, 3600
+        ),
+        camera_offline_seconds=_setting_int(
+            "CAMERA_OFFLINE_SECONDS", settings.camera_offline_seconds, 10, 600
+        ),
+        event_retention_days=_setting_int(
+            "EVENT_RETENTION_DAYS", settings.event_retention_days, 1, 365
+        ),
+        log_retention_days=_setting_int(
+            "LOG_RETENTION_DAYS", settings.log_retention_days, 1, 365
+        ),
         snapshot_root=settings.snapshot_root,
-        regular_snapshot_retention_days=settings.regular_snapshot_retention_days,
-        critical_snapshot_retention_days=settings.critical_snapshot_retention_days,
+        regular_snapshot_retention_days=_setting_int(
+            "REGULAR_SNAPSHOT_RETENTION_DAYS",
+            settings.regular_snapshot_retention_days,
+            1,
+            365,
+        ),
+        critical_snapshot_retention_days=_setting_int(
+            "CRITICAL_SNAPSHOT_RETENTION_DAYS",
+            settings.critical_snapshot_retention_days,
+            1,
+            365,
+        ),
         notification_dispatcher=notification_dispatcher,
         camera_manager=camera_manager,
         face_service=face_service,
-        authorized_presence_logging_enabled=settings.authorized_presence_logging_enabled,
-        authorized_presence_scan_seconds=settings.authorized_presence_scan_seconds,
-        authorized_presence_cooldown_seconds=settings.authorized_presence_cooldown_seconds,
-        unknown_presence_logging_enabled=settings.unknown_presence_logging_enabled,
-        unknown_presence_cooldown_seconds=settings.unknown_presence_cooldown_seconds,
+        fire_service=fire_service,
+        fire_continuous_detection_enabled=_setting_bool(
+            "FIRE_MODEL_ENABLED", settings.fire_model_enabled
+        ),
+        fire_scan_seconds=_setting_int("FIRE_SCAN_SECONDS", 2, 1, 60),
+        fire_alert_cooldown_seconds=45,
+        authorized_presence_logging_enabled=_setting_bool(
+            "AUTHORIZED_PRESENCE_LOGGING_ENABLED",
+            settings.authorized_presence_logging_enabled,
+        ),
+        authorized_presence_scan_seconds=_setting_int(
+            "AUTHORIZED_PRESENCE_SCAN_SECONDS",
+            settings.authorized_presence_scan_seconds,
+            1,
+            30,
+        ),
+        authorized_presence_cooldown_seconds=_setting_int(
+            "AUTHORIZED_PRESENCE_COOLDOWN_SECONDS",
+            settings.authorized_presence_cooldown_seconds,
+            5,
+            600,
+        ),
+        unknown_presence_logging_enabled=_setting_bool(
+            "UNKNOWN_PRESENCE_LOGGING_ENABLED",
+            settings.unknown_presence_logging_enabled,
+        ),
+        unknown_presence_cooldown_seconds=_setting_int(
+            "UNKNOWN_PRESENCE_COOLDOWN_SECONDS",
+            settings.unknown_presence_cooldown_seconds,
+            5,
+            600,
+        ),
     )
+
+    for secret_key in (
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "WEBPUSH_VAPID_PUBLIC_KEY",
+        "WEBPUSH_VAPID_PRIVATE_KEY",
+        "WEBPUSH_VAPID_SUBJECT",
+    ):
+        override = _setting_raw(secret_key)
+        if override is None:
+            continue
+        notification_dispatcher.apply_runtime_setting(secret_key, override)
 
     app.state.camera_manager = camera_manager
     app.state.face_service = face_service

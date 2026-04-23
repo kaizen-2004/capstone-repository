@@ -51,3 +51,6 @@ For non-trivial tasks, respond in this structure:
 4. Implementation
 5. Validation
 6. Notes / risks
+
+- For python environment, always use uv
+- My venv is in ~/venvs/thesis/bin/activate

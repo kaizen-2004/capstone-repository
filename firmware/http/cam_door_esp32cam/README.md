@@ -6,25 +6,21 @@ Active ESP32-CAM firmware for replacing `cam_door` with an AI Thinker ESP32-CAM 
 
 - `AI Thinker ESP32-CAM`
 
-## Provisioning Flow (SoftAP + NVS)
+## Wi-Fi Configuration
 
-This firmware supports Wi-Fi onboarding without reflashing when network changes.
+This firmware now uses manual Wi-Fi configuration before upload.
 
-1. Boot node.
-2. If saved Wi-Fi credentials are missing/invalid, setup AP starts (open network):
-   - SSID format: `Thesis-Setup-XXXXXX`
-   - API base: `http://192.168.4.1`
-3. Send credentials to `POST /api/provision/wifi`.
-4. Node saves credentials in NVS and switches to STA.
-5. Check `GET /api/provision/status` for connected IP/mDNS.
+Edit shared network config:
 
-Setup AP timeout:
+- `firmware/http/common/network_config.h`
 
-- 10 minutes, then AP closes automatically.
-- Call `POST /api/provision/reset` to clear saved Wi-Fi and force setup AP mode.
-- After reset, setup AP mode stays preferred across reboot until new Wi-Fi credentials are provisioned.
+Set these values:
 
-Optional compile-time fallbacks still exist (`WIFI_SSID`, `WIFI_PASSWORD`, `WIFI_HOSTNAME`) but normal operation should use provisioning.
+- `THESIS_WIFI_SSID`
+- `THESIS_WIFI_PASSWORD`
+- `THESIS_BACKEND_BASE` (example: `http://192.168.1.8:8765`)
+
+No setup AP / onboarding API is used.
 
 Default camera identity:
 
@@ -38,14 +34,6 @@ Default camera identity:
 - Flash snapshot: `http://<camera-ip>/capture?flash=1`
 - Snapshot alias: `http://<camera-ip>/snapshot.jpg?flash=1`
 - Control: `http://<camera-ip>/control?cmd=status`
-
-Provisioning endpoints:
-
-- `GET /api/provision/info`
-- `GET /api/provision/status`
-- `GET /api/provision/scan`
-- `POST /api/provision/wifi`
-- `POST /api/provision/reset`
 
 Supported control commands:
 

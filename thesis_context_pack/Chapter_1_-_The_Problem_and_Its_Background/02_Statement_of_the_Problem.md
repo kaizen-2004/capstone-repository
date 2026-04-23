@@ -6,18 +6,18 @@
 
 ### **1. Main Objective**
 
-The main objective of this research is to **design, construct, and evaluate a Raspberry Pi-based real-time intruder and fire monitoring alert system** that uses **night-vision cameras for OpenCV-based facial recognition and visual flame detection**, together with **indoor smoke sensors and a door motion/force sensor**, to provide timely and persistent warnings to the user.
+The main objective of this research is to **design, construct, and evaluate a real-time intruder and fire monitoring alert system** that uses **night-vision-capable cameras for OpenCV-based facial recognition and fire-related visual analysis**, together with **smoke sensors and a door motion/force sensor**, to provide timely and persistent warnings to the user in a condo-like environment.
 
 ### **2. Specific Objectives**
 
 Specifically, the study aims to:
 
-1. **Design** the overall **system architecture** that integrates the **Raspberry Pi** with a **night-vision camera** for intruder and fire-related visual monitoring.
+1. **Design** the overall **system architecture** that integrates camera inputs, local monitoring software, environmental sensing, and optional local edge-hosting components such as **Raspberry Pi 2** for intruder and fire-related monitoring.
 2. **Develop** the core detection algorithms by
-   - implementing an **OpenCV-based facial detection and recognition pipeline** on the Raspberry Pi for identifying authorized versus unknown individuals, and
-   - creating a **visual flame detection algorithm** that analyzes indoor camera footage to infer possible fire events, in combination with smoke sensor readings.
+   - implementing an **OpenCV-based facial detection and recognition pipeline** for identifying authorized versus unknown individuals, and
+   - creating a **visual fire-confirmation algorithm** that analyzes indoor camera footage when smoke-related events occur.
 3. **Implement** the integrated system by
-   - constructing the necessary **hardware and software interfaces** between the Raspberry Pi, the cameras, the smoke sensors, and the door sensor, and
+   - constructing the necessary **hardware and software interfaces** among the local host environment, the cameras, the smoke sensors, and the door sensor, and
    - enabling **automatic logging and classification** of intruder-related and fire-related events based on multi-sensor fusion.
 4. **Generate** a **summary of event and identification statistics** over a given period (e.g., daily), including
    - the number of **recognized authorized faces**,
@@ -32,4 +32,4 @@ Specifically, the study aims to:
 
 ### **Keywords**
 
-Raspberry Pi, Facial Recognition, Flame Detection, Real-Time Detection, Night-Vision Camera
+IoT Monitoring, Facial Recognition, Fire Detection, Smoke Detection, Real-Time Detection, Night-Vision Camera
