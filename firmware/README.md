@@ -4,14 +4,28 @@ Use this map to avoid flashing the wrong sketch.
 
 ## Active Mode (HTTP over Wi-Fi)
 
-Node onboarding/setup AP provisioning is removed.
-Configure Wi-Fi and backend values in one shared header before upload.
+Node onboarding/setup AP provisioning is available for active sensor node sketches.
+
+Provisioning contract (sensor nodes):
+
+- Setup AP SSID format: `Thesis-Setup-<chipSuffix>`
+- Setup AP base URL: `http://192.168.4.1`
+- Endpoint: `POST /configure`
+- Required JSON fields: `wifi_ssid`, `wifi_password`, `backend_host`, `backend_port`, `node_id`, `node_role`, `room_name`
+
+Role values accepted by active sensor sketches:
+
+- `door_force_http`: `door_force`
+- `smoke_node1_http`: `smoke_node1` (also accepts `smoke` alias)
+- `smoke_node2_http`: `smoke_node2` (also accepts `smoke` alias)
+
+The sketches still support compile-time fallback values from the shared header.
 
 Edit this file:
 
 - `firmware/http/common/network_config.h`
 
-Required values:
+Compile-time fallback values:
 
 - `THESIS_WIFI_SSID`
 - `THESIS_WIFI_PASSWORD`

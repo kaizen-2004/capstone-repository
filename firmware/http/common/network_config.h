@@ -6,7 +6,7 @@
 // Update these values whenever the deployment network changes,
 // then recompile/reflash each node firmware.
 #define THESIS_WIFI_SSID "changeme"
-#define THESIS_WIFI_PASSWORD "changeme"
-#define THESIS_BACKEND_BASE "http://172.16.131.44:8765"
+#define THESIS_WIFI_PASSWORD ""
+#define THESIS_BACKEND_BASE ""
 
 #endif
