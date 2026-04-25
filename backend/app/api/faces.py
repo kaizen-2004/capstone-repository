@@ -1,15 +1,85 @@
 from __future__ import annotations
 
 import base64
+import re
 
 import cv2
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 from ..core.auth import get_current_user
 from ..db import store
-from ..schemas.api import CaptureFaceFromNodeRequest, CaptureFaceRequest, CreateFaceRequest
+from ..schemas.api import (
+    CaptureFaceFromNodeRequest,
+    CaptureFaceRequest,
+    CreateFaceRequest,
+    EnrollCompleteRequest,
+    EnrollStartRequest,
+)
 
 router = APIRouter(tags=["faces"])
+
+ENROLL_MIN_REQUIRED_SAMPLES = 40
+ENROLL_TARGET_SAMPLES = 40
+
+
+def _resolved_image_content_type(content_type: str, filename: str) -> str:
+    resolved = str(content_type or "").strip().lower()
+    if resolved.startswith("image/"):
+        return resolved
+
+    name = str(filename or "").strip().lower()
+    if name.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if name.endswith(".png"):
+        return "image/png"
+    if name.endswith(".webp"):
+        return "image/webp"
+    if name.endswith(".bmp"):
+        return "image/bmp"
+
+    return resolved
+
+
+def _guess_image_content_type(file_bytes: bytes) -> str:
+    if file_bytes.startswith(b"\xFF\xD8\xFF"):
+        return "image/jpeg"
+    if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(file_bytes) >= 12 and file_bytes[:4] == b"RIFF" and file_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if file_bytes.startswith(b"BM"):
+        return "image/bmp"
+    return ""
+
+
+def _enroll_user_code_key(user_code: str) -> str:
+    return f"mobile_enroll_user_code:{user_code.strip().lower()}"
+
+
+def _resolve_enroll_id(enroll_id: str | None, user_code: str | None) -> str:
+    enroll_id_value = str(enroll_id or "").strip()
+    if enroll_id_value:
+        return enroll_id_value
+
+    user_code_value = str(user_code or "").strip()
+    if not user_code_value:
+        raise ValueError("enroll_id or user_code is required")
+
+    mapped = store.get_setting(_enroll_user_code_key(user_code_value))
+    if mapped:
+        return str(mapped).strip()
+    return user_code_value
+
+
+def _encode_enroll_id(face_id: int) -> str:
+    return f"enroll-face-{int(face_id)}"
+
+
+def _decode_enroll_id(enroll_id: str) -> int:
+    match = re.fullmatch(r"enroll-face-(\d+)", enroll_id.strip())
+    if not match:
+        raise ValueError("invalid enroll_id")
+    return int(match.group(1))
 
 
 def _face_to_profile(row: dict) -> dict:
@@ -20,6 +90,141 @@ def _face_to_profile(row: dict) -> dict:
         "role": "Authorized",
         "enrolled_at": str(row["created_ts"]),
         "sample_count": int(row.get("sample_count", 0)),
+    }
+
+
+@router.post("/api/enroll/start")
+def enroll_start(payload: EnrollStartRequest, request: Request) -> dict:
+    get_current_user(request)
+    name = str(payload.name or payload.full_name or payload.user_code or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    user_code = str(payload.user_code or "").strip()
+
+    face = store.get_face_by_name(name)
+    if face is None:
+        face = store.create_face(name=name, note=payload.role.strip())
+
+    enroll_id = _encode_enroll_id(int(face["id"]))
+    if user_code:
+        store.upsert_setting(_enroll_user_code_key(user_code), enroll_id)
+
+    status = request.app.state.face_service.training_status(
+        name,
+        min_required=ENROLL_MIN_REQUIRED_SAMPLES,
+        target=ENROLL_TARGET_SAMPLES,
+    )
+    return {
+        "ok": True,
+        "enroll_id": enroll_id,
+        "user_code": user_code,
+        "face_id": int(face["id"]),
+        "name": name,
+        "role": payload.role.strip() or "Authorized",
+        "capture_source": payload.capture_source.strip() or "mobile_app",
+        **status,
+    }
+
+
+@router.post("/api/enroll/upload")
+async def enroll_upload(
+    request: Request,
+    enroll_id: str = Form(""),
+    user_code: str = Form(""),
+    capture_source: str = Form("mobile_app"),
+    sample_index: str = Form(""),
+    timestamp: str = Form(""),
+    image: UploadFile = File(...),
+) -> dict:
+    get_current_user(request)
+
+    try:
+        resolved_enroll_id = _resolve_enroll_id(enroll_id, user_code)
+        face_id = _decode_enroll_id(resolved_enroll_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    face = store.get_face(face_id)
+    if face is None:
+        raise HTTPException(status_code=404, detail="enrollment profile not found")
+
+    file_bytes = await image.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="empty image payload")
+
+    content_type = _resolved_image_content_type(
+        image.content_type or "",
+        image.filename or "",
+    )
+    if not content_type.startswith("image/"):
+        guessed = _guess_image_content_type(file_bytes)
+        if not guessed.startswith("image/"):
+            raise HTTPException(status_code=400, detail="image file is required")
+        content_type = guessed
+
+    b64 = base64.b64encode(file_bytes).decode("ascii")
+    image_data_url = f"data:{content_type};base64,{b64}"
+
+    try:
+        status = request.app.state.face_service.capture_sample(
+            str(face.get("name") or ""),
+            image_data_url,
+            source=f"mobile_enroll:{capture_source.strip() or 'mobile_app'}",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "enroll_id": resolved_enroll_id,
+        "user_code": user_code.strip(),
+        "capture_source": capture_source.strip() or "mobile_app",
+        "sample_index": sample_index.strip(),
+        "timestamp": timestamp.strip(),
+        **status,
+    }
+
+
+@router.post("/api/enroll/complete")
+def enroll_complete(payload: EnrollCompleteRequest, request: Request) -> dict:
+    get_current_user(request)
+
+    try:
+        resolved_enroll_id = _resolve_enroll_id(payload.enroll_id, payload.user_code)
+        face_id = _decode_enroll_id(resolved_enroll_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    face = store.get_face(face_id)
+    if face is None:
+        raise HTTPException(status_code=404, detail="enrollment profile not found")
+
+    name = str(face.get("name") or "").strip()
+    status = request.app.state.face_service.training_status(
+        name,
+        min_required=ENROLL_MIN_REQUIRED_SAMPLES,
+        target=ENROLL_TARGET_SAMPLES,
+    )
+    if not bool(status.get("ready")):
+        raise HTTPException(
+            status_code=400,
+            detail=f"minimum samples not met; remaining={int(status.get('remaining') or 0)}",
+        )
+
+    trained = True
+    message = "enrollment completed"
+    if payload.trigger_train:
+        trained, message = request.app.state.face_service.train()
+
+    return {
+        "ok": bool(trained),
+        "enroll_id": resolved_enroll_id,
+        "user_code": str(payload.user_code or "").strip(),
+        "trained": bool(trained),
+        "message": message,
+        "profile": _face_to_profile({**face, "sample_count": int(status.get("count") or 0)}),
+        "status": status,
     }
 
 

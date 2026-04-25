@@ -59,6 +59,20 @@ class CaptureFaceFromNodeRequest(BaseModel):
     node_id: str = Field(min_length=1, max_length=64)
 
 
+class EnrollStartRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    full_name: str | None = Field(default=None, max_length=120)
+    user_code: str | None = Field(default=None, max_length=128)
+    role: str = Field(default="Authorized", max_length=64)
+    capture_source: str = Field(default="mobile_app", max_length=64)
+
+
+class EnrollCompleteRequest(BaseModel):
+    enroll_id: str | None = Field(default=None, max_length=128)
+    user_code: str | None = Field(default=None, max_length=128)
+    trigger_train: bool = True
+
+
 class CameraControlRequest(BaseModel):
     node_id: str
     command: str
@@ -86,10 +100,14 @@ class MobileDeviceUnregisterRequest(BaseModel):
 
 class MobileNotificationPreferencesRequest(BaseModel):
     push_enabled: bool | None = None
-    telegram_fallback_enabled: bool | None = None
     quiet_hours: dict[str, Any] | None = None
 
 
 class RuntimeSettingUpdateRequest(BaseModel):
     key: str = Field(min_length=1, max_length=64)
     value: str = Field(min_length=0, max_length=4096)
+
+
+class AssistantQueryRequest(BaseModel):
+    question_id: str | None = Field(default=None, max_length=64)
+    question: str | None = Field(default=None, max_length=240)

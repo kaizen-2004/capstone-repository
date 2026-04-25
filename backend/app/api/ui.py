@@ -21,6 +21,7 @@ from ..core.auth import get_current_user
 from ..core.config import Settings
 from ..db import store
 from ..schemas.api import (
+    AssistantQueryRequest,
     CameraControlRequest,
     RuntimeSettingUpdateRequest,
 )
@@ -62,6 +63,67 @@ def _safe_json(value: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _is_dashboard_noise_node(node_id: str) -> bool:
+    normalized = node_id.strip().lower()
+    if not normalized:
+        return False
+    return any(
+        normalized.startswith(prefix)
+        for prefix in store.DASHBOARD_NOISE_NODE_PREFIXES
+    )
+
+
+def _face_overlays_from_details(details: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_faces = details.get("faces")
+    candidates: list[dict[str, Any]] = []
+    if isinstance(raw_faces, list):
+        candidates.extend(item for item in raw_faces if isinstance(item, dict))
+
+    single_face = details.get("face")
+    if isinstance(single_face, dict):
+        candidates.append(single_face)
+
+    overlays: list[dict[str, Any]] = []
+    seen_boxes: set[tuple[int, int, int, int]] = set()
+    for face in candidates:
+        bbox = face.get("bbox")
+        if not (isinstance(bbox, list) and len(bbox) == 4):
+            continue
+
+        try:
+            x, y, w, h = [int(float(value)) for value in bbox]
+        except Exception:
+            continue
+        if w <= 0 or h <= 0:
+            continue
+
+        box_key = (x, y, w, h)
+        if box_key in seen_boxes:
+            continue
+        seen_boxes.add(box_key)
+
+        classification = str(face.get("classification") or "").strip().upper()
+        if not classification:
+            result = str(face.get("result") or "").strip().lower()
+            classification = "AUTHORIZED" if result == "authorized" else "NON-AUTHORIZED"
+
+        try:
+            confidence = float(face.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+
+        overlays.append(
+            {
+                "bbox": [x, y, w, h],
+                "classification": classification,
+                "confidence": round(confidence, 1),
+                "label": f"{classification} {confidence:.1f}%",
+            }
+        )
+
+    return overlays
+
+
 def _alert_to_ui(row: dict[str, Any]) -> dict[str, Any]:
     details = _safe_json(row.get("details_json"))
     snapshot_path = str(row.get("snapshot_path") or "")
@@ -91,6 +153,7 @@ def _alert_to_ui(row: dict[str, Any]) -> dict[str, Any]:
         "confidence": details.get("confidence"),
         "fusion_evidence": details.get("fusion_evidence") or [],
         "snapshot_path": snapshot_url,
+        "face_overlays": _face_overlays_from_details(details),
     }
 
 
@@ -109,6 +172,7 @@ def _event_to_ui(row: dict[str, Any]) -> dict[str, Any]:
         "acknowledged": True,
         "confidence": details.get("confidence"),
         "fusion_evidence": details.get("fusion_evidence") or [],
+        "face_overlays": _face_overlays_from_details(details),
     }
 
 
@@ -254,16 +318,6 @@ RUNTIME_SETTING_SPECS: dict[str, dict[str, Any]] = {
         "step": 1,
         "live_apply": True,
     },
-    "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS": {
-        "description": "Minimum seconds between Telegram snapshot sends per source node and alert type",
-        "group": "Notifications",
-        "value_type": "int",
-        "input_type": "number",
-        "min": 10,
-        "max": 3600,
-        "step": 1,
-        "live_apply": True,
-    },
     "mobile_remote_enabled": {
         "description": "Enable mobile remote web interface",
         "group": "Notifications",
@@ -276,36 +330,6 @@ RUNTIME_SETTING_SPECS: dict[str, dict[str, Any]] = {
         "group": "Notifications",
         "value_type": "bool",
         "input_type": "switch",
-        "live_apply": True,
-    },
-    "mobile_telegram_fallback_enabled": {
-        "description": "Allow Telegram fallback when push delivery is unavailable",
-        "group": "Notifications",
-        "value_type": "bool",
-        "input_type": "switch",
-        "live_apply": True,
-    },
-    "TELEGRAM_LINK_NOTIFICATIONS_ENABLED": {
-        "description": "Send remote access links to Telegram on startup and endpoint changes",
-        "group": "Notifications",
-        "value_type": "bool",
-        "input_type": "switch",
-        "live_apply": True,
-    },
-    "TELEGRAM_BOT_TOKEN": {
-        "description": "Telegram bot token used for notifications",
-        "group": "Secrets",
-        "value_type": "str",
-        "input_type": "secret",
-        "secret": True,
-        "live_apply": True,
-    },
-    "TELEGRAM_CHAT_ID": {
-        "description": "Telegram chat id for fallback and link delivery",
-        "group": "Secrets",
-        "value_type": "str",
-        "input_type": "secret",
-        "secret": True,
         "live_apply": True,
     },
     "WEBPUSH_VAPID_PUBLIC_KEY": {
@@ -391,20 +415,10 @@ def _runtime_default_value(key: str, settings: Settings) -> str:
         return str(settings.regular_snapshot_retention_days)
     if key == "CRITICAL_SNAPSHOT_RETENTION_DAYS":
         return str(settings.critical_snapshot_retention_days)
-    if key == "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS":
-        return str(settings.telegram_snapshot_cooldown_seconds)
     if key == "mobile_remote_enabled":
         return "false"
     if key == "mobile_push_enabled":
         return "true"
-    if key == "mobile_telegram_fallback_enabled":
-        return "true"
-    if key == "TELEGRAM_LINK_NOTIFICATIONS_ENABLED":
-        return "true" if settings.telegram_link_notifications_enabled else "false"
-    if key == "TELEGRAM_BOT_TOKEN":
-        return settings.telegram_bot_token
-    if key == "TELEGRAM_CHAT_ID":
-        return settings.telegram_chat_id
     if key == "WEBPUSH_VAPID_PUBLIC_KEY":
         return settings.webpush_vapid_public_key
     if key == "WEBPUSH_VAPID_PRIVATE_KEY":
@@ -593,6 +607,178 @@ def ui_events_live(request: Request, limit: int = 250) -> dict:
     }
 
 
+@router.get("/api/alerts")
+def api_alerts(request: Request, limit: int = 100) -> dict:
+    get_current_user(request)
+    rows = store.list_alerts(limit=max(1, min(limit, 500)))
+    return {"ok": True, "alerts": [_alert_to_ui(row) for row in rows]}
+
+
+@router.get("/api/events")
+def api_events(request: Request, limit: int = 100) -> dict:
+    get_current_user(request)
+    rows = store.list_events(limit=max(1, min(limit, 500)))
+    return {"ok": True, "events": [_event_to_ui(row) for row in rows]}
+
+
+@router.get("/api/nodes")
+def api_nodes(request: Request) -> dict:
+    payload = ui_nodes_live(request)
+    return {"ok": True, "nodes": payload.get("sensor_statuses", [])}
+
+
+@router.get("/api/sensors")
+def api_sensors(request: Request) -> dict:
+    payload = ui_nodes_live(request)
+    rows = payload.get("sensor_statuses", [])
+    sensors = [
+        row
+        for row in rows
+        if str(row.get("type") or "").strip().lower() in {"smoke", "force"}
+    ]
+    return {"ok": True, "sensors": sensors}
+
+
+@router.get("/api/status")
+def api_status(request: Request) -> dict:
+    payload = ui_nodes_live(request)
+    nodes = payload.get("sensor_statuses", [])
+    online = sum(1 for row in nodes if str(row.get("status") or "").lower() == "online")
+    offline = sum(1 for row in nodes if str(row.get("status") or "").lower() != "online")
+    return {
+        "ok": True,
+        "backend": "online",
+        "active_alerts": int(payload.get("system_health", {}).get("active_alerts", 0)),
+        "nodes_online": online,
+        "nodes_offline": offline,
+        "last_sync": str(payload.get("system_health", {}).get("last_sync") or ""),
+    }
+
+
+@router.get("/api/health")
+def api_health(request: Request) -> dict:
+    return api_status(request)
+
+
+def _resolve_assistant_question_id(question_id: str, question: str) -> str:
+    normalized_id = question_id.strip().lower()
+    if normalized_id:
+        return normalized_id
+
+    text = question.strip().lower()
+    if "status" in text:
+        return "current_system_status"
+    if "last alert" in text or "trigger" in text:
+        return "last_alert_reason"
+    if "smoke" in text and "which" in text:
+        return "which_node_detected_smoke"
+    if "offline" in text:
+        return "are_any_nodes_offline"
+    if "intrusion" in text:
+        return "recent_intrusion_events"
+    if "warning" in text:
+        return "explain_current_warning"
+    return "current_system_status"
+
+
+@router.post("/api/assistant/query")
+def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
+    get_current_user(request)
+    resolved_id = _resolve_assistant_question_id(
+        payload.question_id or "", payload.question or ""
+    )
+
+    nodes_payload = ui_nodes_live(request)
+    node_rows = list(nodes_payload.get("sensor_statuses", []))
+    active_alerts = store.list_active_alerts()
+    alerts = store.list_alerts(limit=5)
+    events = store.list_events(limit=50)
+
+    if resolved_id == "current_system_status":
+        online = sum(
+            1
+            for row in node_rows
+            if str(row.get("status") or "").strip().lower() == "online"
+        )
+        total = len(node_rows)
+        answer = (
+            f"System is online. {online} of {total} monitored nodes are online, "
+            f"with {len(active_alerts)} active alerts."
+        )
+    elif resolved_id == "last_alert_reason":
+        if alerts:
+            latest = _alert_to_ui(alerts[0])
+            answer = (
+                f"The latest alert is '{latest.get('title')}' from "
+                f"{latest.get('source_node')} at {latest.get('location')}. "
+                f"Detail: {latest.get('description') or 'No description provided.'}"
+            )
+        else:
+            answer = "No alerts have been recorded yet."
+    elif resolved_id == "which_node_detected_smoke":
+        smoke_event = next(
+            (
+                row
+                for row in events
+                if str(row.get("event_code") or "").strip().upper() == "SMOKE_HIGH"
+            ),
+            None,
+        )
+        if smoke_event is None:
+            answer = "No SMOKE_HIGH event is currently recorded in recent logs."
+        else:
+            answer = (
+                f"The latest smoke-high detection came from {smoke_event.get('source_node')} "
+                f"in {smoke_event.get('location')}."
+            )
+    elif resolved_id == "are_any_nodes_offline":
+        offline_nodes = [
+            row
+            for row in node_rows
+            if str(row.get("status") or "").strip().lower() != "online"
+        ]
+        if not offline_nodes:
+            answer = "All monitored nodes are currently online."
+        else:
+            labels = ", ".join(str(row.get("id") or "node") for row in offline_nodes)
+            answer = f"Offline nodes detected: {labels}."
+    elif resolved_id == "recent_intrusion_events":
+        intrusion_rows = [
+            row
+            for row in events
+            if str(row.get("type") or "").strip().lower() == "intruder"
+        ][:5]
+        if not intrusion_rows:
+            answer = "No recent intrusion events are recorded."
+        else:
+            first = intrusion_rows[0]
+            answer = (
+                f"Recent intrusion activity includes {len(intrusion_rows)} event(s); "
+                f"latest is {first.get('event_code')} from {first.get('source_node')}."
+            )
+    elif resolved_id == "explain_current_warning":
+        warning_alert = next(
+            (
+                row
+                for row in alerts
+                if str(row.get("severity") or "").strip().lower() in {"warning", "critical"}
+            ),
+            None,
+        )
+        if warning_alert is None:
+            answer = "There is no active warning-level alert to explain right now."
+        else:
+            latest = _alert_to_ui(warning_alert)
+            answer = (
+                f"Current warning is '{latest.get('title')}' from {latest.get('source_node')}. "
+                f"It indicates: {latest.get('description') or 'See alert details in dashboard.'}"
+            )
+    else:
+        answer = "Unsupported assistant question. Use a predefined question_id."
+
+    return {"ok": True, "question_id": resolved_id, "answer": answer}
+
+
 @router.get("/api/ui/nodes/live")
 def ui_nodes_live(request: Request) -> dict:
     get_current_user(request)
@@ -644,6 +830,8 @@ def ui_nodes_live(request: Request) -> dict:
     sensor_statuses = []
     for row in devices:
         node_id = str(row.get("node_id") or "").strip().lower()
+        if _is_dashboard_noise_node(node_id):
+            continue
         if str(row.get("device_type") or "").strip().lower() == "camera":
             continue
         sensor_statuses.append(
@@ -890,6 +1078,11 @@ def ack_json(alert_id: int, request: Request) -> dict:
             status_code=404, detail="alert not found or already acknowledged"
         )
     return {"ok": True}
+
+
+@router.post("/api/alerts/{alert_id}/acknowledge")
+def ack_json_alias(alert_id: int, request: Request) -> dict:
+    return ack_json(alert_id, request)
 
 
 @router.get("/snapshots/{snapshot_rel_path:path}")

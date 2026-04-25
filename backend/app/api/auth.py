@@ -11,23 +11,29 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 @router.post("/login")
-def login(payload: LoginRequest, response: Response) -> dict:
+def login(payload: LoginRequest, request: Request, response: Response) -> dict:
     user = store.authenticate_user(payload.username.strip(), payload.password)
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     token = random_token()
     store.create_session(user_id=int(user["id"]), token=token)
+    settings = request.app.state.settings
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
         httponly=True,
         secure=False,
         samesite="lax",
-        max_age=60 * 60 * 12,
+        max_age=int(settings.session_ttl_seconds),
         path="/",
     )
-    return {"ok": True, "user": {"username": user["username"]}}
+    return {
+        "ok": True,
+        "token": token,
+        "expires_in_seconds": int(settings.session_ttl_seconds),
+        "user": {"username": user["username"]},
+    }
 
 
 @router.post("/logout")

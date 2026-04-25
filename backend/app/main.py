@@ -32,7 +32,6 @@ def _seed_default_settings(settings) -> None:
     _seed_once("deployment_host", "windows_pc")
     _seed_once("camera_processing_strategy", "event_triggered")
     _seed_once("mobile_push_enabled", "true")
-    _seed_once("mobile_telegram_fallback_enabled", "true")
     _seed_once(
         "AUTHORIZED_PRESENCE_LOGGING_ENABLED",
         "true" if settings.authorized_presence_logging_enabled else "false",
@@ -63,6 +62,15 @@ async def lifespan(app: FastAPI):
     store.init_db()
     store.ensure_admin_user(settings.admin_username, settings.admin_password)
     _seed_default_settings(settings)
+    cleanup_counts = store.purge_dashboard_noise_data()
+    if any(cleanup_counts.values()):
+        store.log(
+            "INFO",
+            "startup noise cleanup "
+            f"devices={cleanup_counts['devices']} "
+            f"events={cleanup_counts['events']} "
+            f"alerts={cleanup_counts['alerts']}",
+        )
 
     def _setting_raw(key: str) -> str | None:
         value = store.get_setting(key)
@@ -381,8 +389,6 @@ async def lifespan(app: FastAPI):
     )
 
     for secret_key in (
-        "TELEGRAM_BOT_TOKEN",
-        "TELEGRAM_CHAT_ID",
         "WEBPUSH_VAPID_PUBLIC_KEY",
         "WEBPUSH_VAPID_PRIVATE_KEY",
         "WEBPUSH_VAPID_SUBJECT",
@@ -404,11 +410,6 @@ async def lifespan(app: FastAPI):
     mdns_publisher.start()
     camera_manager.start()
     supervisor.start()
-    startup_links_result = notification_dispatcher.send_startup_access_links()
-    store.log(
-        "INFO",
-        f"startup access links dispatch status={startup_links_result.get('status')}",
-    )
     store.log("INFO", "Backend startup complete")
 
     try:
@@ -421,7 +422,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Condo Monitoring Backend",
+    title="IntruFlare Backend",
     version="2.0.0",
     description="Windows local-first event-driven intruder and fire monitoring backend",
     lifespan=lifespan,
@@ -458,7 +459,7 @@ def root() -> JSONResponse:
     return JSONResponse(
         {
             "ok": True,
-            "service": "Condo Monitoring Backend",
+            "service": "IntruFlare Backend",
             "dashboard": "/dashboard",
             "health": "/health",
         }

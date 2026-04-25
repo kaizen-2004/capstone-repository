@@ -17,7 +17,6 @@ router = APIRouter(tags=["integrations"])
 
 MOBILE_REMOTE_SETTING_KEY = "mobile_remote_enabled"
 MOBILE_PUSH_SETTING_KEY = "mobile_push_enabled"
-TELEGRAM_FALLBACK_SETTING_KEY = "mobile_telegram_fallback_enabled"
 MOBILE_REMOTE_ROUTE = "/dashboard/remote/mobile"
 
 
@@ -39,13 +38,6 @@ def _mobile_push_enabled() -> bool:
     if stored_value is not None:
         return _parse_bool(stored_value, default=True)
     return _parse_bool(os.environ.get("ENABLE_MOBILE_PUSH"), default=True)
-
-
-def _telegram_fallback_enabled() -> bool:
-    stored_value = store.get_setting(TELEGRAM_FALLBACK_SETTING_KEY)
-    if stored_value is not None:
-        return _parse_bool(stored_value, default=True)
-    return True
 
 
 def _resolve_lan_base_url(request: Request) -> str:
@@ -81,67 +73,6 @@ def _extract_base_url(url: str, route: str = MOBILE_REMOTE_ROUTE) -> str:
     if text.endswith(route):
         return text[: -len(route)] or ""
     return text
-
-
-@router.get("/api/integrations/telegram/status")
-def telegram_status(request: Request) -> dict:
-    get_current_user(request)
-    dispatcher = getattr(request.app.state, "notification_dispatcher", None)
-    notifier = getattr(dispatcher, "telegram_notifier", None)
-    enabled = _telegram_fallback_enabled()
-    configured = bool(notifier and notifier.enabled)
-    return {
-        "ok": True,
-        "enabled": enabled,
-        "configured": configured,
-        "link_notifications_enabled": bool(request.app.state.settings.telegram_link_notifications_enabled),
-        "phase": "phase_3",
-        "detail": (
-            "Telegram fallback and link notifications are active."
-            if (enabled and configured)
-            else "Telegram fallback is enabled but bot token/chat id is not configured."
-            if enabled
-            else "Telegram fallback is disabled."
-        ),
-    }
-
-
-@router.post("/api/integrations/telegram/test")
-def telegram_test(request: Request) -> dict:
-    get_current_user(request)
-    dispatcher = getattr(request.app.state, "notification_dispatcher", None)
-    if dispatcher:
-        result = dispatcher.send_access_links(reason="manual_test", force=True)
-        return {
-            "ok": True,
-            "enabled": _telegram_fallback_enabled(),
-            **result,
-        }
-    return {
-        "ok": True,
-        "enabled": _telegram_fallback_enabled(),
-        "sent": False,
-        "status": "unavailable",
-        "detail": "Notification dispatcher is unavailable in app state.",
-    }
-
-
-@router.post("/api/integrations/telegram/send-access-link")
-def telegram_send_access_link(request: Request) -> dict:
-    get_current_user(request)
-    dispatcher = getattr(request.app.state, "notification_dispatcher", None)
-    if not dispatcher:
-        return {
-            "ok": False,
-            "sent": False,
-            "status": "unavailable",
-            "detail": "Notification dispatcher is unavailable in app state.",
-        }
-    result = dispatcher.send_access_links(reason="manual", force=True)
-    return {
-        "ok": True,
-        **result,
-    }
 
 
 @router.get("/api/remote/tailscale/status")
@@ -204,7 +135,6 @@ def mobile_remote_status(request: Request) -> dict:
         "local_only": True,
         "push_available": bool(dispatcher and dispatcher.push_available),
         "push_enabled": _mobile_push_enabled(),
-        "telegram_fallback_enabled": _telegram_fallback_enabled(),
         "detail": (
             "Mobile remote interface is enabled for local network session access."
             if enabled
@@ -243,7 +173,6 @@ def mobile_bootstrap(request: Request) -> dict:
         "network_modes": ["auto", "lan", "tailscale"],
         "push_available": bool(dispatcher and dispatcher.push_available),
         "push_enabled": _mobile_push_enabled(),
-        "telegram_fallback_enabled": _telegram_fallback_enabled(),
         "vapid_public_key": settings.webpush_vapid_public_key,
     }
 
@@ -291,7 +220,6 @@ def mobile_notification_preferences(request: Request) -> dict:
     return {
         "ok": True,
         "push_enabled": prefs["push_enabled"],
-        "telegram_fallback_enabled": prefs["telegram_fallback_enabled"],
         "quiet_hours": prefs["quiet_hours"],
         "updated_ts": prefs["updated_ts"],
     }
@@ -303,18 +231,11 @@ def update_mobile_notification_preferences(payload: MobileNotificationPreference
     prefs = store.upsert_notification_prefs(
         int(user["id"]),
         push_enabled=payload.push_enabled,
-        telegram_fallback_enabled=payload.telegram_fallback_enabled,
         quiet_hours=payload.quiet_hours,
     )
-    if payload.telegram_fallback_enabled is not None:
-        store.upsert_setting(
-            TELEGRAM_FALLBACK_SETTING_KEY,
-            "true" if payload.telegram_fallback_enabled else "false",
-        )
     return {
         "ok": True,
         "push_enabled": prefs["push_enabled"],
-        "telegram_fallback_enabled": prefs["telegram_fallback_enabled"],
         "quiet_hours": prefs["quiet_hours"],
         "updated_ts": prefs["updated_ts"],
     }

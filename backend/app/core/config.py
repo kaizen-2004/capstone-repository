@@ -170,7 +170,7 @@ def load_settings() -> Settings:
         admin_password=os.environ.get("ADMIN_PASSWORD", "admin123").strip()
         or "admin123",
         session_ttl_seconds=_env_int(
-            "SESSION_TTL_SECONDS", 12 * 60 * 60, 900, 7 * 24 * 60 * 60
+            "SESSION_TTL_SECONDS", 24 * 60 * 60, 900, 7 * 24 * 60 * 60
         ),
         node_offline_seconds=_env_int("NODE_OFFLINE_SECONDS", 120, 20, 3600),
         camera_offline_seconds=_env_int("CAMERA_OFFLINE_SECONDS", 45, 10, 600),

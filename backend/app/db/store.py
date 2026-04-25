@@ -21,6 +21,11 @@ class DbConfig:
 
 _DB_CONFIG: DbConfig | None = None
 
+DASHBOARD_NOISE_NODE_PREFIXES: tuple[str, ...] = (
+    "door_force_cooldown_",
+    "door_force_contract_",
+)
+
 
 def configure(path: Path, session_ttl_seconds: int) -> None:
     global _DB_PATH, _DB_CONFIG
@@ -403,6 +408,67 @@ def list_devices() -> list[dict[str, Any]]:
         rows = [dict(row) for row in cur.fetchall()]
         conn.close()
     return rows
+
+
+def purge_dashboard_noise_data(
+    prefixes: tuple[str, ...] | None = None,
+) -> dict[str, int]:
+    selected_prefixes = tuple(
+        prefix.strip().lower()
+        for prefix in (prefixes or DASHBOARD_NOISE_NODE_PREFIXES)
+        if prefix and prefix.strip()
+    )
+    if not selected_prefixes:
+        return {"devices": 0, "events": 0, "alerts": 0}
+
+    deleted_devices = 0
+    deleted_events = 0
+    deleted_alerts = 0
+
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+
+        for prefix in selected_prefixes:
+            like_pattern = f"{prefix}%"
+
+            cur.execute(
+                """
+                DELETE FROM alerts
+                WHERE event_id IN (
+                    SELECT id FROM events WHERE source_node LIKE ?
+                )
+                """,
+                (like_pattern,),
+            )
+            deleted_alerts += max(0, int(cur.rowcount))
+
+            cur.execute(
+                "DELETE FROM alerts WHERE details_json LIKE ?",
+                (f"%{prefix}%",),
+            )
+            deleted_alerts += max(0, int(cur.rowcount))
+
+            cur.execute(
+                "DELETE FROM events WHERE source_node LIKE ?",
+                (like_pattern,),
+            )
+            deleted_events += max(0, int(cur.rowcount))
+
+            cur.execute(
+                "DELETE FROM devices WHERE node_id LIKE ?",
+                (like_pattern,),
+            )
+            deleted_devices += max(0, int(cur.rowcount))
+
+        conn.commit()
+        conn.close()
+
+    return {
+        "devices": deleted_devices,
+        "events": deleted_events,
+        "alerts": deleted_alerts,
+    }
 
 
 def list_offline_devices(node_offline_seconds: int) -> list[dict[str, Any]]:

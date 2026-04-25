@@ -57,7 +57,7 @@ class TelegramNotifier:
         host_label = _safe_text(links.get("host_label"), "Windows host")
 
         lines = [
-            "<b>Condo Monitoring Remote Access</b>",
+            "<b>IntruFlare Remote Access</b>",
             f"Reason: {html.escape(reason_label)}",
             f"Host: {html.escape(host_label)}",
             "",
