@@ -105,12 +105,14 @@ jobs:
           if ($LASTEXITCODE -gt 7) {
             throw "robocopy backend failed with code $LASTEXITCODE"
           }
+          $global:LASTEXITCODE = 0
 
           if (Test-Path -Path .\backend\storage\models -PathType Container) {
             robocopy .\backend\storage\models "$resourcesRoot\models" /E
             if ($LASTEXITCODE -gt 7) {
               throw "robocopy models failed with code $LASTEXITCODE"
             }
+            $global:LASTEXITCODE = 0
           } else {
             New-Item -ItemType Directory "$resourcesRoot\models" -Force | Out-Null
             Set-Content -Path "$resourcesRoot\models\placeholder.txt" -Value "placeholder" -Encoding ascii
@@ -121,8 +123,10 @@ jobs:
           if ($LASTEXITCODE -gt 7) {
             throw "robocopy web_dist failed with code $LASTEXITCODE"
           }
+          $global:LASTEXITCODE = 0
 
           Copy-Item .\.env.example "$resourcesRoot\.env.example" -Force
+          $global:LASTEXITCODE = 0
 
       - name: Build desktop MSI
         working-directory: desktop
