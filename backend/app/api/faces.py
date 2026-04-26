@@ -264,11 +264,6 @@ def delete_face(face_id: int, request: Request) -> dict:
 
     face_service = request.app.state.face_service
     face_service.remove_identity(str(face.get("name") or ""))
-    # Best effort rebuild so in-memory templates stay aligned with DB state.
-    try:
-        face_service.train()
-    except Exception:
-        pass
 
     return {"ok": True}
 

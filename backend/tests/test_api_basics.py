@@ -510,6 +510,31 @@ def test_face_profile_update_contract() -> None:
         assert payload["face"]["role"] == "Family"
 
 
+def test_face_profile_delete_contract() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        seed_name = f"Face Delete {uuid.uuid4().hex[:6]}"
+        create = client.post(
+            "/api/faces",
+            json={"name": seed_name, "note": "Owner"},
+        )
+        assert create.status_code == 200
+        db_id = int(create.json()["face"]["db_id"])
+
+        delete = client.delete(f"/api/faces/{db_id}")
+        assert delete.status_code == 200
+        assert delete.json()["ok"] is True
+
+        faces = client.get("/api/faces")
+        assert faces.status_code == 200
+        rows = faces.json().get("faces", [])
+        assert all(int(row.get("db_id") or 0) != db_id for row in rows)
+
+
 def test_alert_snapshot_delete_clears_file_and_path() -> None:
     with TestClient(app) as client:
         login = client.post(

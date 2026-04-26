@@ -133,6 +133,19 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
         _existingProfiles = profiles;
         _loadingProfiles = false;
       });
+    } on ApiException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      final message = error.statusCode == 401
+          ? 'Session expired. Refresh your token in Settings then try again.'
+          : (error.message.trim().isNotEmpty
+              ? error.message.trim()
+              : 'Unable to load existing profiles.');
+      setState(() {
+        _loadingProfiles = false;
+        _profilesError = message;
+      });
     } catch (_) {
       if (!mounted) {
         return;
@@ -332,9 +345,24 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
         ),
         if (_profilesError != null) ...[
           const SizedBox(height: 8),
-          Text(
-            _profilesError!,
-            style: tt.bodySmall?.copyWith(color: cs.error),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  _profilesError!,
+                  style: tt.bodySmall?.copyWith(color: cs.error),
+                ),
+              ),
+              const SizedBox(width: 8),
+              TextButton.icon(
+                onPressed: captureBusy || _loadingProfiles
+                    ? null
+                    : _loadExistingProfiles,
+                icon: const Icon(Icons.refresh_rounded, size: 16),
+                label: const Text('Retry'),
+              ),
+            ],
           ),
         ],
         const SizedBox(height: 20),

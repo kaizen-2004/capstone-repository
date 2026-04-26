@@ -696,7 +696,7 @@ export function Settings() {
     setProfilesMessage('');
     try {
       await deleteFaceProfile(dbId);
-      await loadSettings();
+      setAuthorizedProfiles((previous) => previous.filter((item) => resolveProfileDbId(item) !== dbId));
       setProfilesMessage('Authorized profile removed.');
       window.setTimeout(() => setProfilesMessage(''), 3000);
     } catch (error) {

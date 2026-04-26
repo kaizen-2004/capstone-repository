@@ -17,10 +17,14 @@ class FaceProfile {
   String get displayLabel => '$profileId - $name ($sampleCount samples)';
 
   factory FaceProfile.fromJson(Map<String, dynamic> json) {
+    final idValue = (json['id']?.toString() ?? json['user_code']?.toString() ?? '').trim();
+    final nameValue = (json['label']?.toString() ?? json['name']?.toString() ?? '').trim();
+    final sampleRaw =
+        json['sample_count']?.toString() ?? json['count']?.toString() ?? '';
     return FaceProfile(
-      profileId: json['id']?.toString() ?? '',
-      name: json['label']?.toString() ?? '',
-      sampleCount: int.tryParse(json['sample_count']?.toString() ?? '') ?? 0,
+      profileId: idValue,
+      name: nameValue,
+      sampleCount: int.tryParse(sampleRaw) ?? 0,
     );
   }
 }
@@ -155,12 +159,30 @@ class BackendService {
   }
 
   Future<List<FaceProfile>> fetchFaceProfiles() async {
-    final json = await apiClient.getJson('api/faces');
-    final items = (json['faces'] as List<dynamic>? ?? <dynamic>[])
-        .whereType<Map<String, dynamic>>()
-        .map(FaceProfile.fromJson)
-        .where((item) => item.profileId.isNotEmpty && item.name.isNotEmpty)
-        .toList();
+    List<FaceProfile> parseProfiles(dynamic source) {
+      if (source is! List) {
+        return <FaceProfile>[];
+      }
+      return source
+          .whereType<Map>()
+          .map((item) => FaceProfile.fromJson(Map<String, dynamic>.from(item)))
+          .where((item) => item.profileId.isNotEmpty && item.name.isNotEmpty)
+          .toList();
+    }
+
+    try {
+      final json = await apiClient.getJson('api/faces');
+      final items = parseProfiles(json['faces']);
+      items.sort((a, b) => a.profileId.compareTo(b.profileId));
+      return items;
+    } on ApiException catch (error) {
+      if (error.statusCode != 404) {
+        rethrow;
+      }
+    }
+
+    final fallback = await apiClient.getJson('api/ui/settings/live');
+    final items = parseProfiles(fallback['authorized_profiles']);
     items.sort((a, b) => a.profileId.compareTo(b.profileId));
     return items;
   }

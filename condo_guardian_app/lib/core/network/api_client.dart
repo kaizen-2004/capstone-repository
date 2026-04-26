@@ -19,6 +19,14 @@ class ApiClient {
   final String baseUrl;
   final String token;
 
+  String get _normalizedToken {
+    final trimmed = token.trim();
+    if (trimmed.toLowerCase().startsWith('bearer ')) {
+      return trimmed.substring(7).trim();
+    }
+    return trimmed;
+  }
+
   Uri _uri(String path, [Map<String, dynamic>? query]) {
     final normalizedBase = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
     return Uri.parse(normalizedBase).resolve(path).replace(
@@ -28,7 +36,7 @@ class ApiClient {
 
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
-        if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+        if (_normalizedToken.isNotEmpty) 'Authorization': 'Bearer $_normalizedToken',
       };
 
   Future<Map<String, dynamic>> getJson(String path,
@@ -56,8 +64,11 @@ class ApiClient {
   }) async {
     final request = http.MultipartRequest('POST', _uri(path));
     request.fields.addAll(fields);
-    request.headers
-        .addAll(token.isNotEmpty ? {'Authorization': 'Bearer $token'} : {});
+    request.headers.addAll(
+      _normalizedToken.isNotEmpty
+          ? {'Authorization': 'Bearer $_normalizedToken'}
+          : {},
+    );
     request.files.add(
       await http.MultipartFile.fromPath(
         fileField,
