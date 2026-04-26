@@ -1,0 +1,121 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - perf/**
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            web_dashboard_ui/package-lock.json
+            desktop/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install WiX Toolset
+        run: |
+          choco install wixtoolset --yes --no-progress
+          $wixBin = "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+          if (!(Test-Path $wixBin)) {
+            throw "WiX Toolset bin path not found: $wixBin"
+          }
+          $wixBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build dashboard assets
+        working-directory: web_dashboard_ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install backend packaging dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install pyinstaller
+          python -m pip install fastapi "uvicorn[standard]" pydantic numpy opencv-python httpx pywebpush zeroconf python-multipart
+
+      - name: Build backend executable with PyInstaller
+        run: |
+          python -m PyInstaller `
+            backend\run_backend.py `
+            --name backend `
+            --onedir `
+            --clean `
+            --noconfirm `
+            --distpath backend\dist `
+            --workpath backend\build `
+            --specpath backend `
+            --paths . `
+            --hidden-import uvicorn.loops.auto `
+            --hidden-import uvicorn.protocols.http.auto `
+            --hidden-import uvicorn.protocols.websockets.auto `
+            --hidden-import uvicorn.lifespan.on
+
+          if (!(Test-Path .\backend\dist\backend\backend.exe)) {
+            throw "backend.exe was not created."
+          }
+
+      - name: Stage Tauri resources
+        run: |
+          Remove-Item -Recurse -Force .\desktop\src-tauri\resources -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory .\desktop\src-tauri\resources | Out-Null
+
+          robocopy .\backend\dist\backend .\desktop\src-tauri\resources\backend /E
+          if ($LASTEXITCODE -gt 7) {
+            throw "robocopy backend failed with code $LASTEXITCODE"
+          }
+
+          robocopy .\backend\storage\models .\desktop\src-tauri\resources\models /E
+          if ($LASTEXITCODE -gt 7) {
+            throw "robocopy models failed with code $LASTEXITCODE"
+          }
+
+          robocopy .\web_dashboard_ui\dist .\desktop\src-tauri\resources\web_dist /E
+          if ($LASTEXITCODE -gt 7) {
+            throw "robocopy web_dist failed with code $LASTEXITCODE"
+          }
+
+          Copy-Item .\.env.example .\desktop\src-tauri\resources\.env.example -Force
+
+      - name: Build desktop MSI
+        working-directory: desktop
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi-installer
+          path: desktop/src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+
+      - name: Upload desktop EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-desktop-exe
+          path: desktop/src-tauri/target/release/*.exe
+          if-no-files-found: warn
