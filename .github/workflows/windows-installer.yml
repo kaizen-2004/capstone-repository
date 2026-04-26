@@ -96,25 +96,33 @@ jobs:
 
       - name: Stage Tauri resources
         run: |
-          Remove-Item -Recurse -Force .\desktop\src-tauri\resources -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory .\desktop\src-tauri\resources | Out-Null
+          $resourcesRoot = ".\desktop\src-tauri\resources"
 
-          robocopy .\backend\dist\backend .\desktop\src-tauri\resources\backend /E
+          Remove-Item -Recurse -Force .\desktop\src-tauri\resources -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory $resourcesRoot | Out-Null
+
+          robocopy .\backend\dist\backend "$resourcesRoot\backend" /E
           if ($LASTEXITCODE -gt 7) {
             throw "robocopy backend failed with code $LASTEXITCODE"
           }
 
-          robocopy .\backend\storage\models .\desktop\src-tauri\resources\models /E
-          if ($LASTEXITCODE -gt 7) {
-            throw "robocopy models failed with code $LASTEXITCODE"
+          if (Test-Path -Path .\backend\storage\models -PathType Container) {
+            robocopy .\backend\storage\models "$resourcesRoot\models" /E
+            if ($LASTEXITCODE -gt 7) {
+              throw "robocopy models failed with code $LASTEXITCODE"
+            }
+          } else {
+            New-Item -ItemType Directory "$resourcesRoot\models" -Force | Out-Null
+            Set-Content -Path "$resourcesRoot\models\placeholder.txt" -Value "placeholder" -Encoding ascii
+            Write-Warning "backend/storage/models not found; packaged installer will not include face/fire model files."
           }
 
-          robocopy .\web_dashboard_ui\dist .\desktop\src-tauri\resources\web_dist /E
+          robocopy .\web_dashboard_ui\dist "$resourcesRoot\web_dist" /E
           if ($LASTEXITCODE -gt 7) {
             throw "robocopy web_dist failed with code $LASTEXITCODE"
           }
 
-          Copy-Item .\.env.example .\desktop\src-tauri\resources\.env.example -Force
+          Copy-Item .\.env.example "$resourcesRoot\.env.example" -Force
 
       - name: Build desktop MSI
         working-directory: desktop
