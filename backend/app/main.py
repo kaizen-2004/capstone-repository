@@ -466,8 +466,15 @@ def root() -> JSONResponse:
     )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-WEB_DIST = PROJECT_ROOT / "web_dashboard_ui" / "dist"
+def _resolve_dashboard_dist_dir() -> Path:
+    override = os.environ.get("DASHBOARD_DIST_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / "web_dashboard_ui" / "dist"
+
+
+WEB_DIST = _resolve_dashboard_dist_dir()
 WEB_ASSETS = WEB_DIST / "assets"
 
 if WEB_ASSETS.exists():

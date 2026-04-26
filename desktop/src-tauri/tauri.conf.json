@@ -22,9 +22,25 @@
     ],
     "bundle": {
       "active": true,
-      "targets": "msi",
+      "targets": [
+        "msi"
+      ],
       "identifier": "com.cpepractice.condomonitoring",
-      "icon": []
+      "icon": [],
+      "resources": [
+        "resources/backend",
+        "resources/models",
+        "resources/web_dist",
+        "resources/.env.example"
+      ],
+      "windows": {
+        "webviewInstallMode": {
+          "type": "embedBootstrapper"
+        },
+        "wix": {
+          "language": "en-US"
+        }
+      }
     },
     "security": {
       "csp": null
