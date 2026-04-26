@@ -49,6 +49,11 @@ class CreateFaceRequest(BaseModel):
     note: str = ""
 
 
+class UpdateFaceRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    note: str | None = Field(default=None, max_length=240)
+
+
 class CaptureFaceRequest(BaseModel):
     name: str
     image: str

@@ -917,6 +917,20 @@ def get_alert(alert_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def clear_alert_snapshot_path(alert_id: int) -> bool:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE alerts SET snapshot_path = '' WHERE id = ?",
+            (int(alert_id),),
+        )
+        conn.commit()
+        updated = cur.rowcount > 0
+        conn.close()
+    return updated
+
+
 def create_face(name: str, note: str = "") -> dict[str, Any]:
     with _LOCK:
         conn = _conn()
@@ -930,6 +944,40 @@ def create_face(name: str, note: str = "") -> dict[str, Any]:
         conn.commit()
         conn.close()
     return {"id": face_id, "name": name, "note": note, "created_ts": ts}
+
+
+def update_face(face_id: int, *, name: str | None = None, note: str | None = None) -> dict[str, Any] | None:
+    updates: list[str] = []
+    args: list[Any] = []
+
+    if name is not None:
+        updates.append("name = ?")
+        args.append(name)
+    if note is not None:
+        updates.append("note = ?")
+        args.append(note)
+    if not updates:
+        return get_face(face_id)
+
+    updates.append("updated_ts = ?")
+    args.append(now_iso())
+    args.append(int(face_id))
+
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE authorized_faces SET {', '.join(updates)} WHERE id = ?",
+            tuple(args),
+        )
+        conn.commit()
+        if cur.rowcount <= 0:
+            conn.close()
+            return None
+        cur.execute("SELECT * FROM authorized_faces WHERE id = ? LIMIT 1", (int(face_id),))
+        row = cur.fetchone()
+        conn.close()
+    return dict(row) if row else None
 
 
 def delete_face(face_id: int) -> bool:

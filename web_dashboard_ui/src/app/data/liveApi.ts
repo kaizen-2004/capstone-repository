@@ -5,6 +5,7 @@ import type {
   DailyStats,
   DetectionPipeline,
   EventType,
+  FaceOverlay,
   RuntimeSetting,
   SensorStatus,
   ServiceStatus,
@@ -71,7 +72,6 @@ export interface MobileRemoteStatus {
   localOnly: boolean;
   pushAvailable: boolean;
   pushEnabled: boolean;
-  telegramFallbackEnabled: boolean;
   detail: string;
 }
 
@@ -88,7 +88,6 @@ export interface MobileBootstrapPayload {
   networkModes: MobileNetworkMode[];
   pushAvailable: boolean;
   pushEnabled: boolean;
-  telegramFallbackEnabled: boolean;
   vapidPublicKey: string;
 }
 
@@ -117,13 +116,6 @@ export interface MdnsStatusPayload {
   detail: string;
 }
 
-export interface TelegramAccessLinkSendPayload {
-  ok: boolean;
-  sent: boolean;
-  status: string;
-  detail: string;
-}
-
 export interface MobileDeviceRegistrationPayload {
   deviceId: string;
   platform?: string;
@@ -135,7 +127,6 @@ export interface MobileDeviceRegistrationPayload {
 export interface MobileNotificationPreferences {
   ok: boolean;
   pushEnabled: boolean;
-  telegramFallbackEnabled: boolean;
   quietHours: Record<string, unknown>;
   updatedTs: string;
 }
@@ -210,6 +201,25 @@ function normalizeSensorType(value: unknown): SensorStatus['type'] {
   return 'smoke';
 }
 
+function mapFaceOverlay(raw: Json): FaceOverlay | null {
+  const bboxRaw = raw.bbox;
+  if (!Array.isArray(bboxRaw) || bboxRaw.length !== 4) {
+    return null;
+  }
+
+  const bboxNumbers = bboxRaw.map((value) => toInt(value, 0));
+  if (bboxNumbers.some((value) => !Number.isFinite(value))) {
+    return null;
+  }
+
+  return {
+    bbox: [bboxNumbers[0], bboxNumbers[1], bboxNumbers[2], bboxNumbers[3]],
+    classification: String(raw.classification ?? ''),
+    confidence: raw.confidence == null ? undefined : toFloat(raw.confidence),
+    label: String(raw.label ?? ''),
+  };
+}
+
 function mapAlert(raw: Json): Alert {
   const sourceNode = String(raw.source_node ?? raw.sourceNode ?? 'unknown');
   const location = String(raw.location ?? 'Door Entrance Area');
@@ -222,6 +232,10 @@ function mapAlert(raw: Json): Alert {
   const snapshotPath = snapshotPathRaw
     ? (snapshotPathRaw.startsWith('/') ? snapshotPathRaw : `/${snapshotPathRaw}`)
     : undefined;
+  const faceOverlaysRaw = Array.isArray(raw.face_overlays) ? raw.face_overlays : [];
+  const faceOverlays = faceOverlaysRaw
+    .map((item) => mapFaceOverlay((item as Json) || {}))
+    .filter((item): item is FaceOverlay => item !== null);
 
   return {
     id: String(raw.id ?? ''),
@@ -238,6 +252,7 @@ function mapAlert(raw: Json): Alert {
     confidence,
     fusionEvidence,
     snapshotPath,
+    faceOverlays: faceOverlays.length > 0 ? faceOverlays : undefined,
   };
 }
 
@@ -466,6 +481,22 @@ export async function deleteFaceProfile(dbId: number): Promise<void> {
   await fetchJson<Json>(`/api/faces/${dbId}`, { method: 'DELETE' });
 }
 
+export async function updateFaceProfile(
+  dbId: number,
+  input: { name?: string; note?: string },
+): Promise<AuthorizedProfile> {
+  const payload = await fetchJson<Json>(`/api/faces/${dbId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: input.name,
+      note: input.note,
+    }),
+  });
+  const faceRaw = (payload.face as Json) || {};
+  return mapProfile(faceRaw);
+}
+
 function mapTrainingStatus(raw: Json): FaceTrainingStatus {
   return {
     ok: Boolean(raw.ok),
@@ -553,7 +584,6 @@ export async function fetchMobileRemoteStatus(): Promise<MobileRemoteStatus> {
     localOnly: Boolean(payload.local_only ?? payload.localOnly),
     pushAvailable: Boolean(payload.push_available ?? payload.pushAvailable),
     pushEnabled: Boolean(payload.push_enabled ?? payload.pushEnabled),
-    telegramFallbackEnabled: Boolean(payload.telegram_fallback_enabled ?? payload.telegramFallbackEnabled),
     detail: String(payload.detail ?? ''),
   };
 }
@@ -584,7 +614,6 @@ export async function fetchMobileBootstrap(): Promise<MobileBootstrapPayload> {
     networkModes: modes.length > 0 ? modes : ['auto', 'lan', 'tailscale'],
     pushAvailable: Boolean(payload.push_available ?? payload.pushAvailable),
     pushEnabled: Boolean(payload.push_enabled ?? payload.pushEnabled),
-    telegramFallbackEnabled: Boolean(payload.telegram_fallback_enabled ?? payload.telegramFallbackEnabled),
     vapidPublicKey: String(payload.vapid_public_key ?? payload.vapidPublicKey ?? ''),
   };
 }
@@ -616,7 +645,6 @@ export async function fetchMobileNotificationPreferences(): Promise<MobileNotifi
   return {
     ok: Boolean(payload.ok),
     pushEnabled: Boolean(payload.push_enabled ?? payload.pushEnabled),
-    telegramFallbackEnabled: Boolean(payload.telegram_fallback_enabled ?? payload.telegramFallbackEnabled),
     quietHours:
       payload.quiet_hours && typeof payload.quiet_hours === 'object'
         ? (payload.quiet_hours as Record<string, unknown>)
@@ -626,21 +654,19 @@ export async function fetchMobileNotificationPreferences(): Promise<MobileNotifi
 }
 
 export async function saveMobileNotificationPreferences(
-  input: Partial<Pick<MobileNotificationPreferences, 'pushEnabled' | 'telegramFallbackEnabled' | 'quietHours'>>,
+  input: Partial<Pick<MobileNotificationPreferences, 'pushEnabled' | 'quietHours'>>,
 ): Promise<MobileNotificationPreferences> {
   const payload = await fetchJson<Json>('/api/mobile/notifications/preferences', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       push_enabled: input.pushEnabled,
-      telegram_fallback_enabled: input.telegramFallbackEnabled,
       quiet_hours: input.quietHours,
     }),
   });
   return {
     ok: Boolean(payload.ok),
     pushEnabled: Boolean(payload.push_enabled ?? payload.pushEnabled),
-    telegramFallbackEnabled: Boolean(payload.telegram_fallback_enabled ?? payload.telegramFallbackEnabled),
     quietHours:
       payload.quiet_hours && typeof payload.quiet_hours === 'object'
         ? (payload.quiet_hours as Record<string, unknown>)
@@ -676,18 +702,6 @@ export async function fetchMdnsStatus(): Promise<MdnsStatusPayload> {
     port: toInt(payload.port, 0),
     boundIp: String(payload.bound_ip ?? payload.boundIp ?? ''),
     mdnsBaseUrl: String(payload.mdns_base_url ?? payload.mdnsBaseUrl ?? ''),
-    detail: String(payload.detail ?? ''),
-  };
-}
-
-export async function sendTelegramAccessLink(): Promise<TelegramAccessLinkSendPayload> {
-  const payload = await fetchJson<Json>('/api/integrations/telegram/send-access-link', {
-    method: 'POST',
-  });
-  return {
-    ok: Boolean(payload.ok),
-    sent: Boolean(payload.sent),
-    status: String(payload.status ?? ''),
     detail: String(payload.detail ?? ''),
   };
 }

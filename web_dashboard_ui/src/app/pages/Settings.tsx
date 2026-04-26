@@ -4,8 +4,8 @@ import {
   Camera,
   Database,
   Link2,
+  Pencil,
   Save,
-  Send,
   Shield,
   User,
   UserPlus,
@@ -22,9 +22,9 @@ import {
   fetchMobileRemoteStatus,
   fetchRemoteAccessLinks,
   fetchSettingsLive,
-  sendTelegramAccessLink,
   setMobileRemoteEnabled,
   trainFaceModel,
+  updateFaceProfile,
   updateRuntimeSetting,
   type FaceTrainingStatus,
   type MdnsStatusPayload,
@@ -32,7 +32,6 @@ import {
   type RemoteAccessLinksPayload,
 } from '../data/liveApi';
 import {
-  authorizedProfiles as fallbackAuthorizedProfiles,
   runtimeSettings as fallbackRuntimeSettings,
   systemProfile,
   type AuthorizedProfile,
@@ -117,7 +116,7 @@ function distributeGuidedPoseCounts(totalAccepted: number): {
 }
 
 export function Settings() {
-  const [authorizedProfiles, setAuthorizedProfiles] = useState<AuthorizedProfile[]>(fallbackAuthorizedProfiles);
+  const [authorizedProfiles, setAuthorizedProfiles] = useState<AuthorizedProfile[]>([]);
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSetting[]>(fallbackRuntimeSettings);
   const [runtimeDrafts, setRuntimeDrafts] = useState<Record<string, string>>({});
   const [runtimeSaveMessages, setRuntimeSaveMessages] = useState<Record<string, string>>({});
@@ -147,16 +146,19 @@ export function Settings() {
   const [isTraining, setIsTraining] = useState(false);
   const [isSavingUser, setIsSavingUser] = useState(false);
   const [deletingFaceId, setDeletingFaceId] = useState<number | null>(null);
+  const [editingFaceId, setEditingFaceId] = useState<number | null>(null);
+  const [showEditProfileModal, setShowEditProfileModal] = useState(false);
+  const [editProfileTarget, setEditProfileTarget] = useState<AuthorizedProfile | null>(null);
+  const [editProfileName, setEditProfileName] = useState('');
+  const [editProfileRole, setEditProfileRole] = useState('');
+  const [profilesLoading, setProfilesLoading] = useState(true);
+  const [profilesError, setProfilesError] = useState('');
+  const [profilesMessage, setProfilesMessage] = useState('');
   const [mobileRemoteStatus, setMobileRemoteStatus] = useState<MobileRemoteStatus | null>(null);
   const [mobileRemoteSaving, setMobileRemoteSaving] = useState(false);
   const [mobileRemoteMessage, setMobileRemoteMessage] = useState('');
   const [remoteLinks, setRemoteLinks] = useState<RemoteAccessLinksPayload | null>(null);
   const [mdnsStatus, setMdnsStatus] = useState<MdnsStatusPayload | null>(null);
-  const [remoteLinksMessage, setRemoteLinksMessage] = useState('');
-  const [isSendingTelegramLink, setIsSendingTelegramLink] = useState(false);
-  const [telegramSnapshotCooldown, setTelegramSnapshotCooldown] = useState('60');
-  const [telegramSnapshotSaving, setTelegramSnapshotSaving] = useState(false);
-  const [telegramSnapshotMessage, setTelegramSnapshotMessage] = useState('');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const captureLoopBusyRef = useRef(false);
@@ -195,7 +197,7 @@ export function Settings() {
     if (!navigator.mediaDevices?.getUserMedia) {
       setShowSystemCameraFallback(true);
       setTrainingError(
-        'Device camera is unavailable in this browser context. If you are inside Telegram, open the dashboard in your phone browser over HTTPS. System Camera Feed fallback is now available.',
+        'Device camera is unavailable in this browser context. Open the dashboard in your phone browser over HTTPS. System Camera Feed fallback is available.',
       );
       return false;
     }
@@ -227,7 +229,7 @@ export function Settings() {
       const message = error instanceof Error ? error.message : 'Camera access denied or unavailable.';
       setShowSystemCameraFallback(true);
       setTrainingError(
-        `Unable to start device camera: ${message}. If opened from Telegram, try browser mode. System Camera Feed fallback is available.`,
+        `Unable to start device camera: ${message}. Try browser mode over HTTPS. System Camera Feed fallback is available.`,
       );
       stopCameraStream();
       return false;
@@ -408,76 +410,51 @@ export function Settings() {
     }
   }, [trainingCameraSource]);
 
-  const loadSettings = async () => {
-    try {
-      const [live, remoteStatus, links, mdns] = await Promise.all([
-        fetchSettingsLive(),
-        fetchMobileRemoteStatus(),
-        fetchRemoteAccessLinks(),
-        fetchMdnsStatus(),
-      ]);
-      setAuthorizedProfiles(live.authorizedProfiles);
-      setRuntimeSettings(live.runtimeSettings);
-      syncRuntimeDrafts(live.runtimeSettings);
-      const snapshotCooldown = live.runtimeSettings.find(
-        (setting) => setting.key === 'TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS',
-      );
-      if (snapshotCooldown) {
-        setTelegramSnapshotCooldown(snapshotCooldown.value);
-      }
-      setMobileRemoteStatus(remoteStatus);
-      setRemoteLinks(links);
-      setMdnsStatus(mdns);
-    } catch {
-      // Keep fallback data if API is unavailable.
+  const loadSettings = useCallback(async () => {
+    const [liveResult, remoteStatusResult, linksResult, mdnsResult] = await Promise.allSettled([
+      fetchSettingsLive(),
+      fetchMobileRemoteStatus(),
+      fetchRemoteAccessLinks(),
+      fetchMdnsStatus(),
+    ]);
+
+    if (liveResult.status === 'fulfilled') {
+      setAuthorizedProfiles(liveResult.value.authorizedProfiles);
+      setRuntimeSettings(liveResult.value.runtimeSettings);
+      syncRuntimeDrafts(liveResult.value.runtimeSettings);
+      setProfilesError('');
+    } else {
+      setProfilesError('Unable to load authorized profiles right now.');
     }
-  };
+    setProfilesLoading(false);
+
+    if (remoteStatusResult.status === 'fulfilled') {
+      setMobileRemoteStatus(remoteStatusResult.value);
+    }
+    if (linksResult.status === 'fulfilled') {
+      setRemoteLinks(linksResult.value);
+    }
+    if (mdnsResult.status === 'fulfilled') {
+      setMdnsStatus(mdnsResult.value);
+    }
+  }, [syncRuntimeDrafts]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const load = async () => {
-      try {
-        const [live, remoteStatus, links, mdns] = await Promise.all([
-          fetchSettingsLive(),
-          fetchMobileRemoteStatus(),
-          fetchRemoteAccessLinks(),
-          fetchMdnsStatus(),
-        ]);
-        if (cancelled) {
-          return;
-        }
-        setAuthorizedProfiles(live.authorizedProfiles);
-        setRuntimeSettings(live.runtimeSettings);
-        syncRuntimeDrafts(live.runtimeSettings);
-        const snapshotCooldown = live.runtimeSettings.find(
-          (setting) => setting.key === 'TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS',
-        );
-        if (snapshotCooldown) {
-          setTelegramSnapshotCooldown(snapshotCooldown.value);
-        }
-        setMobileRemoteStatus(remoteStatus);
-        setRemoteLinks(links);
-        setMdnsStatus(mdns);
-      } catch {
-        // Keep fallback data if API is unavailable.
-      }
-    };
-
-    if (!showAddUserModal) {
-      void load();
+    if (showAddUserModal) {
+      return undefined;
     }
+
+    setProfilesLoading(true);
+    void loadSettings();
+
     const timer = window.setInterval(() => {
-      if (!showAddUserModal) {
-        void load();
-      }
+      void loadSettings();
     }, 15000);
 
     return () => {
-      cancelled = true;
       window.clearInterval(timer);
     };
-  }, [showAddUserModal]);
+  }, [showAddUserModal, loadSettings]);
 
   useEffect(() => {
     return () => {
@@ -632,7 +609,7 @@ export function Settings() {
     setIsSavingUser(true);
     setTrainingError('');
     try {
-      await createFaceProfile(cleanName, `Role: ${newUserRole}`);
+      await createFaceProfile(cleanName, newUserRole);
       await loadSettings();
       resetAddUserModal();
     } catch {
@@ -641,19 +618,90 @@ export function Settings() {
     }
   };
 
-  const handleRemoveProfile = async (profile: AuthorizedProfile) => {
-    const dbId =
-      profile.dbId ||
-      Number.parseInt(profile.id.replace('auth-', ''), 10);
+  const resolveProfileDbId = (profile: AuthorizedProfile): number => {
+    const fromDb = Number(profile.dbId || 0);
+    if (Number.isFinite(fromDb) && fromDb > 0) {
+      return fromDb;
+    }
+    const fromId = Number.parseInt(profile.id.replace('auth-', ''), 10);
+    return Number.isFinite(fromId) ? fromId : 0;
+  };
+
+  const openEditProfileModal = (profile: AuthorizedProfile) => {
+    setEditProfileTarget(profile);
+    setEditProfileName(profile.label || '');
+    setEditProfileRole(profile.role || 'Authorized');
+    setProfilesMessage('');
+    setProfilesError('');
+    setShowEditProfileModal(true);
+  };
+
+  const resetEditProfileModal = () => {
+    setShowEditProfileModal(false);
+    setEditProfileTarget(null);
+    setEditProfileName('');
+    setEditProfileRole('');
+    setEditingFaceId(null);
+  };
+
+  const handleSaveProfileEdit = async () => {
+    if (!editProfileTarget) {
+      return;
+    }
+
+    const dbId = resolveProfileDbId(editProfileTarget);
     if (!Number.isFinite(dbId) || dbId <= 0) {
+      setProfilesError('Invalid profile identifier.');
+      return;
+    }
+
+    const name = editProfileName.trim();
+    const role = editProfileRole.trim();
+    if (!name) {
+      setProfilesError('Profile name is required.');
+      return;
+    }
+
+    setEditingFaceId(dbId);
+    setProfilesError('');
+    try {
+      await updateFaceProfile(dbId, {
+        name,
+        note: role,
+      });
+      await loadSettings();
+      setProfilesMessage('Authorized profile updated.');
+      window.setTimeout(() => setProfilesMessage(''), 3000);
+      resetEditProfileModal();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to update authorized profile.';
+      setProfilesError(message);
+    } finally {
+      setEditingFaceId(null);
+    }
+  };
+
+  const handleRemoveProfile = async (profile: AuthorizedProfile) => {
+    const dbId = resolveProfileDbId(profile);
+    if (!Number.isFinite(dbId) || dbId <= 0) {
+      setProfilesError('Invalid profile identifier.');
+      return;
+    }
+    const confirmed = window.confirm(`Remove profile "${profile.label}"? This cannot be undone.`);
+    if (!confirmed) {
       return;
     }
     setDeletingFaceId(dbId);
+    setProfilesError('');
+    setProfilesMessage('');
     try {
       await deleteFaceProfile(dbId);
       await loadSettings();
-    } catch {
-      // Keep current list on failure.
+      setProfilesMessage('Authorized profile removed.');
+      window.setTimeout(() => setProfilesMessage(''), 3000);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to remove authorized profile.';
+      setProfilesError(message);
     } finally {
       setDeletingFaceId(null);
     }
@@ -679,54 +727,6 @@ export function Settings() {
       window.setTimeout(() => setMobileRemoteMessage(''), 3500);
     } finally {
       setMobileRemoteSaving(false);
-    }
-  };
-
-  const handleSendAccessLinkToTelegram = async () => {
-    if (isSendingTelegramLink) {
-      return;
-    }
-    setIsSendingTelegramLink(true);
-    setRemoteLinksMessage('');
-    try {
-      const result = await sendTelegramAccessLink();
-      setRemoteLinksMessage(result.detail || (result.sent ? 'Access link sent to Telegram.' : 'Access link not sent.'));
-      await loadSettings();
-      window.setTimeout(() => setRemoteLinksMessage(''), 4200);
-    } catch {
-      setRemoteLinksMessage('Unable to send access link to Telegram.');
-      window.setTimeout(() => setRemoteLinksMessage(''), 4200);
-    } finally {
-      setIsSendingTelegramLink(false);
-    }
-  };
-
-  const handleSaveTelegramSnapshotCooldown = async () => {
-    const trimmed = telegramSnapshotCooldown.trim();
-    const parsed = Number.parseInt(trimmed, 10);
-
-    if (!Number.isFinite(parsed) || String(parsed) !== trimmed) {
-      setTelegramSnapshotMessage('Enter a whole number between 10 and 3600 seconds.');
-      return;
-    }
-    if (parsed < 10 || parsed > 3600) {
-      setTelegramSnapshotMessage('Telegram snapshot cooldown must be between 10 and 3600 seconds.');
-      return;
-    }
-
-    setTelegramSnapshotSaving(true);
-    setTelegramSnapshotMessage('');
-    try {
-      const result = await updateRuntimeSetting('TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS', String(parsed));
-      setTelegramSnapshotCooldown(result.value);
-      await loadSettings();
-      setTelegramSnapshotMessage(`Telegram snapshot cooldown saved to ${result.value}s.`);
-      window.setTimeout(() => setTelegramSnapshotMessage(''), 4200);
-    } catch {
-      setTelegramSnapshotMessage('Unable to save Telegram snapshot cooldown.');
-      window.setTimeout(() => setTelegramSnapshotMessage(''), 4200);
-    } finally {
-      setTelegramSnapshotSaving(false);
     }
   };
 
@@ -840,6 +840,69 @@ export function Settings() {
   const guidedProgressPercent = Math.max(
     0,
     Math.min(100, Math.round((capturedSamples / GUIDED_CAPTURE_TARGET) * 100)),
+  );
+
+  const editProfileModal = (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div className="bg-white rounded-lg max-w-md w-full">
+        <div className="border-b border-gray-200 px-5 py-4 flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900">Edit Authorized Profile</h3>
+            <p className="text-sm text-gray-600 mt-1">Update the profile label and role metadata.</p>
+          </div>
+          <button
+            onClick={resetEditProfileModal}
+            className="p-1 hover:bg-gray-100 rounded transition-colors"
+            aria-label="Close edit profile dialog"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Name</label>
+            <input
+              type="text"
+              value={editProfileName}
+              onChange={(event) => setEditProfileName(event.target.value)}
+              placeholder="Resident name"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Role</label>
+            <input
+              type="text"
+              value={editProfileRole}
+              onChange={(event) => setEditProfileRole(event.target.value)}
+              placeholder="Owner, Family, Guest"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+            />
+          </div>
+        </div>
+
+        <div className="border-t border-gray-200 px-5 py-4 flex items-center justify-end gap-2">
+          <button
+            onClick={resetEditProfileModal}
+            disabled={Boolean(editingFaceId)}
+            className="px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => {
+              void handleSaveProfileEdit();
+            }}
+            disabled={Boolean(editingFaceId)}
+            className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+          >
+            {editingFaceId ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 
   const addUserModal = (
@@ -1212,11 +1275,6 @@ export function Settings() {
                 desc: 'Immediate alert for FIRE fusion output.',
                 enabled: true,
               },
-              {
-                title: 'Telegram Notifications',
-                desc: 'Send active alert summary through Telegram bot channel.',
-                enabled: true,
-              },
             ].map((item) => (
               <div
                 key={item.title}
@@ -1232,41 +1290,6 @@ export function Settings() {
                 </label>
               </div>
             ))}
-
-            <div className="rounded-lg border border-gray-200 p-4 bg-gray-50">
-              <div className="flex flex-col md:flex-row md:items-end gap-3 md:gap-4">
-                <div className="min-w-0 flex-1">
-                  <p className="font-medium text-gray-900">Telegram Snapshot Cooldown</p>
-                  <p className="text-sm text-gray-600 mt-1 break-words">
-                    Minimum interval between Telegram image snapshots for the same source node and alert type.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={10}
-                    max={3600}
-                    step={1}
-                    value={telegramSnapshotCooldown}
-                    onChange={(event) => setTelegramSnapshotCooldown(event.target.value)}
-                    className="w-28 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
-                  />
-                  <span className="text-sm text-gray-600">seconds</span>
-                  <button
-                    onClick={() => {
-                      void handleSaveTelegramSnapshotCooldown();
-                    }}
-                    disabled={telegramSnapshotSaving}
-                    className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
-                  >
-                    {telegramSnapshotSaving ? 'Saving...' : 'Save'}
-                  </button>
-                </div>
-              </div>
-              {telegramSnapshotMessage && (
-                <p className="mt-3 text-sm text-gray-700 break-words">{telegramSnapshotMessage}</p>
-              )}
-            </div>
           </div>
         </div>
 
@@ -1304,7 +1327,11 @@ export function Settings() {
           </div>
 
           <div className="space-y-3">
-            {authorizedProfiles.length > 0 ? (
+            {profilesLoading ? (
+              <div className="rounded-lg border border-gray-200 p-4 text-sm text-gray-600">
+                Loading authorized profiles...
+              </div>
+            ) : authorizedProfiles.length > 0 ? (
               authorizedProfiles.map((profile) => (
                 <div
                   key={profile.id}
@@ -1322,13 +1349,23 @@ export function Settings() {
                       </p>
                     </div>
                   </div>
-                  <button
-                    onClick={() => void handleRemoveProfile(profile)}
-                    disabled={deletingFaceId === profile.dbId}
-                    className="self-start sm:self-auto px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 rounded transition-colors disabled:text-gray-400"
-                  >
-                    {deletingFaceId === profile.dbId ? 'Removing...' : 'Remove'}
-                  </button>
+                  <div className="self-start sm:self-auto inline-flex items-center gap-2">
+                    <button
+                      onClick={() => openEditProfileModal(profile)}
+                      disabled={Boolean(deletingFaceId) || Boolean(editingFaceId)}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 text-sm text-blue-700 hover:bg-blue-50 rounded transition-colors disabled:text-gray-400"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => void handleRemoveProfile(profile)}
+                      disabled={deletingFaceId === resolveProfileDbId(profile) || Boolean(editingFaceId)}
+                      className="px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 rounded transition-colors disabled:text-gray-400"
+                    >
+                      {deletingFaceId === resolveProfileDbId(profile) ? 'Removing...' : 'Remove'}
+                    </button>
+                  </div>
                 </div>
               ))
             ) : (
@@ -1336,6 +1373,13 @@ export function Settings() {
                 No authorized face profiles enrolled yet.
               </div>
             )}
+
+            {profilesError ? (
+              <p className="text-sm text-red-600">{profilesError}</p>
+            ) : null}
+            {profilesMessage ? (
+              <p className="text-sm text-green-700">{profilesMessage}</p>
+            ) : null}
           </div>
 
           <button
@@ -1613,22 +1657,9 @@ export function Settings() {
               >
                 Copy Preferred URL
               </button>
-              <button
-                onClick={() => {
-                  void handleSendAccessLinkToTelegram();
-                }}
-                disabled={isSendingTelegramLink}
-                className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
-              >
-                <Send className="w-4 h-4" />
-                {isSendingTelegramLink ? 'Sending...' : 'Send Link to Telegram'}
-              </button>
             </div>
             {mobileRemoteMessage && (
               <p className="mt-3 text-sm text-gray-700">{mobileRemoteMessage}</p>
-            )}
-            {remoteLinksMessage && (
-              <p className="mt-2 text-sm text-gray-700 break-words">{remoteLinksMessage}</p>
             )}
           </div>
         </div>
@@ -1645,6 +1676,7 @@ export function Settings() {
       </div>
 
       {showAddUserModal && addUserModal}
+      {showEditProfileModal && editProfileModal}
     </div>
   );
 }

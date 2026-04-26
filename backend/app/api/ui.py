@@ -157,6 +157,23 @@ def _alert_to_ui(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _snapshot_target_path(snapshot_path: str, snapshot_root: Path) -> Path | None:
+    raw_value = str(snapshot_path or "").strip().lstrip("/")
+    if not raw_value:
+        return None
+
+    relative_value = raw_value
+    if relative_value.startswith("snapshots/"):
+        relative_value = relative_value[len("snapshots/") :]
+    if not relative_value:
+        return None
+
+    target = (snapshot_root / relative_value).resolve()
+    if target != snapshot_root and snapshot_root not in target.parents:
+        return None
+    return target
+
+
 def _event_to_ui(row: dict[str, Any]) -> dict[str, Any]:
     details = _safe_json(row.get("details_json"))
     return {
@@ -983,7 +1000,8 @@ def ui_settings_live(request: Request) -> dict:
                 "id": f"auth-{int(row['id']):03d}",
                 "db_id": int(row["id"]),
                 "label": str(row["name"]),
-                "role": "Authorized",
+                "role": str(row.get("note") or "").strip() or "Authorized",
+                "note": str(row.get("note") or "").strip(),
                 "enrolled_at": str(row["created_ts"]),
                 "sample_count": int(row.get("sample_count") or 0),
             }
@@ -1083,6 +1101,30 @@ def ack_json(alert_id: int, request: Request) -> dict:
 @router.post("/api/alerts/{alert_id}/acknowledge")
 def ack_json_alias(alert_id: int, request: Request) -> dict:
     return ack_json(alert_id, request)
+
+
+@router.post("/api/alerts/{alert_id}/snapshot/delete")
+def delete_alert_snapshot(alert_id: int, request: Request) -> dict:
+    get_current_user(request)
+    row = store.get_alert(alert_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="alert not found")
+
+    settings: Settings = request.app.state.settings
+    snapshot_root = Path(settings.snapshot_root).resolve()
+    snapshot_path = str(row.get("snapshot_path") or "")
+
+    deleted_file = False
+    if snapshot_path:
+        target = _snapshot_target_path(snapshot_path, snapshot_root)
+        if target is not None and target.exists() and target.is_file():
+            target.unlink(missing_ok=True)
+            deleted_file = True
+
+    if not store.clear_alert_snapshot_path(alert_id):
+        raise HTTPException(status_code=404, detail="alert not found")
+
+    return {"ok": True, "alert_id": int(alert_id), "deleted_file": deleted_file}
 
 
 @router.get("/snapshots/{snapshot_rel_path:path}")

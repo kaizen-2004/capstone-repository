@@ -2,6 +2,7 @@ import uuid
 
 from fastapi.testclient import TestClient
 
+from backend.app.db import store
 from backend.app.main import app
 
 
@@ -479,6 +480,73 @@ def test_alerts_and_events_api_contract_routes() -> None:
             ack = client.post(f"/api/alerts/{alert_id}/acknowledge")
             assert ack.status_code == 200
             assert ack.json()["ok"] is True
+
+
+def test_face_profile_update_contract() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        seed_name = f"Face Update {uuid.uuid4().hex[:6]}"
+        create = client.post(
+            "/api/faces",
+            json={"name": seed_name, "note": "Owner"},
+        )
+        assert create.status_code == 200
+        created_face = create.json()["face"]
+        db_id = int(created_face["db_id"])
+
+        updated_name = f"{seed_name} Renamed"
+        patch = client.patch(
+            f"/api/faces/{db_id}",
+            json={"name": updated_name, "note": "Family"},
+        )
+        assert patch.status_code == 200
+        payload = patch.json()
+        assert payload["ok"] is True
+        assert payload["face"]["label"] == updated_name
+        assert payload["face"]["role"] == "Family"
+
+
+def test_alert_snapshot_delete_clears_file_and_path() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        settings = app.state.settings
+        day = "2099-12-31"
+        snap_dir = settings.snapshot_root / day
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        snap_file = snap_dir / f"pytest_snapshot_{uuid.uuid4().hex[:8]}.jpg"
+        snap_file.write_bytes(b"pytest-snapshot")
+
+        snapshot_path = f"snapshots/{day}/{snap_file.name}"
+        alert_id = store.create_alert(
+            alert_type="INTRUDER",
+            severity="critical",
+            status="ACTIVE",
+            requires_ack=True,
+            title="Snapshot Delete Test",
+            description="delete endpoint contract",
+            source_node="cam_door",
+            location="Door Entrance Area",
+            snapshot_path=snapshot_path,
+        )
+
+        delete_response = client.post(f"/api/alerts/{alert_id}/snapshot/delete")
+        assert delete_response.status_code == 200
+        payload = delete_response.json()
+        assert payload["ok"] is True
+        assert payload["alert_id"] == alert_id
+
+        updated = store.get_alert(alert_id)
+        assert updated is not None
+        assert str(updated.get("snapshot_path") or "") == ""
+        assert not snap_file.exists()
 
 
 def test_mobile_status_nodes_sensors_and_assistant_routes() -> None:

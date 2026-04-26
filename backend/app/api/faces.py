@@ -14,6 +14,7 @@ from ..schemas.api import (
     CreateFaceRequest,
     EnrollCompleteRequest,
     EnrollStartRequest,
+    UpdateFaceRequest,
 )
 
 router = APIRouter(tags=["faces"])
@@ -83,11 +84,13 @@ def _decode_enroll_id(enroll_id: str) -> int:
 
 
 def _face_to_profile(row: dict) -> dict:
+    note = str(row.get("note") or "").strip()
     return {
         "id": f"auth-{int(row['id']):03d}",
         "db_id": int(row["id"]),
         "label": str(row["name"]),
-        "role": "Authorized",
+        "role": note or "Authorized",
+        "note": note,
         "enrolled_at": str(row["created_ts"]),
         "sample_count": int(row.get("sample_count", 0)),
     }
@@ -268,6 +271,49 @@ def delete_face(face_id: int, request: Request) -> dict:
         pass
 
     return {"ok": True}
+
+
+@router.patch("/api/faces/{face_id}")
+def update_face(face_id: int, payload: UpdateFaceRequest, request: Request) -> dict:
+    get_current_user(request)
+    existing = store.get_face(face_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="face not found")
+
+    next_name: str | None = None
+    next_note: str | None = None
+
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        duplicate = store.get_face_by_name(name)
+        if duplicate is not None and int(duplicate["id"]) != int(face_id):
+            raise HTTPException(status_code=400, detail="name already exists")
+        next_name = name
+
+    if payload.note is not None:
+        next_note = payload.note.strip()
+
+    if next_name is None and next_note is None:
+        raise HTTPException(status_code=400, detail="nothing to update")
+
+    updated = store.update_face(face_id, name=next_name, note=next_note)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="face not found")
+
+    face_service = request.app.state.face_service
+    try:
+        face_service.train()
+    except Exception:
+        pass
+
+    status = face_service.training_status(str(updated.get("name") or ""))
+    updated_with_status = {
+        **updated,
+        "sample_count": int(status.get("count") or 0),
+    }
+    return {"ok": True, "face": _face_to_profile(updated_with_status)}
 
 
 @router.get("/api/training/face/status")
