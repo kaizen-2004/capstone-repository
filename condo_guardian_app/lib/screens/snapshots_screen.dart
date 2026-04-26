@@ -495,7 +495,7 @@ class _FaceOverlayPainter extends CustomPainter {
       final borderPaint = Paint()
         ..color = borderColor
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.0;
+        ..strokeWidth = 1.2;
       canvas.drawRect(clampedBox, borderPaint);
 
       final normalizedClassification = overlay.classification.toUpperCase();
@@ -511,15 +511,15 @@ class _FaceOverlayPainter extends CustomPainter {
           text: labelText,
           style: const TextStyle(
             color: Colors.white,
-            fontSize: 10,
+            fontSize: 8,
             fontWeight: FontWeight.w600,
           ),
         ),
         textDirection: TextDirection.ltr,
       )..layout(maxWidth: size.width);
 
-      const horizontalPadding = 6.0;
-      const verticalPadding = 3.0;
+      const horizontalPadding = 4.0;
+      const verticalPadding = 2.0;
       final labelWidth = textPainter.width + horizontalPadding * 2;
       final labelHeight = textPainter.height + verticalPadding * 2;
 
@@ -545,7 +545,7 @@ class _FaceOverlayPainter extends CustomPainter {
 
       final labelPaint = Paint()..color = borderColor.withValues(alpha: 0.92);
       canvas.drawRRect(
-        RRect.fromRectAndRadius(labelRect, const Radius.circular(4)),
+        RRect.fromRectAndRadius(labelRect, const Radius.circular(3)),
         labelPaint,
       );
 
