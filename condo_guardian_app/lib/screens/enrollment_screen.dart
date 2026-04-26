@@ -106,7 +106,16 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
     return message.toLowerCase().contains('minimum samples not met');
   }
 
+  bool _isNoFaceDetectedError(String message) {
+    final normalized = message.toLowerCase();
+    return normalized.contains('no_face_detected') ||
+        normalized.contains('no face detected');
+  }
+
   String _friendlyEnrollmentMessage(String message) {
+    if (_isNoFaceDetectedError(message)) {
+      return 'No clear face found in one photo. Keep your face centered and well-lit, then try again.';
+    }
     if (_isMinimumSamplesError(message)) {
       final remainingMatch =
           RegExp(r'remaining\s*=\s*(\d+)').firstMatch(message);

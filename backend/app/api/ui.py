@@ -19,6 +19,7 @@ from fastapi.responses import (
 
 from ..core.auth import get_current_user
 from ..core.config import Settings
+from ..core.security import parse_iso
 from ..db import store
 from ..schemas.api import (
     AssistantQueryRequest,
@@ -172,6 +173,16 @@ def _snapshot_target_path(snapshot_path: str, snapshot_root: Path) -> Path | Non
     if target != snapshot_root and snapshot_root not in target.parents:
         return None
     return target
+
+
+def _normalize_query_timestamp(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = parse_iso(raw)
+    if parsed is None:
+        raise HTTPException(status_code=400, detail="invalid timestamp query parameter")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def _event_to_ui(row: dict[str, Any]) -> dict[str, Any]:
@@ -625,16 +636,50 @@ def ui_events_live(request: Request, limit: int = 250) -> dict:
 
 
 @router.get("/api/alerts")
-def api_alerts(request: Request, limit: int = 100) -> dict:
+def api_alerts(
+    request: Request,
+    limit: int = 100,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+) -> dict:
     get_current_user(request)
-    rows = store.list_alerts(limit=max(1, min(limit, 500)))
+    normalized_from_ts = _normalize_query_timestamp(from_ts)
+    normalized_to_ts = _normalize_query_timestamp(to_ts)
+    if normalized_from_ts and normalized_to_ts and normalized_from_ts >= normalized_to_ts:
+        raise HTTPException(
+            status_code=400,
+            detail="from_ts must be earlier than to_ts",
+        )
+
+    rows = store.list_alerts(
+        limit=max(1, min(limit, 500)),
+        from_ts=normalized_from_ts,
+        to_ts=normalized_to_ts,
+    )
     return {"ok": True, "alerts": [_alert_to_ui(row) for row in rows]}
 
 
 @router.get("/api/events")
-def api_events(request: Request, limit: int = 100) -> dict:
+def api_events(
+    request: Request,
+    limit: int = 100,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+) -> dict:
     get_current_user(request)
-    rows = store.list_events(limit=max(1, min(limit, 500)))
+    normalized_from_ts = _normalize_query_timestamp(from_ts)
+    normalized_to_ts = _normalize_query_timestamp(to_ts)
+    if normalized_from_ts and normalized_to_ts and normalized_from_ts >= normalized_to_ts:
+        raise HTTPException(
+            status_code=400,
+            detail="from_ts must be earlier than to_ts",
+        )
+
+    rows = store.list_events(
+        limit=max(1, min(limit, 500)),
+        from_ts=normalized_from_ts,
+        to_ts=normalized_to_ts,
+    )
     return {"ok": True, "events": [_event_to_ui(row) for row in rows]}
 
 

@@ -62,15 +62,23 @@ class NotificationDispatcher:
     def _build_push_payload(self, alert: dict[str, Any]) -> dict[str, Any]:
         details = _safe_json(alert.get("details_json"))
         alert_id = int(alert.get("id") or 0)
-        severity = str(alert.get("severity") or "info").upper()
-        title = str(details.get("title") or alert.get("type") or "Alert")
-        description = str(details.get("description") or "Monitoring alert detected.")
+        title = str(details.get("title") or alert.get("type") or "Alert").strip()
+        if not title:
+            title = "Security alert"
+
+        description = str(details.get("description") or "Please review the latest alert.")
+        description = description.strip() or "Please review the latest alert."
         location = str(details.get("location") or "")
         source_node = str(details.get("source_node") or "system")
 
+        if location:
+            body = f"{description} Location: {location}. Open Alerts to review."
+        else:
+            body = f"{description} Open Alerts to review."
+
         return {
-            "title": f"[{severity}] {title}",
-            "body": description if not location else f"{description} ({location})",
+            "title": title,
+            "body": body,
             "url": "/dashboard/remote/mobile",
             "tag": f"alert-{alert_id}",
             "data": {

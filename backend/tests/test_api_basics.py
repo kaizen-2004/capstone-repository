@@ -482,6 +482,79 @@ def test_alerts_and_events_api_contract_routes() -> None:
             assert ack.json()["ok"] is True
 
 
+def test_alerts_and_events_support_date_range_filters() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        day_one_ts = "2026-01-01T08:30:00+00:00"
+        day_two_ts = "2026-01-02T08:30:00+00:00"
+
+        event_day_one = store.create_event(
+            event_type="system",
+            event_code="FILTER_TEST_DAY_ONE",
+            source_node="filter_test_node",
+            location="Test Lab",
+            severity="warning",
+            title="Date filter test day one",
+            description="first day event",
+            ts=day_one_ts,
+        )
+        alert_day_one = store.create_alert(
+            alert_type="SYSTEM",
+            severity="warning",
+            status="ACTIVE",
+            requires_ack=True,
+            title="Date filter alert day one",
+            description="first day alert",
+            source_node="filter_test_node",
+            location="Test Lab",
+            event_id=event_day_one,
+            ts=day_one_ts,
+        )
+
+        event_day_two = store.create_event(
+            event_type="system",
+            event_code="FILTER_TEST_DAY_TWO",
+            source_node="filter_test_node",
+            location="Test Lab",
+            severity="warning",
+            title="Date filter test day two",
+            description="second day event",
+            ts=day_two_ts,
+        )
+        alert_day_two = store.create_alert(
+            alert_type="SYSTEM",
+            severity="warning",
+            status="ACTIVE",
+            requires_ack=True,
+            title="Date filter alert day two",
+            description="second day alert",
+            source_node="filter_test_node",
+            location="Test Lab",
+            event_id=event_day_two,
+            ts=day_two_ts,
+        )
+
+        alerts = client.get(
+            "/api/alerts?limit=500&from_ts=2026-01-01T00:00:00%2B00:00&to_ts=2026-01-02T00:00:00%2B00:00"
+        )
+        assert alerts.status_code == 200
+        alert_ids = {int(row["id"]) for row in alerts.json().get("alerts", [])}
+        assert alert_day_one in alert_ids
+        assert alert_day_two not in alert_ids
+
+        events = client.get(
+            "/api/events?limit=500&from_ts=2026-01-01T00:00:00%2B00:00&to_ts=2026-01-02T00:00:00%2B00:00"
+        )
+        assert events.status_code == 200
+        event_ids = {int(row["id"]) for row in events.json().get("events", [])}
+        assert event_day_one in event_ids
+        assert event_day_two not in event_ids
+
+
 def test_face_profile_update_contract() -> None:
     with TestClient(app) as client:
         login = client.post(

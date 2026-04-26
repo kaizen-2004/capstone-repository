@@ -11,10 +11,12 @@ class SnapshotsScreen extends StatefulWidget {
     super.key,
     required this.backendService,
     required this.settingsStore,
+    this.initialDate,
   });
 
   final BackendService backendService;
   final SettingsStore settingsStore;
+  final DateTime? initialDate;
 
   @override
   State<SnapshotsScreen> createState() => _SnapshotsScreenState();
@@ -27,10 +29,18 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
   String? _error;
   List<SnapshotItem> _snapshots = <SnapshotItem>[];
   String? _busySnapshotId;
+  DateTime? _selectedDate;
 
   @override
   void initState() {
     super.initState();
+    if (widget.initialDate != null) {
+      _selectedDate = DateTime(
+        widget.initialDate!.year,
+        widget.initialDate!.month,
+        widget.initialDate!.day,
+      );
+    }
     _loadSnapshots();
   }
 
@@ -41,7 +51,8 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
     });
 
     try {
-      final snapshots = await widget.backendService.fetchSnapshots();
+      final snapshots =
+          await widget.backendService.fetchSnapshots(localDate: _selectedDate);
       if (!mounted) {
         return;
       }
@@ -88,7 +99,9 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
   Future<void> _downloadSnapshot(SnapshotItem snapshot) async {
     if (defaultTargetPlatform != TargetPlatform.android) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Download is currently supported on Android devices.')),
+        const SnackBar(
+            content:
+                Text('Download is currently supported on Android devices.')),
       );
       return;
     }
@@ -101,7 +114,8 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
         headers['Authorization'] = 'Bearer $token';
       }
 
-      await _filesChannel.invokeMethod<dynamic>('downloadSnapshot', <String, dynamic>{
+      await _filesChannel
+          .invokeMethod<dynamic>('downloadSnapshot', <String, dynamic>{
         'url': _absoluteSnapshotUrl(snapshot.snapshotPath),
         'fileName': _snapshotFileName(snapshot),
         'headers': headers,
@@ -111,7 +125,8 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Snapshot download queued. Check notifications.')),
+        const SnackBar(
+            content: Text('Snapshot download queued. Check notifications.')),
       );
     } catch (error) {
       if (!mounted) {
@@ -132,7 +147,8 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('Delete snapshot?'),
-            content: const Text('This will remove the image from local storage. This action cannot be undone.'),
+            content: const Text(
+                'This will remove the image from local storage. This action cannot be undone.'),
             actions: <Widget>[
               TextButton(
                 onPressed: () => Navigator.of(context).pop(false),
@@ -157,7 +173,8 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
         return;
       }
       setState(() {
-        _snapshots = _snapshots.where((item) => item.id != snapshot.id).toList();
+        _snapshots =
+            _snapshots.where((item) => item.id != snapshot.id).toList();
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Snapshot deleted.')),
@@ -248,17 +265,22 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                                     runSpacing: 8,
                                     children: <Widget>[
                                       OutlinedButton.icon(
-                                        onPressed: _busySnapshotId == snapshot.id
+                                        onPressed: _busySnapshotId ==
+                                                snapshot.id
                                             ? null
                                             : () => _downloadSnapshot(snapshot),
-                                        icon: const Icon(Icons.download_rounded, size: 18),
+                                        icon: const Icon(Icons.download_rounded,
+                                            size: 18),
                                         label: const Text('Download'),
                                       ),
                                       OutlinedButton.icon(
-                                        onPressed: _busySnapshotId == snapshot.id
+                                        onPressed: _busySnapshotId ==
+                                                snapshot.id
                                             ? null
                                             : () => _deleteSnapshot(snapshot),
-                                        icon: const Icon(Icons.delete_outline_rounded, size: 18),
+                                        icon: const Icon(
+                                            Icons.delete_outline_rounded,
+                                            size: 18),
                                         label: const Text('Delete'),
                                       ),
                                     ],

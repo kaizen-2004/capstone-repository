@@ -628,21 +628,61 @@ def ack_alert(alert_id: int, ack_by: str, status: str = "ACK") -> bool:
     return updated
 
 
-def list_events(limit: int) -> list[dict[str, Any]]:
+def list_events(
+    limit: int,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+) -> list[dict[str, Any]]:
     with _LOCK:
         conn = _conn()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM events ORDER BY ts DESC LIMIT ?", (max(1, min(1000, int(limit))),))
+        query = "SELECT * FROM events"
+        args: list[Any] = []
+        clauses: list[str] = []
+
+        if from_ts:
+            clauses.append("ts >= ?")
+            args.append(from_ts)
+        if to_ts:
+            clauses.append("ts < ?")
+            args.append(to_ts)
+
+        if clauses:
+            query = f"{query} WHERE {' AND '.join(clauses)}"
+
+        query = f"{query} ORDER BY ts DESC LIMIT ?"
+        args.append(max(1, min(1000, int(limit))))
+        cur.execute(query, tuple(args))
         rows = [dict(row) for row in cur.fetchall()]
         conn.close()
     return rows
 
 
-def list_alerts(limit: int) -> list[dict[str, Any]]:
+def list_alerts(
+    limit: int,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+) -> list[dict[str, Any]]:
     with _LOCK:
         conn = _conn()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM alerts ORDER BY ts DESC LIMIT ?", (max(1, min(1000, int(limit))),))
+        query = "SELECT * FROM alerts"
+        args: list[Any] = []
+        clauses: list[str] = []
+
+        if from_ts:
+            clauses.append("ts >= ?")
+            args.append(from_ts)
+        if to_ts:
+            clauses.append("ts < ?")
+            args.append(to_ts)
+
+        if clauses:
+            query = f"{query} WHERE {' AND '.join(clauses)}"
+
+        query = f"{query} ORDER BY ts DESC LIMIT ?"
+        args.append(max(1, min(1000, int(limit))))
+        cur.execute(query, tuple(args))
         rows = [dict(row) for row in cur.fetchall()]
         conn.close()
     return rows

@@ -31,6 +31,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
   bool _loading = true;
   String? _error;
   Timer? _timer;
+  DateTime? _selectedDate;
 
   @override
   void initState() {
@@ -56,7 +57,8 @@ class _AlertsScreenState extends State<AlertsScreen> {
       });
     }
     try {
-      final alerts = await widget.backendService.fetchAlerts();
+      final alerts =
+          await widget.backendService.fetchAlerts(localDate: _selectedDate);
       if (mounted) {
         setState(() {
           _alerts = alerts;
@@ -83,7 +85,10 @@ class _AlertsScreenState extends State<AlertsScreen> {
   Future<void> _openEvents() async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => EventsScreen(backendService: widget.backendService),
+        builder: (_) => EventsScreen(
+          backendService: widget.backendService,
+          initialDate: _selectedDate,
+        ),
       ),
     );
   }
@@ -94,8 +99,85 @@ class _AlertsScreenState extends State<AlertsScreen> {
         builder: (_) => SnapshotsScreen(
           backendService: widget.backendService,
           settingsStore: widget.settingsStore,
+          initialDate: _selectedDate,
         ),
       ),
+    );
+  }
+
+  DateTime _normalizeDate(DateTime value) {
+    return DateTime(value.year, value.month, value.day);
+  }
+
+  bool _isSameDate(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
+  String _calendarLabel(DateTime date) {
+    const months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    final month = months[date.month - 1];
+    return '$month ${date.day}, ${date.year}';
+  }
+
+  Future<void> _pickDate() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate ?? now,
+      firstDate: DateTime(now.year - 5, 1, 1),
+      lastDate: DateTime(now.year + 1, 12, 31),
+      helpText: 'Filter alerts by date',
+      confirmText: 'Apply',
+    );
+    if (picked == null) {
+      return;
+    }
+
+    final nextDate = _normalizeDate(picked);
+    if (_selectedDate != null && _isSameDate(_selectedDate!, nextDate)) {
+      return;
+    }
+
+    setState(() => _selectedDate = nextDate);
+    await _loadAlerts();
+  }
+
+  Future<void> _clearDateFilter() async {
+    if (_selectedDate == null) {
+      return;
+    }
+    setState(() => _selectedDate = null);
+    await _loadAlerts();
+  }
+
+  Widget _buildTopControls() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _IncidentSwitcher(
+          onOpenEvents: _openEvents,
+          onOpenSnapshots: _openSnapshots,
+        ),
+        _DateFilterBar(
+          selectedDate: _selectedDate,
+          onPickDate: _pickDate,
+          onClearDate: _clearDateFilter,
+          dateLabelBuilder: _calendarLabel,
+        ),
+      ],
     );
   }
 
@@ -141,10 +223,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
     if (_loading) {
       return Column(
         children: [
-          _IncidentSwitcher(
-            onOpenEvents: _openEvents,
-            onOpenSnapshots: _openSnapshots,
-          ),
+          _buildTopControls(),
           const Expanded(child: Center(child: CircularProgressIndicator())),
         ],
       );
@@ -153,10 +232,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
     if (_error != null) {
       return Column(
         children: [
-          _IncidentSwitcher(
-            onOpenEvents: _openEvents,
-            onOpenSnapshots: _openSnapshots,
-          ),
+          _buildTopControls(),
           Expanded(
             child: _ErrorState(error: _error!, onRetry: () => _loadAlerts()),
           ),
@@ -167,10 +243,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
     if (_alerts.isEmpty) {
       return Column(
         children: [
-          _IncidentSwitcher(
-            onOpenEvents: _openEvents,
-            onOpenSnapshots: _openSnapshots,
-          ),
+          _buildTopControls(),
           const Expanded(child: _EmptyState()),
         ],
       );
@@ -184,10 +257,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
         children: [
-          _IncidentSwitcher(
-            onOpenEvents: _openEvents,
-            onOpenSnapshots: _openSnapshots,
-          ),
+          _buildTopControls(),
           const SizedBox(height: 8),
           if (active.isNotEmpty) ...[
             _SectionLabel(
@@ -255,6 +325,49 @@ class _IncidentSwitcher extends StatelessWidget {
             onPressed: onOpenSnapshots,
             child: const Text('Snapshots'),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DateFilterBar extends StatelessWidget {
+  const _DateFilterBar({
+    required this.selectedDate,
+    required this.onPickDate,
+    required this.onClearDate,
+    required this.dateLabelBuilder,
+  });
+
+  final DateTime? selectedDate;
+  final VoidCallback onPickDate;
+  final VoidCallback onClearDate;
+  final String Function(DateTime date) dateLabelBuilder;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasFilter = selectedDate != null;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 0, 0, 8),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          OutlinedButton.icon(
+            onPressed: onPickDate,
+            icon: const Icon(Icons.calendar_month_outlined, size: 18),
+            label: Text(
+              hasFilter
+                  ? 'Date: ${dateLabelBuilder(selectedDate!)}'
+                  : 'Filter by date',
+            ),
+          ),
+          if (hasFilter)
+            TextButton(
+              onPressed: onClearDate,
+              child: const Text('Clear'),
+            ),
         ],
       ),
     );

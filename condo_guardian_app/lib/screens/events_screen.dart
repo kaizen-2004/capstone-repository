@@ -4,9 +4,14 @@ import '../models/alert_item.dart';
 import '../services/backend_service.dart';
 
 class EventsScreen extends StatefulWidget {
-  const EventsScreen({super.key, required this.backendService});
+  const EventsScreen({
+    super.key,
+    required this.backendService,
+    this.initialDate,
+  });
 
   final BackendService backendService;
+  final DateTime? initialDate;
 
   @override
   State<EventsScreen> createState() => _EventsScreenState();
@@ -16,10 +21,18 @@ class _EventsScreenState extends State<EventsScreen> {
   bool _loading = true;
   String? _error;
   List<AlertItem> _events = <AlertItem>[];
+  DateTime? _selectedDate;
 
   @override
   void initState() {
     super.initState();
+    if (widget.initialDate != null) {
+      _selectedDate = DateTime(
+        widget.initialDate!.year,
+        widget.initialDate!.month,
+        widget.initialDate!.day,
+      );
+    }
     _loadEvents();
   }
 
@@ -30,7 +43,8 @@ class _EventsScreenState extends State<EventsScreen> {
     });
 
     try {
-      final events = await widget.backendService.fetchEvents();
+      final events =
+          await widget.backendService.fetchEvents(localDate: _selectedDate);
       if (!mounted) {
         return;
       }
