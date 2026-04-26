@@ -17,8 +17,10 @@ class FaceProfile {
   String get displayLabel => '$profileId - $name ($sampleCount samples)';
 
   factory FaceProfile.fromJson(Map<String, dynamic> json) {
-    final idValue = (json['id']?.toString() ?? json['user_code']?.toString() ?? '').trim();
-    final nameValue = (json['label']?.toString() ?? json['name']?.toString() ?? '').trim();
+    final idValue =
+        (json['id']?.toString() ?? json['user_code']?.toString() ?? '').trim();
+    final nameValue =
+        (json['label']?.toString() ?? json['name']?.toString() ?? '').trim();
     final sampleRaw =
         json['sample_count']?.toString() ?? json['count']?.toString() ?? '';
     return FaceProfile(
@@ -109,12 +111,22 @@ class BackendService {
     final nodes = await nodesFuture;
     final sensors = await sensorsFuture;
     final alerts = await alertsFuture;
+    final alertRows = alerts['alerts'] as List<dynamic>? ?? <dynamic>[];
+    final activeAlerts = alertRows.where((item) {
+      if (item is Map<String, dynamic>) {
+        return item['acknowledged'] != true;
+      }
+      if (item is Map) {
+        return item['acknowledged'] != true;
+      }
+      return true;
+    }).toList();
 
     final merged = <String, dynamic>{
       'system_state': status['backend']?.toString() ?? 'online',
       'sensor_readings': sensors['sensors'] ?? <dynamic>[],
       'nodes': nodes['nodes'] ?? <dynamic>[],
-      'active_alerts': alerts['alerts'] ?? <dynamic>[],
+      'active_alerts': activeAlerts,
     };
 
     return SystemSnapshot.fromJson(merged);

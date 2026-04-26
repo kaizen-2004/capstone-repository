@@ -12,10 +12,12 @@ class HomeScreen extends StatefulWidget {
     super.key,
     required this.backendService,
     required this.settingsStore,
+    this.activeAlertCount,
   });
 
   final BackendService backendService;
   final SettingsStore settingsStore;
+  final int? activeAlertCount;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -89,6 +91,7 @@ class _HomeScreenState extends State<HomeScreen>
           return _DataView(
             data: snapshot.data!,
             backendUrl: widget.settingsStore.backendBaseUrl,
+            liveAlertCount: widget.activeAlertCount,
             staggerCtrl: _staggerCtrl,
             stateColor: _stateColor,
           );
@@ -170,12 +173,14 @@ class _DataView extends StatelessWidget {
   const _DataView({
     required this.data,
     required this.backendUrl,
+    required this.liveAlertCount,
     required this.staggerCtrl,
     required this.stateColor,
   });
 
   final SystemSnapshot data;
   final String backendUrl;
+  final int? liveAlertCount;
   final AnimationController staggerCtrl;
   final Color Function(String) stateColor;
 
@@ -194,7 +199,9 @@ class _DataView extends StatelessWidget {
     final onlineNodes = data.nodes
         .where((node) => node.status.toLowerCase() == 'online')
         .length;
-    final alertCount = data.activeAlerts.length;
+    final snapshotAlertCount =
+        data.activeAlerts.where((alert) => !alert.acknowledged).length;
+    final alertCount = liveAlertCount ?? snapshotAlertCount;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),

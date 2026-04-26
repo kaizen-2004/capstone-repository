@@ -12,7 +12,8 @@ class AlertNotificationCoordinator {
     AlertNotificationService? notificationService,
   })  : _settingsStore = settingsStore,
         _backendServiceFactory = backendServiceFactory,
-        _notificationService = notificationService ?? AlertNotificationService();
+        _notificationService =
+            notificationService ?? AlertNotificationService();
 
   final SettingsStore _settingsStore;
   final BackendService Function() _backendServiceFactory;
@@ -21,9 +22,17 @@ class AlertNotificationCoordinator {
   Timer? _timer;
   bool _started = false;
   bool _syncInProgress = false;
+  final StreamController<int> _activeAlertCountController =
+      StreamController<int>.broadcast();
+  int _activeAlertCount = 0;
+  bool _activeAlertCountPublished = false;
 
   Stream<void> get onAlertNotificationTapped =>
       _notificationService.onAlertNotificationTapped;
+
+  Stream<int> get activeAlertCountStream => _activeAlertCountController.stream;
+
+  int get activeAlertCount => _activeAlertCount;
 
   Future<void> start() async {
     if (_started) {
@@ -60,6 +69,8 @@ class AlertNotificationCoordinator {
     try {
       final alerts = await _backendServiceFactory().fetchAlerts();
       final active = alerts.where((item) => !item.acknowledged).toList();
+      final activeCount = active.length;
+      _publishActiveAlertCount(activeCount);
 
       if (active.isEmpty) {
         await _notificationService.clearActiveAlertNotification();
@@ -67,7 +78,6 @@ class AlertNotificationCoordinator {
       }
 
       final primary = _pickPrimaryAlert(active);
-      final activeCount = active.length;
       final title = activeCount == 1
           ? primary.title
           : '$activeCount active alerts need acknowledgment';
@@ -93,7 +103,8 @@ class AlertNotificationCoordinator {
   AlertItem _pickPrimaryAlert(List<AlertItem> alerts) {
     final sorted = List<AlertItem>.from(alerts)
       ..sort((a, b) {
-        final severityCompare = _severityRank(b.severity) - _severityRank(a.severity);
+        final severityCompare =
+            _severityRank(b.severity) - _severityRank(a.severity);
         if (severityCompare != 0) {
           return severityCompare;
         }
@@ -116,8 +127,21 @@ class AlertNotificationCoordinator {
     }
   }
 
+  void _publishActiveAlertCount(int count) {
+    final nextCount = count < 0 ? 0 : count;
+    if (_activeAlertCountPublished && nextCount == _activeAlertCount) {
+      return;
+    }
+    _activeAlertCount = nextCount;
+    _activeAlertCountPublished = true;
+    if (!_activeAlertCountController.isClosed) {
+      _activeAlertCountController.add(_activeAlertCount);
+    }
+  }
+
   void dispose() {
     stop();
+    _activeAlertCountController.close();
     _notificationService.dispose();
   }
 }

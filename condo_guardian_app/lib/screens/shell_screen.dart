@@ -26,9 +26,11 @@ class ShellScreen extends StatefulWidget {
 class _ShellScreenState extends State<ShellScreen>
     with TickerProviderStateMixin {
   int _selectedIndex = 0;
+  int? _activeAlertCount;
   late final AnimationController _fadeController;
   late final AlertNotificationCoordinator _alertNotificationCoordinator;
   StreamSubscription<void>? _alertTapSubscription;
+  StreamSubscription<int>? _activeAlertCountSubscription;
 
   static const _navItems =
       <({String label, IconData icon, IconData activeIcon})>[
@@ -95,6 +97,13 @@ class _ShellScreenState extends State<ShellScreen>
       settingsStore: widget.settingsStore,
       backendServiceFactory: _buildBackendService,
     );
+    _activeAlertCountSubscription =
+        _alertNotificationCoordinator.activeAlertCountStream.listen((count) {
+      if (!mounted || _activeAlertCount == count) {
+        return;
+      }
+      setState(() => _activeAlertCount = count);
+    });
     unawaited(_alertNotificationCoordinator.start());
 
     _alertTapSubscription =
@@ -108,6 +117,7 @@ class _ShellScreenState extends State<ShellScreen>
 
   @override
   void dispose() {
+    _activeAlertCountSubscription?.cancel();
     _alertTapSubscription?.cancel();
     _alertNotificationCoordinator.dispose();
     _fadeController.dispose();
@@ -130,6 +140,7 @@ class _ShellScreenState extends State<ShellScreen>
         HomeScreen(
           backendService: _backendService,
           settingsStore: widget.settingsStore,
+          activeAlertCount: _activeAlertCount,
         ),
         MonitorScreen(settingsStore: widget.settingsStore),
         AlertsScreen(
@@ -232,14 +243,79 @@ class _ShellScreenState extends State<ShellScreen>
           destinations: _navItems
               .map(
                 (item) => NavigationDestination(
-                  icon: Icon(item.icon),
-                  selectedIcon: Icon(item.activeIcon),
+                  icon: _buildDestinationIcon(
+                    icon: item.icon,
+                    itemLabel: item.label,
+                  ),
+                  selectedIcon: _buildDestinationIcon(
+                    icon: item.activeIcon,
+                    itemLabel: item.label,
+                  ),
                   label: item.label,
                 ),
               )
               .toList(),
         ),
       ),
+    );
+  }
+
+  Widget _buildDestinationIcon({
+    required IconData icon,
+    required String itemLabel,
+  }) {
+    if (itemLabel.toLowerCase() != 'alerts') {
+      return Icon(icon);
+    }
+    return _NotificationCountIcon(
+      icon: icon,
+      count: _activeAlertCount ?? 0,
+    );
+  }
+}
+
+class _NotificationCountIcon extends StatelessWidget {
+  const _NotificationCountIcon({
+    required this.icon,
+    required this.count,
+  });
+
+  final IconData icon;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final badgeText = count > 99 ? '99+' : '$count';
+
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Icon(icon),
+        if (count > 0)
+          Positioned(
+            right: -10,
+            top: -6,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+              decoration: BoxDecoration(
+                color: cs.error,
+                borderRadius: BorderRadius.circular(999),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                badgeText,
+                style: TextStyle(
+                  color: cs.onError,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w700,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
