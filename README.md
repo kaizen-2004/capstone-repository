@@ -8,7 +8,7 @@
 
 This repository now follows a **Windows 10 local-first architecture**:
 
-- **Desktop shell:** Tauri (`desktop/`)
+- **Windows runtime:** local backend process + browser dashboard
 - **Frontend:** React dashboard (`web_dashboard_ui/`)
 - **Backend:** FastAPI (`backend/`)
 - **Sensors:** ESP32-C3 nodes over **HTTP**
@@ -144,27 +144,21 @@ Run end-to-end preview checks (tests, build, backend startup, auth, event trigge
 bash scripts/preview_full_system.sh
 ```
 
-## Desktop Shell (Tauri)
+## Windows Packaging (PyInstaller)
 
 ```bash
-cd desktop
+cd web_dashboard_ui
 npm install
-npm run dev
-```
-
-For LAN mobile testing, allow backend binding override before launching desktop:
-
-```bash
-cd desktop
-DESKTOP_BACKEND_HOST=0.0.0.0 DESKTOP_BACKEND_PORT=8765 npm run dev
-```
-
-MSI build:
-
-```bash
-cd desktop
 npm run build
+
+cd ..
+python -m pip install pyinstaller
+python -m PyInstaller backend/run_backend.py --name backend --onedir --clean --noconfirm --distpath backend/dist --workpath backend/build --specpath backend --paths . --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto --hidden-import uvicorn.lifespan.on
 ```
+
+Packaged backend entry point (Windows): `backend/dist/backend/backend.exe`
+
+Before shipping, include model files under `backend/storage/models` and dashboard assets from `web_dashboard_ui/dist` in the same project layout used at runtime.
 
 ## Sensor Event Contract
 
@@ -181,7 +175,6 @@ Recommended canonical device endpoints:
 ## Repository Map
 
 - `backend/`: FastAPI backend, modules, and tests
-- `desktop/`: Tauri desktop host and MSI bundle config
 - `web_dashboard_ui/`: React dashboard UI
 - `firmware/http/`: HTTP-based ESP32-C3 firmware
 - `docs/`: updated architecture and deployment docs

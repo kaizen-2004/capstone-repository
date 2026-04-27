@@ -174,7 +174,7 @@ The primary user interface is a **Windows desktop application**.
 Recommended implementation:
 
 * **React frontend**
-* **Tauri desktop shell**
+* **browser-based dashboard UI**
 * backend launched automatically by the app
 
 ### Desktop App Functions
@@ -208,7 +208,7 @@ Recommended implementation:
 
 * **Python backend**
 * **FastAPI**
-* packaged for Windows deployment and launched automatically by the desktop application
+* packaged for Windows deployment and started locally for browser access
 
 ### Main Backend Modules
 
@@ -216,7 +216,7 @@ Recommended implementation:
 
 Handles:
 
-* desktop dashboard requests
+* dashboard requests
 * mobile dashboard requests
 * node registration
 * event retrieval
@@ -536,7 +536,7 @@ These are added **after the core system is stable**.
 
 This includes:
 
-* Windows desktop application
+* Windows local dashboard deployment
 * local backend
 * HTTP-based ESP32 node integration
 * indoor and door RTSP camera integration
@@ -612,7 +612,7 @@ The mobile dashboard is mainly for:
 * acknowledgment
 * enrollment capture support
 
-The desktop app remains the primary full-control interface.
+The local dashboard remains the primary full-control interface.
 
 ---
 
@@ -708,5 +708,4 @@ ESP32-C3 Smoke Node 1        ESP32-C3 Smoke Node 2        ESP32-C3 Door Force No
                                                            ▼
                                               Responsive Mobile Web Dashboard
 ```
-
 

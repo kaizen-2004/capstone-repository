@@ -1,5 +1,5 @@
 # IntruFlare Repository Feature Map
-_Last updated: 2026-04-26_
+_Last updated: 2026-04-27_
 
 ## 1) Purpose
 This document maps active product features to owning files across:
@@ -7,7 +7,7 @@ This document maps active product features to owning files across:
 - web dashboard (`web_dashboard_ui/`)
 - Flutter mobile app (`condo_guardian_app/`)
 - firmware (`firmware/`)
-- desktop shell (`desktop/`)
+- deployment scripts (`scripts/`, `docs/instructions/deployment/`)
 - docs/context (`docs/`)
 
 This is the edit-safety reference for minimal-diff, contract-preserving changes.
@@ -45,7 +45,7 @@ This is the edit-safety reference for minimal-diff, contract-preserving changes.
 | `web_dashboard_ui/` | React dashboard and mobile remote web view | `web_dashboard_ui/src/main.tsx`, `web_dashboard_ui/src/app/routes.ts` |
 | `condo_guardian_app/` | Flutter mobile companion (monitoring, alerts, enrollment, provisioning) | `condo_guardian_app/lib/main.dart`, `condo_guardian_app/lib/app.dart` |
 | `firmware/` | ESP32 HTTP nodes and camera firmware | `firmware/http/*/*.ino`, `firmware/http/common/network_config.h` |
-| `desktop/` | Tauri shell wrapper | `desktop/src-tauri/src/main.rs`, `desktop/src-tauri/tauri.conf.json` |
+| `scripts/` | local preview and validation helpers | `scripts/preview_full_system.sh` |
 | `docs/` | context, process, deployment/instruction references | `docs/context/CURRENT_STATUS.md`, `docs/context/SESSION_BOOTSTRAP.md` |
 
 ---
@@ -247,15 +247,11 @@ This is the edit-safety reference for minimal-diff, contract-preserving changes.
 
 ---
 
-## 8) Desktop Shell Feature -> File Map (`desktop/`)
-- Tauri runtime entry:
-  - `desktop/src-tauri/src/main.rs`
-- Tauri app/window/bundle config:
-  - `desktop/src-tauri/tauri.conf.json`
-- Scripts/dependencies:
-  - `desktop/package.json`
-- Usage notes:
-  - `desktop/README.md`
+## 8) Deployment and Validation Feature -> File Map
+- Windows startup and packaging instructions:
+  - `docs/instructions/deployment/windows_local_startup.md`
+- Full-system local smoke preview:
+  - `scripts/preview_full_system.sh`
 
 ---
 

@@ -102,15 +102,4 @@ PY
 
 echo "[preview] Dashboard URL: $BASE_URL/dashboard"
 
-if [[ -f "$ROOT_DIR/desktop/package.json" ]]; then
-  echo "[preview] Desktop shell check"
-  if (cd "$ROOT_DIR/desktop" && npm ls --depth=0 >/tmp/preview_desktop_ls.txt 2>&1); then
-    echo "[preview] Desktop dependencies installed. You can run:"
-    echo "          cd desktop && npm run dev"
-  else
-    echo "[preview] Desktop deps missing. Install with:"
-    echo "          cd desktop && npm install"
-  fi
-fi
-
 echo "[preview] Completed"

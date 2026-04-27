@@ -1,11 +1,11 @@
-# Current Project Status (2026-03-28)
+# Current Project Status (2026-04-27)
 
 This file is the primary status snapshot for new sessions.
 
 ## 1. System Topology
 
 - Primary host: Windows 10 PC (`backend/app/main.py` + local SQLite + retention + alert engine).
-- Desktop shell: Tauri (`desktop/src-tauri`) loading local dashboard.
+- Windows runtime: packaged/local backend process serving dashboard to browser.
 - Frontend: React dashboard (`web_dashboard_ui`) served at `/dashboard`.
 - Monitored areas: Living Room and Door Entrance Area.
 
@@ -29,7 +29,7 @@ RTSP path:
 
 - Backend: `python backend/run_backend.py`
 - Dashboard: `http://127.0.0.1:8765/dashboard`
-- Desktop shell: `cd desktop && npm run dev`
+- Windows packaging/startup guide: `docs/instructions/deployment/windows_local_startup.md`
 
 ## 4. Core Modules
 
@@ -59,6 +59,6 @@ Use these docs in order for implementation guidance:
 2. `docs/instructions/transport/http_quick_start.md`
 3. `docs/instructions/transport/http_deployment.md`
 4. `docs/instructions/camera/rtsp_dual_camera.md`
-5. `docs/instructions/deployment/windows_desktop_autostart.md`
+5. `docs/instructions/deployment/windows_local_startup.md`
 
 Archive docs are not primary source of truth for active implementation.

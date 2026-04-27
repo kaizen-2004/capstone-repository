@@ -19,7 +19,7 @@ When a new session says "use docs directory," this read order is the expected bo
 - `docs/instructions/transport/http_deployment.md`
 - `docs/instructions/hardware_wiring.md`
 - `docs/instructions/camera/rtsp_dual_camera.md`
-- `docs/instructions/deployment/windows_desktop_autostart.md`
+- `docs/instructions/deployment/windows_local_startup.md` (Windows backend + browser startup)
 
 ## Context Docs
 

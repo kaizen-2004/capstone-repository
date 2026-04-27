@@ -20,9 +20,9 @@ Use this checklist at the start of a coding session.
 
 7. `docs/instructions/camera/rtsp_dual_camera.md`
 
-### Desktop deployment / startup
+### Windows deployment / startup
 
-8. `docs/instructions/deployment/windows_desktop_autostart.md`
+8. `docs/instructions/deployment/windows_local_startup.md`
 
 ## Runtime Defaults
 
