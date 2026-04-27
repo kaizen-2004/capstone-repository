@@ -252,7 +252,7 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
-                                    '${snapshot.severity.toUpperCase()} • ${snapshot.sourceNode} • ${snapshot.location}',
+                                    '${snapshot.severity.toUpperCase()} • ${snapshot.sourceNodeLabel} • ${snapshot.location}',
                                     maxLines: 2,
                                     overflow: TextOverflow.ellipsis,
                                   ),

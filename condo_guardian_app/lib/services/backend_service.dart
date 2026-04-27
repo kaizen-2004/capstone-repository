@@ -98,6 +98,27 @@ class BackendService {
     };
   }
 
+  bool _isOnLocalDay(DateTime value, DateTime localDay) {
+    final local = value.toLocal();
+    return local.year == localDay.year &&
+        local.month == localDay.month &&
+        local.day == localDay.day;
+  }
+
+  List<T> _filterByLocalDay<T>(
+    List<T> items,
+    DateTime? localDate,
+    DateTime Function(T item) getTimestamp,
+  ) {
+    if (localDate == null) {
+      return items;
+    }
+    final day = DateTime(localDate.year, localDate.month, localDate.day);
+    return items
+        .where((item) => _isOnLocalDay(getTimestamp(item), day))
+        .toList();
+  }
+
   Future<String> loginAndGetToken({
     required String username,
     required String password,
@@ -153,18 +174,23 @@ class BackendService {
   }
 
   Future<List<AlertItem>> fetchAlerts({DateTime? localDate}) async {
-    final query = _localDayQuery(localDate);
+    final query = localDate == null
+        ? <String, dynamic>{}
+        : <String, dynamic>{'limit': 500, ..._localDayQuery(localDate)};
     final json = query.isEmpty
         ? await apiClient.getJson('api/alerts')
         : await apiClient.getJson('api/alerts', query: query);
     final items = (json['alerts'] as List<dynamic>? ?? <dynamic>[])
         .map((item) => AlertItem.fromJson(item as Map<String, dynamic>))
         .toList();
-    return items;
+    return _filterByLocalDay(items, localDate, (item) => item.createdAt);
   }
 
   Future<List<AlertItem>> fetchEvents({DateTime? localDate}) async {
-    final query = <String, dynamic>{'limit': 200, ..._localDayQuery(localDate)};
+    final query = <String, dynamic>{
+      'limit': localDate == null ? 200 : 500,
+      ..._localDayQuery(localDate),
+    };
     final json = await apiClient.getJson(
       'api/events',
       query: query,
@@ -172,11 +198,14 @@ class BackendService {
     final items = (json['events'] as List<dynamic>? ?? <dynamic>[])
         .map((item) => AlertItem.fromJson(item as Map<String, dynamic>))
         .toList();
-    return items;
+    return _filterByLocalDay(items, localDate, (item) => item.createdAt);
   }
 
   Future<List<SnapshotItem>> fetchSnapshots({DateTime? localDate}) async {
-    final query = <String, dynamic>{'limit': 300, ..._localDayQuery(localDate)};
+    final query = <String, dynamic>{
+      'limit': localDate == null ? 300 : 500,
+      ..._localDayQuery(localDate),
+    };
     final json = await apiClient.getJson(
       'api/alerts',
       query: query,
@@ -185,7 +214,7 @@ class BackendService {
         .map((item) => SnapshotItem.fromJson(item as Map<String, dynamic>))
         .where((item) => item.snapshotPath.isNotEmpty)
         .toList();
-    return items;
+    return _filterByLocalDay(items, localDate, (item) => item.capturedAt);
   }
 
   Future<void> deleteSnapshot(String alertId) async {

@@ -401,9 +401,9 @@ class _SensorRow extends StatelessWidget {
                 style: Theme.of(context)
                     .textTheme
                     .bodyLarge
-                    ?.copyWith(fontSize: 14),
+                    ?.copyWith(fontSize: 13),
                 overflow: TextOverflow.ellipsis,
-                maxLines: 1,
+                maxLines: 2,
               ),
             ),
             const SizedBox(width: 8),
@@ -414,6 +414,7 @@ class _SensorRow extends StatelessWidget {
                 Text(
                   displayValue,
                   style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                    fontSize: 12,
                     color: cs.onSurface,
                     fontFeatures: [const FontFeature.tabularFigures()],
                   ),
@@ -476,7 +477,7 @@ class _NodeRow extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    node.nodeId,
+                    node.displayName,
                     style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                           fontSize: 13,
                           fontWeight: FontWeight.w600,

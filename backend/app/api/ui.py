@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,14 @@ router = APIRouter(tags=["ui"])
 
 FACE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.35
 FIRE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.35
+
+ASSISTANT_NODE_LABELS: dict[str, str] = {
+    "cam_indoor": "Indoor Camera",
+    "cam_door": "Door Camera",
+    "smoke_node1": "Smoke Node 1",
+    "smoke_node2": "Smoke Node 2",
+    "door_force": "Door Sensor",
+}
 
 
 def _face_debug_enabled_for_node(node_id: str, requested: bool) -> bool:
@@ -72,6 +81,25 @@ def _is_dashboard_noise_node(node_id: str) -> bool:
         normalized.startswith(prefix)
         for prefix in store.DASHBOARD_NOISE_NODE_PREFIXES
     )
+
+
+def _assistant_node_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "Unknown node"
+    normalized = raw.lower()
+    return ASSISTANT_NODE_LABELS.get(normalized, raw)
+
+
+def _assistant_friendly_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    for node_id, label in ASSISTANT_NODE_LABELS.items():
+        pattern = re.compile(rf"\b{re.escape(node_id)}\b", flags=re.IGNORECASE)
+        text = pattern.sub(label, text)
+    return text
 
 
 def _face_overlays_from_details(details: dict[str, Any]) -> list[dict[str, Any]]:
@@ -764,16 +792,22 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
         )
         total = len(node_rows)
         answer = (
-            f"System is online. {online} of {total} monitored nodes are online, "
-            f"with {len(active_alerts)} active alerts."
+            f"The system is online. {online} of {total} monitored nodes are online, "
+            f"and there are {len(active_alerts)} active alerts."
         )
     elif resolved_id == "last_alert_reason":
         if alerts:
             latest = _alert_to_ui(alerts[0])
+            title = _assistant_friendly_text(latest.get("title") or "Alert")
+            source_node = _assistant_node_label(latest.get("source_node"))
+            location = str(latest.get("location") or "").strip()
+            detail = _assistant_friendly_text(
+                latest.get("description") or "No extra details were provided."
+            )
+            location_text = f" in {location}" if location else ""
             answer = (
-                f"The latest alert is '{latest.get('title')}' from "
-                f"{latest.get('source_node')} at {latest.get('location')}. "
-                f"Detail: {latest.get('description') or 'No description provided.'}"
+                f"The latest alert is '{title}' from {source_node}{location_text}. "
+                f"{detail}"
             )
         else:
             answer = "No alerts have been recorded yet."
@@ -787,11 +821,13 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
             None,
         )
         if smoke_event is None:
-            answer = "No SMOKE_HIGH event is currently recorded in recent logs."
+            answer = "No recent high-smoke detection is recorded."
         else:
+            source_node = _assistant_node_label(smoke_event.get("source_node"))
+            location = str(smoke_event.get("location") or "").strip()
+            location_text = f" in {location}" if location else ""
             answer = (
-                f"The latest smoke-high detection came from {smoke_event.get('source_node')} "
-                f"in {smoke_event.get('location')}."
+                f"The most recent high-smoke detection came from {source_node}{location_text}."
             )
     elif resolved_id == "are_any_nodes_offline":
         offline_nodes = [
@@ -802,8 +838,11 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
         if not offline_nodes:
             answer = "All monitored nodes are currently online."
         else:
-            labels = ", ".join(str(row.get("id") or "node") for row in offline_nodes)
-            answer = f"Offline nodes detected: {labels}."
+            labels = ", ".join(
+                _assistant_node_label(row.get("id") or "node")
+                for row in offline_nodes
+            )
+            answer = f"These nodes are currently offline: {labels}."
     elif resolved_id == "recent_intrusion_events":
         intrusion_rows = [
             row
@@ -814,9 +853,11 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
             answer = "No recent intrusion events are recorded."
         else:
             first = intrusion_rows[0]
+            source_node = _assistant_node_label(first.get("source_node"))
+            title = _assistant_friendly_text(first.get("title") or "Intrusion event")
             answer = (
-                f"Recent intrusion activity includes {len(intrusion_rows)} event(s); "
-                f"latest is {first.get('event_code')} from {first.get('source_node')}."
+                f"There are {len(intrusion_rows)} recent intrusion events. "
+                f"The latest is '{title}' from {source_node}."
             )
     elif resolved_id == "explain_current_warning":
         warning_alert = next(
@@ -828,12 +869,17 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
             None,
         )
         if warning_alert is None:
-            answer = "There is no active warning-level alert to explain right now."
+            answer = "There is no active warning alert right now."
         else:
             latest = _alert_to_ui(warning_alert)
+            title = _assistant_friendly_text(latest.get("title") or "Warning")
+            source_node = _assistant_node_label(latest.get("source_node"))
+            detail = _assistant_friendly_text(
+                latest.get("description") or "Please open Alerts for details."
+            )
             answer = (
-                f"Current warning is '{latest.get('title')}' from {latest.get('source_node')}. "
-                f"It indicates: {latest.get('description') or 'See alert details in dashboard.'}"
+                f"Current warning is '{title}' from {source_node}. "
+                f"{detail}"
             )
     else:
         answer = "Unsupported assistant question. Use a predefined question_id."
