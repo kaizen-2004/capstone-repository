@@ -1,0 +1,59 @@
+name: Validate Backend and Dashboard
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - perf/**
+  pull_request:
+    branches:
+      - main
+      - perf/**
+
+jobs:
+  backend-tests:
+    name: Backend API Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install backend dependencies
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python -r requirements.txt pytest
+
+      - name: Run focused backend tests
+        run: |
+          PYTHONPATH=. uv run --python .venv/bin/python pytest backend/tests/test_api_basics.py -q
+
+  dashboard-build:
+    name: Dashboard Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web_dashboard_ui/package-lock.json
+
+      - name: Build dashboard assets
+        working-directory: web_dashboard_ui
+        run: |
+          npm ci
+          npm run build
