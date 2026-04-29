@@ -11,7 +11,7 @@ import type {
   ServiceStatus,
   SeverityLevel,
   SystemHealth,
-} from './mockData';
+} from './types';
 
 type Json = Record<string, unknown>;
 
@@ -46,8 +46,74 @@ export interface RuntimeSettingUpdatePayload {
   liveApply: boolean;
 }
 
+export interface BackupStatusPayload {
+  ok: boolean;
+  count: number;
+  files: Array<{
+    name: string;
+    sizeBytes: number;
+    modifiedTs: string;
+  }>;
+  latest: {
+    name: string;
+    sizeBytes: number;
+    modifiedTs: string;
+  } | null;
+}
+
+export interface BackupCreatePayload {
+  ok: boolean;
+  name: string;
+  sizeBytes: number;
+}
+
+export interface BackupRestorePayload {
+  ok: boolean;
+  name: string;
+  snapshotsRestored: number;
+  rollbackBackupName: string;
+  scope: 'database_only' | 'database_and_snapshots';
+  message: string;
+}
+
+export interface RetentionStatusPayload {
+  ok: boolean;
+  eventRetentionDays: number;
+  logRetentionDays: number;
+  regularSnapshotRetentionDays: number;
+  criticalSnapshotRetentionDays: number;
+  lastRunTs: string;
+  lastEventsDeleted: number;
+  lastLogsDeleted: number;
+  lastSnapshotsDeleted: number;
+}
+
+export interface AlertReviewUpdatePayload {
+  ok: boolean;
+  alert: Alert;
+}
+
+export interface AlertReviewHistoryEntry {
+  id: number;
+  alertId: number;
+  previousStatus: string;
+  nextStatus: string;
+  note: string;
+  reviewedBy: string;
+  reviewedTs: string;
+}
+
 export interface AuthUser {
   username: string;
+}
+
+export interface PasswordResetResult {
+  ok: boolean;
+  message: string;
+}
+
+export interface RecoveryCodeResult extends PasswordResetResult {
+  recoveryCode: string;
 }
 
 export interface FaceTrainingStatus {
@@ -220,7 +286,7 @@ function mapFaceOverlay(raw: Json): FaceOverlay | null {
   };
 }
 
-function mapAlert(raw: Json): Alert {
+function mapAlert(raw: Json, kind: 'alert' | 'event' = 'event'): Alert {
   const sourceNode = String(raw.source_node ?? raw.sourceNode ?? 'unknown');
   const location = String(raw.location ?? 'Door Entrance Area');
   const eventCode = String(raw.event_code ?? raw.eventCode ?? 'EVENT');
@@ -237,8 +303,15 @@ function mapAlert(raw: Json): Alert {
     .map((item) => mapFaceOverlay((item as Json) || {}))
     .filter((item): item is FaceOverlay => item !== null);
 
+  const rawId = String(raw.id ?? '').trim();
+  const normalizedId = rawId
+    ? (rawId.startsWith('alert-') || rawId.startsWith('event-')
+        ? rawId
+        : `${kind}-${rawId}`)
+    : '';
+
   return {
-    id: String(raw.id ?? ''),
+    id: normalizedId,
     timestamp: String(raw.timestamp ?? ''),
     severity: normalizeSeverity(raw.severity),
     type: normalizeEventType(raw.type),
@@ -248,6 +321,10 @@ function mapAlert(raw: Json): Alert {
     title: String(raw.title ?? eventCode),
     description: String(raw.description ?? ''),
     acknowledged: Boolean(raw.acknowledged),
+    reviewStatus: String(raw.review_status ?? raw.reviewStatus ?? 'needs_review').toLowerCase() as Alert['reviewStatus'],
+    reviewNote: String(raw.review_note ?? raw.reviewNote ?? ''),
+    reviewedBy: String(raw.reviewed_by ?? raw.reviewedBy ?? ''),
+    reviewedTs: String(raw.reviewed_ts ?? raw.reviewedTs ?? ''),
     responseTimeMs,
     confidence,
     fusionEvidence,
@@ -388,8 +465,113 @@ export async function fetchLiveEvents(limit = 250): Promise<LiveEventsPayload> {
   const alertsRaw = Array.isArray(payload.alerts) ? payload.alerts : [];
   const eventsRaw = Array.isArray(payload.events) ? payload.events : [];
   return {
-    alerts: alertsRaw.map((row) => mapAlert(row as Json)),
-    events: eventsRaw.map((row) => mapAlert(row as Json)),
+    alerts: alertsRaw.map((row) => mapAlert(row as Json, 'alert')),
+    events: eventsRaw.map((row) => mapAlert(row as Json, 'event')),
+  };
+}
+
+export async function updateAlertReview(
+  alertId: number,
+  reviewStatus: 'needs_review' | 'confirmed' | 'false_positive' | 'resolved' | 'archived',
+  reviewNote: string,
+): Promise<AlertReviewUpdatePayload> {
+  const payload = await fetchJson<Json>(`/api/alerts/${alertId}/review`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      review_status: reviewStatus,
+      review_note: reviewNote,
+    }),
+  });
+  return {
+    ok: Boolean(payload.ok),
+    alert: mapAlert((payload.alert as Json) || {}, 'alert'),
+  };
+}
+
+export async function fetchAlertReviewHistory(
+  alertId: number,
+  limit = 50,
+): Promise<AlertReviewHistoryEntry[]> {
+  const payload = await fetchJson<Json>(`/api/alerts/${alertId}/review/history?limit=${Math.max(1, Math.min(limit, 200))}`);
+  const rows = Array.isArray(payload.history) ? payload.history : [];
+  return rows.map((row) => {
+    const item = (row as Json) || {};
+    return {
+      id: toInt(item.id),
+      alertId: toInt(item.alert_id ?? item.alertId),
+      previousStatus: String(item.previous_status ?? item.previousStatus ?? ''),
+      nextStatus: String(item.next_status ?? item.nextStatus ?? ''),
+      note: String(item.note ?? ''),
+      reviewedBy: String(item.reviewed_by ?? item.reviewedBy ?? ''),
+      reviewedTs: String(item.reviewed_ts ?? item.reviewedTs ?? ''),
+    };
+  });
+}
+
+export async function fetchBackupStatus(): Promise<BackupStatusPayload> {
+  const payload = await fetchJson<Json>('/api/ui/backup/status');
+  const latestRaw = payload.latest && typeof payload.latest === 'object' ? (payload.latest as Json) : null;
+  const filesRaw = Array.isArray(payload.files) ? payload.files : [];
+  return {
+    ok: Boolean(payload.ok),
+    count: toInt(payload.count),
+    files: filesRaw.map((item) => {
+      const row = (item as Json) || {};
+      return {
+        name: String(row.name ?? ''),
+        sizeBytes: toInt(row.size_bytes ?? row.sizeBytes),
+        modifiedTs: String(row.modified_ts ?? row.modifiedTs ?? ''),
+      };
+    }),
+    latest: latestRaw
+      ? {
+          name: String(latestRaw.name ?? ''),
+          sizeBytes: toInt(latestRaw.size_bytes ?? latestRaw.sizeBytes),
+          modifiedTs: String(latestRaw.modified_ts ?? latestRaw.modifiedTs ?? ''),
+        }
+      : null,
+  };
+}
+
+export async function createBackup(): Promise<BackupCreatePayload> {
+  const payload = await fetchJson<Json>('/api/ui/backup/create', {
+    method: 'POST',
+  });
+  return {
+    ok: Boolean(payload.ok),
+    name: String(payload.name ?? ''),
+    sizeBytes: toInt(payload.size_bytes ?? payload.sizeBytes),
+  };
+}
+
+export async function restoreBackup(name: string, includeSnapshots: boolean): Promise<BackupRestorePayload> {
+  const payload = await fetchJson<Json>('/api/ui/backup/restore', {
+    method: 'POST',
+    body: JSON.stringify({ name, include_snapshots: includeSnapshots }),
+  });
+  return {
+    ok: Boolean(payload.ok),
+    name: String(payload.name ?? ''),
+    snapshotsRestored: toInt(payload.snapshots_restored ?? payload.snapshotsRestored),
+    rollbackBackupName: String(payload.rollback_backup_name ?? payload.rollbackBackupName ?? ''),
+    scope: String(payload.scope ?? 'database_only') === 'database_and_snapshots' ? 'database_and_snapshots' : 'database_only',
+    message: String(payload.message ?? 'Backup restored.'),
+  };
+}
+
+export async function fetchRetentionStatus(): Promise<RetentionStatusPayload> {
+  const payload = await fetchJson<Json>('/api/ui/retention/status');
+  return {
+    ok: Boolean(payload.ok),
+    eventRetentionDays: toInt(payload.event_retention_days ?? payload.eventRetentionDays),
+    logRetentionDays: toInt(payload.log_retention_days ?? payload.logRetentionDays),
+    regularSnapshotRetentionDays: toInt(payload.regular_snapshot_retention_days ?? payload.regularSnapshotRetentionDays),
+    criticalSnapshotRetentionDays: toInt(payload.critical_snapshot_retention_days ?? payload.criticalSnapshotRetentionDays),
+    lastRunTs: String(payload.last_run_ts ?? payload.lastRunTs ?? ''),
+    lastEventsDeleted: toInt(payload.last_events_deleted ?? payload.lastEventsDeleted),
+    lastLogsDeleted: toInt(payload.last_logs_deleted ?? payload.lastLogsDeleted),
+    lastSnapshotsDeleted: toInt(payload.last_snapshots_deleted ?? payload.lastSnapshotsDeleted),
   };
 }
 
@@ -572,6 +754,52 @@ export async function logout(): Promise<void> {
   await fetchJson<Json>('/api/auth/logout', {
     method: 'POST',
   });
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<PasswordResetResult> {
+  const payload = await fetchJson<Json>('/api/auth/change-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  });
+  return {
+    ok: Boolean(payload.ok),
+    message: String(payload.message ?? 'Password updated.'),
+  };
+}
+
+export async function regenerateRecoveryCode(): Promise<RecoveryCodeResult> {
+  const payload = await fetchJson<Json>('/api/auth/recovery-code/regenerate', {
+    method: 'POST',
+  });
+  return {
+    ok: Boolean(payload.ok),
+    message: String(payload.message ?? ''),
+    recoveryCode: String(payload.recovery_code ?? payload.recoveryCode ?? ''),
+  };
+}
+
+export async function resetPasswordWithRecoveryCode(
+  username: string,
+  recoveryCode: string,
+  newPassword: string,
+): Promise<PasswordResetResult> {
+  const payload = await fetchJson<Json>('/api/auth/reset-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username,
+      recovery_code: recoveryCode,
+      new_password: newPassword,
+    }),
+  });
+  return {
+    ok: Boolean(payload.ok),
+    message: String(payload.message ?? 'Password reset successfully.'),
+  };
 }
 
 export async function fetchMobileRemoteStatus(): Promise<MobileRemoteStatus> {

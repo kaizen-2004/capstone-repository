@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Search, Filter, Calendar, X, Image as ImageIcon } from 'lucide-react';
-import { fetchLiveEvents } from '../data/liveApi';
-import { recentEvents as fallbackRecentEvents } from '../data/mockData';
-import type { Alert, SeverityLevel, EventType } from '../data/mockData';
+import { fetchAlertReviewHistory, fetchLiveEvents, updateAlertReview, type AlertReviewHistoryEntry } from '../data/liveApi';
+import type { Alert, SeverityLevel, EventType } from '../data/types';
 import { StatusBadge } from '../components/StatusBadge';
 
 type TimeRange = '24h' | '7d' | '30d' | 'all';
+type ReviewView = 'queue' | 'history';
+type ReviewStatus = 'needs_review' | 'confirmed' | 'false_positive' | 'resolved' | 'archived';
 
 const DEFAULT_TIME_RANGE: TimeRange = '7d';
 const TIME_RANGE_DAYS: Record<Exclude<TimeRange, 'all'>, number> = {
@@ -17,6 +18,12 @@ const TIME_RANGE_DAYS: Record<Exclude<TimeRange, 'all'>, number> = {
 
 const displayEventCode = (eventCode: string) =>
   eventCode === 'UNKNOWN' ? 'NON-AUTHORIZED' : eventCode;
+
+const formatReviewStatusLabel = (value: string) =>
+  value
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .trim();
 
 function toCsvCell(value: unknown): string {
   const raw = String(value ?? '');
@@ -41,25 +48,37 @@ function downloadCsv(fileName: string, rows: Array<Array<unknown>>): void {
 
 export function EventsAlerts() {
   const navigate = useNavigate();
-  const [events, setEvents] = useState<Alert[]>(fallbackRecentEvents);
+  const [events, setEvents] = useState<Alert[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSeverity, setSelectedSeverity] = useState<SeverityLevel | 'all'>('all');
   const [selectedType, setSelectedType] = useState<EventType | 'all'>('all');
+  const [reviewView, setReviewView] = useState<ReviewView>('queue');
+  const [selectedReviewStatus, setSelectedReviewStatus] = useState<ReviewStatus | 'all'>('all');
   const [selectedTimeRange, setSelectedTimeRange] = useState<TimeRange>(DEFAULT_TIME_RANGE);
   const [selectedEvent, setSelectedEvent] = useState<Alert | null>(null);
   const [snapshotLoadFailed, setSnapshotLoadFailed] = useState(false);
   const [ackPendingId, setAckPendingId] = useState<string | null>(null);
+  const [reviewStatusDraft, setReviewStatusDraft] = useState<'needs_review' | 'confirmed' | 'false_positive' | 'resolved' | 'archived'>('needs_review');
+  const [reviewNoteDraft, setReviewNoteDraft] = useState('');
+  const [reviewSaving, setReviewSaving] = useState(false);
+  const [reviewFeedback, setReviewFeedback] = useState('');
+  const [reviewError, setReviewError] = useState('');
+  const [reviewHistory, setReviewHistory] = useState<AlertReviewHistoryEntry[]>([]);
+  const [reviewHistoryLoading, setReviewHistoryLoading] = useState(false);
+  const [selectedAlertIds, setSelectedAlertIds] = useState<Set<string>>(new Set());
+  const [bulkReviewStatus, setBulkReviewStatus] = useState<ReviewStatus>('resolved');
+  const [bulkReviewNote, setBulkReviewNote] = useState('');
+  const [bulkSaving, setBulkSaving] = useState(false);
+  const [bulkResult, setBulkResult] = useState<{ updated: number; failed: number } | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
   const handleAcknowledge = async (id: string) => {
-    if (!id.startsWith('alert-')) {
-      return;
-    }
-
     setAckPendingId(id);
     setEvents((prev) => prev.map((event) => (event.id === id ? { ...event, acknowledged: true } : event)));
     setSelectedEvent((prev) => (prev && prev.id === id ? { ...prev, acknowledged: true } : prev));
 
-    const numericId = Number.parseInt(id.replace('alert-', ''), 10);
+    const numericId = Number.parseInt(id.replace(/^alert-/, ''), 10);
     if (!Number.isFinite(numericId) || numericId <= 0) {
       setAckPendingId(null);
       return;
@@ -93,8 +112,16 @@ export function EventsAlerts() {
             (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
           ),
         );
-      } catch {
-        // Keep fallback data if API is unavailable.
+        setLoadError('');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unable to load live events.';
+        if (!cancelled) {
+          setLoadError(message);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
     };
 
@@ -113,6 +140,162 @@ export function EventsAlerts() {
     setSnapshotLoadFailed(false);
   }, [selectedEvent?.id, selectedEvent?.snapshotPath]);
 
+  useEffect(() => {
+    if (!selectedEvent) {
+      return;
+    }
+    setReviewStatusDraft(selectedEvent.reviewStatus || 'needs_review');
+    setReviewNoteDraft(selectedEvent.reviewNote || '');
+    setReviewFeedback('');
+    setReviewError('');
+
+    if (!selectedEvent.id.startsWith('alert-')) {
+      setReviewHistory([]);
+      return;
+    }
+
+    const alertId = Number.parseInt(selectedEvent.id.replace(/^alert-/, ''), 10);
+    if (!Number.isFinite(alertId) || alertId <= 0) {
+      setReviewHistory([]);
+      return;
+    }
+
+    let cancelled = false;
+    setReviewHistoryLoading(true);
+    void fetchAlertReviewHistory(alertId)
+      .then((entries) => {
+        if (!cancelled) {
+          setReviewHistory(entries);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setReviewHistory([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setReviewHistoryLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEvent]);
+
+  const handleSaveReview = async () => {
+    if (!selectedEvent || !selectedEvent.id.startsWith('alert-')) {
+      setReviewError('This record cannot be reviewed as an alert.');
+      return;
+    }
+    const alertId = Number.parseInt(selectedEvent.id.replace(/^alert-/, ''), 10);
+    if (!Number.isFinite(alertId) || alertId <= 0) {
+      setReviewError('Invalid alert ID. Refresh the page and try again.');
+      return;
+    }
+
+    setReviewSaving(true);
+    setReviewFeedback('');
+    setReviewError('');
+    try {
+      const result = await updateAlertReview(alertId, reviewStatusDraft, reviewNoteDraft);
+      setEvents((prev) =>
+        prev.map((item) => (item.id === selectedEvent.id ? { ...item, ...result.alert } : item)),
+      );
+      setSelectedEvent((prev) =>
+        prev && prev.id === selectedEvent.id ? { ...prev, ...result.alert } : prev,
+      );
+      if (Number.isFinite(alertId) && alertId > 0) {
+        const entries = await fetchAlertReviewHistory(alertId);
+        setReviewHistory(entries);
+      }
+      setReviewFeedback('Review saved.');
+      setSelectedAlertIds((prev) => {
+        if (!prev.has(selectedEvent.id)) {
+          return prev;
+        }
+        const next = new Set(prev);
+        next.delete(selectedEvent.id);
+        return next;
+      });
+      if (reviewView === 'queue' && (result.alert.reviewStatus || reviewStatusDraft) !== 'needs_review') {
+        setSelectedEvent(null);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to save review right now.';
+      setReviewError(message);
+    } finally {
+      setReviewSaving(false);
+    }
+  };
+
+  const toggleAlertSelection = (alertId: string, selected: boolean) => {
+    setSelectedAlertIds((prev) => {
+      const next = new Set(prev);
+      if (selected) {
+        next.add(alertId);
+      } else {
+        next.delete(alertId);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAllVisible = (selected: boolean) => {
+    setSelectedAlertIds((prev) => {
+      const next = new Set(prev);
+      for (const event of queueAlerts) {
+        if (selected) {
+          next.add(event.id);
+        } else {
+          next.delete(event.id);
+        }
+      }
+      return next;
+    });
+  };
+
+  const handleBulkApplyReview = async () => {
+    const ids = Array.from(selectedAlertIds).filter((id) => id.startsWith('alert-'));
+    if (ids.length === 0) {
+      return;
+    }
+    setBulkSaving(true);
+    setBulkResult(null);
+    try {
+      const updates = await Promise.allSettled(
+        ids.map(async (id) => {
+          const numericId = Number.parseInt(id.replace(/^alert-/, ''), 10);
+          if (!Number.isFinite(numericId) || numericId <= 0) {
+            return null;
+          }
+          return updateAlertReview(numericId, bulkReviewStatus, bulkReviewNote);
+        }),
+      );
+
+      const byId = new Map<string, Alert>();
+      let failedCount = 0;
+      for (const update of updates) {
+        if (update.status !== 'fulfilled' || !update.value) {
+          failedCount += 1;
+          continue;
+        }
+        byId.set(update.value.alert.id, update.value.alert);
+      }
+      const updatedCount = byId.size;
+      if (byId.size > 0) {
+        setEvents((prev) => prev.map((item) => byId.get(item.id) || item));
+        setSelectedEvent((prev) => (prev ? byId.get(prev.id) || prev : prev));
+      }
+      setSelectedAlertIds(new Set());
+      setBulkReviewNote('');
+      setBulkResult({ updated: updatedCount, failed: failedCount });
+    } finally {
+      setBulkSaving(false);
+    }
+  };
+
   const filteredEvents = useMemo(
     () => {
       const keyword = searchQuery.toLowerCase().trim();
@@ -120,6 +303,16 @@ export function EventsAlerts() {
       const cutoffMs = days == null ? Number.NEGATIVE_INFINITY : Date.now() - days * 24 * 60 * 60 * 1000;
 
       return events.filter((event) => {
+        const isAlert = event.id.startsWith('alert-');
+        const reviewStatus = event.reviewStatus || 'needs_review';
+        const inQueue = isAlert && reviewStatus === 'needs_review';
+        if (reviewView === 'queue' && !inQueue) {
+          return false;
+        }
+        if (reviewView === 'history' && inQueue) {
+          return false;
+        }
+
         const matchesSearch =
           event.title.toLowerCase().includes(keyword) ||
           event.description.toLowerCase().includes(keyword) ||
@@ -127,18 +320,68 @@ export function EventsAlerts() {
           event.sourceNode.toLowerCase().includes(keyword);
         const matchesSeverity = selectedSeverity === 'all' || event.severity === selectedSeverity;
         const matchesType = selectedType === 'all' || event.type === selectedType;
+        const matchesReviewStatus =
+          selectedReviewStatus === 'all' ||
+          (isAlert && reviewStatus === selectedReviewStatus);
         const eventTimeMs = new Date(event.timestamp).getTime();
         const matchesTime = days == null || (Number.isFinite(eventTimeMs) && eventTimeMs >= cutoffMs);
-        return matchesSearch && matchesSeverity && matchesType && matchesTime;
+        return matchesSearch && matchesSeverity && matchesType && matchesReviewStatus && matchesTime;
       });
     },
-    [events, searchQuery, selectedSeverity, selectedType, selectedTimeRange],
+    [events, searchQuery, selectedSeverity, selectedType, selectedReviewStatus, selectedTimeRange, reviewView],
   );
   const hasActiveFilters =
     searchQuery.trim().length > 0 ||
     selectedSeverity !== 'all' ||
     selectedType !== 'all' ||
+    selectedReviewStatus !== 'all' ||
     selectedTimeRange !== DEFAULT_TIME_RANGE;
+
+  const queueAlerts = useMemo(
+    () => filteredEvents.filter((event) => event.id.startsWith('alert-')),
+    [filteredEvents],
+  );
+
+  const selectedQueueCount = useMemo(
+    () => queueAlerts.filter((event) => selectedAlertIds.has(event.id)).length,
+    [queueAlerts, selectedAlertIds],
+  );
+
+  useEffect(() => {
+    if (reviewView !== 'queue') {
+      setSelectedAlertIds(new Set());
+      return;
+    }
+    const allowedIds = new Set(queueAlerts.map((event) => event.id));
+    setSelectedAlertIds((prev) => {
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (allowedIds.has(id)) {
+          next.add(id);
+        }
+      }
+      return next.size === prev.size ? prev : next;
+    });
+  }, [reviewView, queueAlerts]);
+
+  const renderReviewStatus = (event: Alert) => {
+    const status = (event.reviewStatus || 'needs_review') as ReviewStatus;
+    if (!event.id.startsWith('alert-')) {
+      return <span className="text-sm text-gray-600">Event Log</span>;
+    }
+    const label = formatReviewStatusLabel(status);
+    const classes =
+      status === 'needs_review'
+        ? 'bg-amber-50 border-amber-200 text-amber-700'
+        : status === 'confirmed'
+          ? 'bg-red-50 border-red-200 text-red-700'
+          : status === 'false_positive'
+            ? 'bg-blue-50 border-blue-200 text-blue-700'
+            : status === 'resolved'
+              ? 'bg-green-50 border-green-200 text-green-700'
+              : 'bg-gray-50 border-gray-200 text-gray-700';
+    return <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${classes}`}>{label}</span>;
+  };
 
   const formatDateTime = (timestamp: string) => {
     const date = new Date(timestamp);
@@ -183,6 +426,7 @@ export function EventsAlerts() {
     setSearchQuery('');
     setSelectedSeverity('all');
     setSelectedType('all');
+    setSelectedReviewStatus('all');
     setSelectedTimeRange(DEFAULT_TIME_RANGE);
   };
 
@@ -193,7 +437,32 @@ export function EventsAlerts() {
         <p className="text-gray-600 mt-1">
           Search event history by fusion result, event code, severity, and source node.
         </p>
+        <div className="mt-3 inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1">
+          <button
+            onClick={() => setReviewView('queue')}
+            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${reviewView === 'queue' ? 'bg-white border border-gray-200 text-blue-700' : 'text-gray-600 hover:text-gray-900'}`}
+          >
+            Review Queue
+          </button>
+          <button
+            onClick={() => setReviewView('history')}
+            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${reviewView === 'history' ? 'bg-white border border-gray-200 text-blue-700' : 'text-gray-600 hover:text-gray-900'}`}
+          >
+            History
+          </button>
+        </div>
       </div>
+
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          Live event data unavailable: {loadError}
+        </div>
+      )}
+      {isLoading && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
+          Loading live events...
+        </div>
+      )}
 
       <div className="bg-white rounded-lg border border-gray-200 p-3 md:p-4">
         <div className="flex flex-col xl:flex-row gap-3">
@@ -252,10 +521,83 @@ export function EventsAlerts() {
               <option value="all">All Time</option>
             </select>
           </div>
+
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            <Filter className="w-4 h-4 text-gray-500" />
+            <select
+              value={selectedReviewStatus}
+              onChange={(e) => setSelectedReviewStatus(e.target.value as ReviewStatus | 'all')}
+              className="w-full sm:w-auto px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="all">All Review Status</option>
+              <option value="needs_review">Needs Review</option>
+              <option value="confirmed">Confirmed</option>
+              <option value="false_positive">False Positive</option>
+              <option value="resolved">Resolved</option>
+              <option value="archived">Archived</option>
+            </select>
+          </div>
         </div>
+        {reviewView === 'queue' && (
+          <div className="mt-3 pt-3 border-t border-gray-100 space-y-3">
+            <div className="flex items-center gap-3">
+              <label className="inline-flex items-center gap-2 text-xs text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={queueAlerts.length > 0 && queueAlerts.every((event) => selectedAlertIds.has(event.id))}
+                  onChange={(e) => toggleSelectAllVisible(e.target.checked)}
+                />
+                Select all visible alerts
+              </label>
+              <span className="text-xs text-gray-600">Selected: {selectedQueueCount}</span>
+              <span className="text-xs text-gray-600">Critical: {queueAlerts.filter((event) => event.severity === 'critical').length}</span>
+            </div>
+            {bulkResult && (
+              <p
+                className={`text-xs ${bulkResult.failed > 0 ? 'text-amber-700' : 'text-green-700'}`}
+                role="status"
+                aria-live="polite"
+              >
+                Bulk review updated {bulkResult.updated} alert{bulkResult.updated === 1 ? '' : 's'}
+                {bulkResult.failed > 0
+                  ? `; ${bulkResult.failed} failed. Retry to process remaining alerts.`
+                  : ' successfully.'}
+              </p>
+            )}
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-2">
+              <select
+                value={bulkReviewStatus}
+                onChange={(e) => setBulkReviewStatus(e.target.value as ReviewStatus)}
+                className="px-3 py-2 border border-gray-200 rounded-lg text-sm"
+              >
+                <option value="confirmed">Confirmed</option>
+                <option value="false_positive">False Positive</option>
+                <option value="resolved">Resolved</option>
+                <option value="archived">Archived</option>
+                <option value="needs_review">Needs Review</option>
+              </select>
+              <input
+                value={bulkReviewNote}
+                onChange={(e) => setBulkReviewNote(e.target.value)}
+                placeholder="Bulk note (optional)"
+                className="lg:col-span-2 px-3 py-2 border border-gray-200 rounded-lg text-sm"
+              />
+              <button
+                onClick={() => {
+                  void handleBulkApplyReview();
+                }}
+                disabled={bulkSaving || selectedQueueCount === 0}
+                className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+              >
+                {bulkSaving ? 'Applying...' : 'Apply to Selected'}
+              </button>
+            </div>
+          </div>
+        )}
         <div className="mt-3 pt-3 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs md:text-sm text-gray-600">
-            Showing <span className="font-semibold text-gray-900">{filteredEvents.length}</span> events
+            {reviewView === 'queue' ? 'Queue items' : 'History items'}:{' '}
+            <span className="font-semibold text-gray-900">{filteredEvents.length}</span>
           </p>
           {hasActiveFilters && (
             <button
@@ -281,6 +623,21 @@ export function EventsAlerts() {
                 <StatusBadge severity={event.severity} label={event.severity.toUpperCase()} size="sm" />
               </div>
 
+              {reviewView === 'queue' && event.id.startsWith('alert-') && (
+                <label className="inline-flex items-center gap-2 text-xs text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={selectedAlertIds.has(event.id)}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      toggleAlertSelection(event.id, e.target.checked);
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                  Select
+                </label>
+              )}
+
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="text-sm font-semibold text-gray-900 break-words">
@@ -298,11 +655,7 @@ export function EventsAlerts() {
               </div>
 
               <div>
-                {event.acknowledged ? (
-                  <span className="text-xs text-gray-600">Acknowledged</span>
-                ) : (
-                  <span className="text-xs font-medium text-orange-600">Pending Review</span>
-                )}
+                {renderReviewStatus(event)}
               </div>
             </button>
           ))}
@@ -312,6 +665,9 @@ export function EventsAlerts() {
           <table className="w-full min-w-[860px]">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                  Pick
+                </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
                   Time
                 </th>
@@ -341,6 +697,17 @@ export function EventsAlerts() {
             <tbody className="divide-y divide-gray-200">
               {filteredEvents.map((event) => (
                 <tr key={event.id} className="hover:bg-gray-50 transition-colors">
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                    {reviewView === 'queue' && event.id.startsWith('alert-') ? (
+                      <input
+                        type="checkbox"
+                        checked={selectedAlertIds.has(event.id)}
+                        onChange={(e) => toggleAlertSelection(event.id, e.target.checked)}
+                      />
+                    ) : (
+                      '—'
+                    )}
+                  </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                     {formatDateTime(event.timestamp)}
                   </td>
@@ -361,11 +728,7 @@ export function EventsAlerts() {
                     <StatusBadge severity={event.severity} label={event.severity.toUpperCase()} size="sm" />
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
-                    {event.acknowledged ? (
-                      <span className="text-sm text-gray-600">Acknowledged</span>
-                    ) : (
-                      <span className="text-sm font-medium text-orange-600">Pending Review</span>
-                    )}
+                    {renderReviewStatus(event)}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <button
@@ -489,7 +852,7 @@ export function EventsAlerts() {
               </div>
 
               <div className="flex flex-wrap gap-3 pt-4 border-t border-gray-200">
-                {!selectedEvent.acknowledged && selectedEvent.id.startsWith('alert-') && (
+                {!selectedEvent.acknowledged && (
                   <button
                     onClick={() => void handleAcknowledge(selectedEvent.id)}
                     disabled={ackPendingId === selectedEvent.id}
@@ -511,6 +874,80 @@ export function EventsAlerts() {
                   Open Camera Feed
                 </button>
               </div>
+
+              {selectedEvent.id.startsWith('alert-') && (
+                <div className="pt-4 border-t border-gray-200 space-y-3">
+                  <p className="text-sm font-medium text-gray-900">Review Workflow</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <select
+                      value={reviewStatusDraft}
+                      onChange={(event) =>
+                        setReviewStatusDraft(
+                          event.target.value as
+                            | 'needs_review'
+                            | 'confirmed'
+                            | 'false_positive'
+                            | 'resolved'
+                            | 'archived',
+                        )
+                      }
+                      className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                    >
+                      <option value="needs_review">Needs Review</option>
+                      <option value="confirmed">Confirmed</option>
+                      <option value="false_positive">False Positive</option>
+                      <option value="resolved">Resolved</option>
+                      <option value="archived">Archived</option>
+                    </select>
+                    <button
+                      onClick={() => {
+                        void handleSaveReview();
+                      }}
+                      disabled={reviewSaving}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                    >
+                      {reviewSaving ? 'Saving...' : 'Save Review'}
+                    </button>
+                  </div>
+                  {reviewFeedback ? <p className="text-xs text-green-700">{reviewFeedback}</p> : null}
+                  {reviewError ? <p className="text-xs text-red-600">{reviewError}</p> : null}
+                  <textarea
+                    value={reviewNoteDraft}
+                    onChange={(event) => setReviewNoteDraft(event.target.value)}
+                    placeholder="Review notes (optional)"
+                    className="w-full min-h-24 rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                  />
+                  <p className="text-xs text-gray-600">
+                    Last reviewed by {selectedEvent.reviewedBy || '—'}{' '}
+                    {selectedEvent.reviewedTs
+                      ? `at ${new Date(selectedEvent.reviewedTs).toLocaleString()}`
+                      : ''}
+                  </p>
+
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                    <p className="text-xs font-semibold text-gray-800">Review History</p>
+                    {reviewHistoryLoading ? (
+                      <p className="mt-2 text-xs text-gray-600">Loading review history...</p>
+                    ) : reviewHistory.length === 0 ? (
+                      <p className="mt-2 text-xs text-gray-600">No review history yet.</p>
+                    ) : (
+                      <div className="mt-2 space-y-2 max-h-36 overflow-y-auto">
+                        {reviewHistory.map((entry) => (
+                          <div key={entry.id} className="rounded-md border border-gray-200 bg-white px-2 py-1.5">
+                            <p className="text-xs text-gray-800">
+                              {formatReviewStatusLabel(entry.previousStatus)} {'->'} {formatReviewStatusLabel(entry.nextStatus)}
+                            </p>
+                            <p className="text-[11px] text-gray-600">
+                              {entry.reviewedBy || 'admin'} at {new Date(entry.reviewedTs).toLocaleString()}
+                            </p>
+                            {entry.note ? <p className="text-[11px] text-gray-700 mt-1">{entry.note}</p> : null}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

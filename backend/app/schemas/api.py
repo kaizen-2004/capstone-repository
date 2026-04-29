@@ -10,6 +10,17 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=4096)
+    new_password: str = Field(min_length=8, max_length=4096)
+
+
+class ResetPasswordWithRecoveryCodeRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120)
+    recovery_code: str = Field(min_length=8, max_length=256)
+    new_password: str = Field(min_length=8, max_length=4096)
+
+
 class DeviceRegisterRequest(BaseModel):
     node_id: str = Field(min_length=1, max_length=64)
     label: str = Field(min_length=1, max_length=120)
@@ -111,6 +122,16 @@ class MobileNotificationPreferencesRequest(BaseModel):
 class RuntimeSettingUpdateRequest(BaseModel):
     key: str = Field(min_length=1, max_length=64)
     value: str = Field(min_length=0, max_length=4096)
+
+
+class AlertReviewUpdateRequest(BaseModel):
+    review_status: str = Field(min_length=3, max_length=32)
+    review_note: str = Field(default="", max_length=1000)
+
+
+class BackupRestoreRequest(BaseModel):
+    name: str = Field(min_length=5, max_length=255)
+    include_snapshots: bool = False
 
 
 class AssistantQueryRequest(BaseModel):

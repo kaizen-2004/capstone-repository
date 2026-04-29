@@ -13,10 +13,12 @@ import {
 } from 'recharts';
 import { Users, Flame, AlertTriangle, Siren, Timer, ShieldCheck, type LucideIcon } from 'lucide-react';
 import { fetchDailyStats } from '../data/liveApi';
-import { dailyStats as fallbackDailyStats } from '../data/mockData';
+import type { DailyStats } from '../data/types';
 
 export function Statistics() {
-  const [dailyStats, setDailyStats] = useState(fallbackDailyStats);
+  const [dailyStats, setDailyStats] = useState<DailyStats[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -24,11 +26,19 @@ export function Statistics() {
     const load = async () => {
       try {
         const stats = await fetchDailyStats(7);
-        if (!cancelled && stats.length > 0) {
+        if (!cancelled) {
           setDailyStats(stats);
+          setLoadError('');
         }
-      } catch {
-        // Keep fallback data if API is unavailable.
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unable to load live statistics.';
+        if (!cancelled) {
+          setLoadError(message);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
     };
 
@@ -51,7 +61,10 @@ export function Statistics() {
       acc.smoke += day.smokeHighEvents;
       acc.fireAlerts += day.fireAlerts;
       acc.intruderAlerts += day.intruderAlerts;
-      acc.responseSeconds += day.avgResponseSeconds;
+      if (day.avgResponseSeconds > 0) {
+        acc.responseSeconds += day.avgResponseSeconds;
+        acc.responseDays += 1;
+      }
       return acc;
     },
     {
@@ -62,10 +75,18 @@ export function Statistics() {
       fireAlerts: 0,
       intruderAlerts: 0,
       responseSeconds: 0,
+      responseDays: 0,
     },
   );
 
-  const avgResponse = dailyStats.length > 0 ? totals.responseSeconds / dailyStats.length : 0;
+  const avgResponse = totals.responseDays > 0 ? totals.responseSeconds / totals.responseDays : 0;
+  const totalAlerts = totals.fireAlerts + totals.intruderAlerts;
+  const totalFaceDetections = totals.authorized + totals.unknown;
+  const authorizedRatio = totalFaceDetections > 0 ? (totals.authorized / totalFaceDetections) * 100 : 0;
+  const fireEvidenceTotal = totals.flame + totals.smoke;
+  const fireEvidenceConversion = fireEvidenceTotal > 0 ? (totals.fireAlerts / fireEvidenceTotal) * 100 : 0;
+  const alertRate = dailyStats.length > 0 ? totalAlerts / dailyStats.length : 0;
+  const responseScore = avgResponse > 0 ? Math.max(0, 100 - Math.min(100, avgResponse * 20)) : 0;
 
   const chartData = dailyStats.map((day) => ({
     date: new Date(day.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
@@ -107,9 +128,20 @@ export function Statistics() {
       <div>
         <h2 className="text-2xl font-semibold text-gray-900">Statistics</h2>
         <p className="text-gray-600 mt-1">
-          Daily summary aligned with thesis objectives and system performance indicators.
+          Live operational metrics from recorded alerts and sensor events.
         </p>
       </div>
+
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          Live statistics unavailable: {loadError}
+        </div>
+      )}
+      {isLoading && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
+          Loading live statistics...
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard
@@ -247,42 +279,44 @@ export function Statistics() {
               <span className="text-gray-600 flex items-center gap-2">
                 <Timer className="w-4 h-4" /> Average Response Time
               </span>
-              <span className="font-semibold text-gray-900">{avgResponse.toFixed(2)}s</span>
+              <span className="font-semibold text-gray-900">
+                {avgResponse > 0 ? `${avgResponse.toFixed(2)}s` : 'No alert data'}
+              </span>
             </div>
             <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-              <div className="h-full bg-green-600" style={{ width: '84%' }} />
+              <div className="h-full bg-green-600" style={{ width: `${responseScore}%` }} />
             </div>
           </div>
 
           <div className="space-y-2">
             <div className="flex items-center justify-between text-sm">
               <span className="text-gray-600 flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4" /> Face Identification Accuracy
+                <ShieldCheck className="w-4 h-4" /> Authorized Detection Share
               </span>
-              <span className="font-semibold text-gray-900">96.4%</span>
+              <span className="font-semibold text-gray-900">{authorizedRatio.toFixed(1)}%</span>
             </div>
             <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-              <div className="h-full bg-green-600" style={{ width: '96.4%' }} />
+              <div className="h-full bg-green-600" style={{ width: `${Math.min(100, authorizedRatio)}%` }} />
             </div>
           </div>
 
           <div className="space-y-2">
             <div className="flex items-center justify-between text-sm">
-              <span className="text-gray-600">Fire Detection False Positive</span>
-              <span className="font-semibold text-gray-900">3.1%</span>
+              <span className="text-gray-600">Alert Rate</span>
+              <span className="font-semibold text-gray-900">{alertRate.toFixed(2)}/day</span>
             </div>
             <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-              <div className="h-full bg-orange-600" style={{ width: '3.1%' }} />
+              <div className="h-full bg-blue-600" style={{ width: `${Math.min(100, alertRate * 20)}%` }} />
             </div>
           </div>
 
           <div className="space-y-2">
             <div className="flex items-center justify-between text-sm">
-              <span className="text-gray-600">Fire Detection False Negative</span>
-              <span className="font-semibold text-gray-900">4.2%</span>
+              <span className="text-gray-600">Fire Evidence Conversion</span>
+              <span className="font-semibold text-gray-900">{fireEvidenceConversion.toFixed(1)}%</span>
             </div>
             <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-              <div className="h-full bg-orange-600" style={{ width: '4.2%' }} />
+              <div className="h-full bg-orange-600" style={{ width: `${Math.min(100, fireEvidenceConversion)}%` }} />
             </div>
           </div>
         </div>

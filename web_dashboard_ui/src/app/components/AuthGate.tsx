@@ -1,5 +1,11 @@
 import { createContext, FormEvent, ReactNode, useContext, useEffect, useState } from 'react';
-import { fetchAuthMe, login, logout, type AuthUser } from '../data/liveApi';
+import {
+  fetchAuthMe,
+  login,
+  logout,
+  resetPasswordWithRecoveryCode,
+  type AuthUser,
+} from '../data/liveApi';
 
 interface AuthGateProps {
   children: ReactNode;
@@ -25,6 +31,9 @@ export function AuthGate({ children }: AuthGateProps) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
+  const [resetMode, setResetMode] = useState(false);
+  const [recoveryCode, setRecoveryCode] = useState('');
+  const [newPassword, setNewPassword] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -77,6 +86,25 @@ export function AuthGate({ children }: AuthGateProps) {
     setUser(null);
   };
 
+  const handleResetPassword = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError('');
+    try {
+      await resetPasswordWithRecoveryCode(username.trim(), recoveryCode.trim(), newPassword);
+      setResetMode(false);
+      setRecoveryCode('');
+      setNewPassword('');
+      setPassword('');
+      setError('Password reset successful. Sign in with your new password.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Password reset failed';
+      setError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="h-screen w-screen flex items-center justify-center bg-gray-50 text-gray-700">
@@ -89,12 +117,16 @@ export function AuthGate({ children }: AuthGateProps) {
     return (
       <div className="h-screen w-screen bg-gray-50 flex items-center justify-center p-4">
         <div className="w-full max-w-md bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-          <h1 className="text-xl font-semibold text-gray-900">Admin Login</h1>
+          <h1 className="text-xl font-semibold text-gray-900">
+            {resetMode ? 'Reset Password' : 'Admin Login'}
+          </h1>
           <p className="text-sm text-gray-600 mt-1">
-            Sign in to access the local monitoring dashboard.
+            {resetMode
+              ? 'Use your recovery code to set a new password.'
+              : 'Sign in to access the local monitoring dashboard.'}
           </p>
 
-          <form className="mt-5 space-y-4" onSubmit={handleLogin}>
+          <form className="mt-5 space-y-4" onSubmit={resetMode ? handleResetPassword : handleLogin}>
             <label className="block">
               <span className="text-sm text-gray-700">Username</span>
               <input
@@ -106,15 +138,35 @@ export function AuthGate({ children }: AuthGateProps) {
             </label>
 
             <label className="block">
-              <span className="text-sm text-gray-700">Password</span>
+              <span className="text-sm text-gray-700">{resetMode ? 'Recovery Code' : 'Password'}</span>
               <input
-                type="password"
+                type={resetMode ? 'text' : 'password'}
                 className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                value={resetMode ? recoveryCode : password}
+                onChange={(e) => {
+                  if (resetMode) {
+                    setRecoveryCode(e.target.value);
+                  } else {
+                    setPassword(e.target.value);
+                  }
+                }}
                 required
               />
             </label>
+
+            {resetMode && (
+              <label className="block">
+                <span className="text-sm text-gray-700">New Password</span>
+                <input
+                  type="password"
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  required
+                  minLength={8}
+                />
+              </label>
+            )}
 
             {error && <p className="text-sm text-red-600">{error}</p>}
 
@@ -123,7 +175,23 @@ export function AuthGate({ children }: AuthGateProps) {
               disabled={submitting}
               className="w-full rounded-lg bg-gray-900 text-white py-2 text-sm font-medium hover:bg-black disabled:opacity-50"
             >
-              {submitting ? 'Signing in...' : 'Sign In'}
+              {submitting
+                ? (resetMode ? 'Resetting...' : 'Signing in...')
+                : (resetMode ? 'Reset Password' : 'Sign In')}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setResetMode((value) => !value);
+                setError('');
+                setPassword('');
+                setRecoveryCode('');
+                setNewPassword('');
+              }}
+              className="w-full text-sm text-blue-600 hover:text-blue-700"
+            >
+              {resetMode ? 'Back to sign in' : 'Forgot password? Use recovery code'}
             </button>
           </form>
         </div>

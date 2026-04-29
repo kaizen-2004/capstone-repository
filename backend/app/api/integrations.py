@@ -167,7 +167,9 @@ def mobile_bootstrap(request: Request) -> dict:
         "mobile_remote_enabled": _mobile_remote_enabled(),
         "route": MOBILE_REMOTE_ROUTE,
         "lan_base_url": _resolve_lan_base_url(request),
-        "tailscale_base_url": settings.tailscale_base_url,
+        "tailscale_base_url": _extract_base_url(
+            str(access_links.get("tailscale_url", ""))
+        ),
         "mdns_base_url": _extract_base_url(str(access_links.get("mdns_url", ""))),
         "preferred_base_url": _extract_base_url(str(access_links.get("preferred_url", ""))),
         "network_modes": ["auto", "lan", "tailscale"],

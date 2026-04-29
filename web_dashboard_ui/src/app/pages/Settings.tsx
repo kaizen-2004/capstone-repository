@@ -5,7 +5,6 @@ import {
   Database,
   Link2,
   Pencil,
-  Save,
   Shield,
   User,
   UserPlus,
@@ -22,6 +21,11 @@ import {
   fetchMobileRemoteStatus,
   fetchRemoteAccessLinks,
   fetchSettingsLive,
+  changePassword,
+  createBackup,
+  regenerateRecoveryCode,
+  fetchBackupStatus,
+  fetchRetentionStatus,
   setMobileRemoteEnabled,
   trainFaceModel,
   updateFaceProfile,
@@ -29,14 +33,11 @@ import {
   type FaceTrainingStatus,
   type MdnsStatusPayload,
   type MobileRemoteStatus,
+  type BackupStatusPayload,
+  type RetentionStatusPayload,
   type RemoteAccessLinksPayload,
 } from '../data/liveApi';
-import {
-  runtimeSettings as fallbackRuntimeSettings,
-  systemProfile,
-  type AuthorizedProfile,
-  type RuntimeSetting,
-} from '../data/mockData';
+import type { AuthorizedProfile, RuntimeSetting } from '../data/types';
 
 type GuidedPoseId = 'center' | 'left' | 'right' | 'up' | 'down';
 
@@ -83,6 +84,48 @@ const GUIDED_POSE_PLAN: GuidedPoseStep[] = [
 const GUIDED_CAPTURE_TARGET = 40;
 const GUIDED_CAPTURE_INTERVAL_MS = 1000;
 
+const SETTINGS_NAV = [
+  {
+    id: 'alerts',
+    label: 'Alerts',
+    icon: Bell,
+    sections: [{ id: 'alerts-routing', label: 'Routing' }],
+  },
+  {
+    id: 'profiles',
+    label: 'Profiles',
+    icon: User,
+    sections: [{ id: 'profiles-authorized', label: 'Authorized Faces' }],
+  },
+  {
+    id: 'runtime',
+    label: 'Runtime',
+    icon: Shield,
+    sections: [
+      { id: 'runtime-access', label: 'Access' },
+      { id: 'runtime-controls', label: 'Controls' },
+      { id: 'runtime-security', label: 'Security' },
+      { id: 'runtime-backup', label: 'Backup' },
+    ],
+  },
+  {
+    id: 'mobile',
+    label: 'Mobile',
+    icon: Camera,
+    sections: [{ id: 'mobile-remote', label: 'Remote' }],
+  },
+] as const;
+
+type SettingsStep = (typeof SETTINGS_NAV)[number]['id'];
+type SettingsSection = (typeof SETTINGS_NAV)[number]['sections'][number]['id'];
+
+const DEFAULT_SECTION_BY_STEP: Record<SettingsStep, SettingsSection> = {
+  alerts: 'alerts-routing',
+  profiles: 'profiles-authorized',
+  runtime: 'runtime-access',
+  mobile: 'mobile-remote',
+};
+
 function emptyGuidedPoseCounts(): Record<GuidedPoseId, number> {
   return {
     center: 0,
@@ -117,7 +160,9 @@ function distributeGuidedPoseCounts(totalAccepted: number): {
 
 export function Settings() {
   const [authorizedProfiles, setAuthorizedProfiles] = useState<AuthorizedProfile[]>([]);
-  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSetting[]>(fallbackRuntimeSettings);
+  const [activeSettingsStep, setActiveSettingsStep] = useState<SettingsStep>('alerts');
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>('alerts-routing');
+  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSetting[]>([]);
   const [runtimeDrafts, setRuntimeDrafts] = useState<Record<string, string>>({});
   const [runtimeSaveMessages, setRuntimeSaveMessages] = useState<Record<string, string>>({});
   const [runtimeSavingKey, setRuntimeSavingKey] = useState<string | null>(null);
@@ -159,6 +204,16 @@ export function Settings() {
   const [mobileRemoteMessage, setMobileRemoteMessage] = useState('');
   const [remoteLinks, setRemoteLinks] = useState<RemoteAccessLinksPayload | null>(null);
   const [mdnsStatus, setMdnsStatus] = useState<MdnsStatusPayload | null>(null);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [accountSecurityMessage, setAccountSecurityMessage] = useState('');
+  const [accountSecurityError, setAccountSecurityError] = useState('');
+  const [accountSecurityBusy, setAccountSecurityBusy] = useState(false);
+  const [recoveryCode, setRecoveryCode] = useState('');
+  const [backupStatus, setBackupStatus] = useState<BackupStatusPayload | null>(null);
+  const [retentionStatus, setRetentionStatus] = useState<RetentionStatusPayload | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMessage, setBackupMessage] = useState('');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const captureLoopBusyRef = useRef(false);
@@ -411,11 +466,13 @@ export function Settings() {
   }, [trainingCameraSource]);
 
   const loadSettings = useCallback(async () => {
-    const [liveResult, remoteStatusResult, linksResult, mdnsResult] = await Promise.allSettled([
+    const [liveResult, remoteStatusResult, linksResult, mdnsResult, backupResult, retentionResult] = await Promise.allSettled([
       fetchSettingsLive(),
       fetchMobileRemoteStatus(),
       fetchRemoteAccessLinks(),
       fetchMdnsStatus(),
+      fetchBackupStatus(),
+      fetchRetentionStatus(),
     ]);
 
     if (liveResult.status === 'fulfilled') {
@@ -436,6 +493,12 @@ export function Settings() {
     }
     if (mdnsResult.status === 'fulfilled') {
       setMdnsStatus(mdnsResult.value);
+    }
+    if (backupResult.status === 'fulfilled') {
+      setBackupStatus(backupResult.value);
+    }
+    if (retentionResult.status === 'fulfilled') {
+      setRetentionStatus(retentionResult.value);
     }
   }, [syncRuntimeDrafts]);
 
@@ -466,22 +529,6 @@ export function Settings() {
     };
   }, []);
 
-  const fusionSettings = useMemo(
-    () =>
-      runtimeSettings.filter(
-        (setting) => setting.key.includes('FUSION_WINDOW') || setting.key.includes('COOLDOWN'),
-      ),
-    [runtimeSettings],
-  );
-
-  const connectivitySettings = useMemo(
-    () =>
-      runtimeSettings.filter(
-        (setting) => !setting.key.includes('FUSION_WINDOW') && !setting.key.includes('COOLDOWN'),
-      ),
-    [runtimeSettings],
-  );
-
   const runtimeEditableSettings = useMemo(
     () => runtimeSettings.filter((setting) => setting.editable !== false),
     [runtimeSettings],
@@ -492,10 +539,63 @@ export function Settings() {
     [runtimeEditableSettings],
   );
 
-  const runtimeSecretSettings = useMemo(
-    () => runtimeEditableSettings.filter((setting) => setting.secret),
-    [runtimeEditableSettings],
+  const primaryRuntimeKeys = useMemo(
+    () =>
+      new Set([
+        'FACE_COSINE_THRESHOLD',
+        'FIRE_MODEL_ENABLED',
+        'FIRE_MODEL_THRESHOLD',
+        'NODE_OFFLINE_SECONDS',
+        'CAMERA_OFFLINE_SECONDS',
+        'LAN_BASE_URL',
+        'TAILSCALE_BASE_URL',
+        'AUTHORIZED_PRESENCE_LOGGING_ENABLED',
+        'UNKNOWN_PRESENCE_LOGGING_ENABLED',
+      ]),
+    [],
   );
+
+  const runtimeMainSettings = useMemo(
+    () => runtimeNonSecretSettings.filter((setting) => primaryRuntimeKeys.has(setting.key)),
+    [runtimeNonSecretSettings, primaryRuntimeKeys],
+  );
+
+  const runtimeSettingByKey = useMemo(() => {
+    const index = new Map<string, RuntimeSetting>();
+    for (const setting of runtimeSettings) {
+      index.set(setting.key, setting);
+    }
+    return index;
+  }, [runtimeSettings]);
+
+  const handleSelectSettingsStep = (step: SettingsStep) => {
+    setActiveSettingsStep(step);
+    setActiveSettingsSection(DEFAULT_SECTION_BY_STEP[step]);
+  };
+
+  const handleSelectSettingsSection = (step: SettingsStep, section: SettingsSection) => {
+    setActiveSettingsStep(step);
+    setActiveSettingsSection(section);
+  };
+
+  useEffect(() => {
+    const setting = runtimeSettingByKey.get('LAN_BASE_URL');
+    if (!setting || setting.editable === false) {
+      return;
+    }
+    const draft = (runtimeDrafts.LAN_BASE_URL ?? '').trim();
+    if (draft) {
+      return;
+    }
+    const fallback = (remoteLinks?.lanUrl || window.location.origin || '').trim();
+    if (!fallback) {
+      return;
+    }
+    setRuntimeDrafts((previous) => ({
+      ...previous,
+      LAN_BASE_URL: fallback,
+    }));
+  }, [runtimeSettingByKey, runtimeDrafts.LAN_BASE_URL, remoteLinks?.lanUrl]);
 
   const resetAddUserModal = () => {
     stopCameraStream();
@@ -810,6 +910,18 @@ export function Settings() {
       if (result.secret) {
         handleRuntimeSecretReplaceToggle(key, false);
       }
+      if (result.key === 'LAN_BASE_URL' || result.key === 'TAILSCALE_BASE_URL') {
+        const [linksResult, mdnsResult] = await Promise.allSettled([
+          fetchRemoteAccessLinks(),
+          fetchMdnsStatus(),
+        ]);
+        if (linksResult.status === 'fulfilled') {
+          setRemoteLinks(linksResult.value);
+        }
+        if (mdnsResult.status === 'fulfilled') {
+          setMdnsStatus(mdnsResult.value);
+        }
+      }
       setRuntimeSaveMessages((previous) => ({
         ...previous,
         [key]: setting.secret
@@ -841,6 +953,65 @@ export function Settings() {
     0,
     Math.min(100, Math.round((capturedSamples / GUIDED_CAPTURE_TARGET) * 100)),
   );
+
+  const handleChangePassword = async () => {
+    if (!currentPassword || !newPassword) {
+      setAccountSecurityError('Enter your current password and a new password.');
+      setAccountSecurityMessage('');
+      return;
+    }
+    if (newPassword.length < 8) {
+      setAccountSecurityError('New password must be at least 8 characters.');
+      setAccountSecurityMessage('');
+      return;
+    }
+    setAccountSecurityBusy(true);
+    setAccountSecurityError('');
+    setAccountSecurityMessage('');
+    try {
+      const result = await changePassword(currentPassword, newPassword);
+      setAccountSecurityMessage(result.message || 'Password updated.');
+      setCurrentPassword('');
+      setNewPassword('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to update password.';
+      setAccountSecurityError(message);
+    } finally {
+      setAccountSecurityBusy(false);
+    }
+  };
+
+  const handleGenerateRecoveryCode = async () => {
+    setAccountSecurityBusy(true);
+    setAccountSecurityError('');
+    setAccountSecurityMessage('');
+    try {
+      const result = await regenerateRecoveryCode();
+      setRecoveryCode(result.recoveryCode);
+      setAccountSecurityMessage(result.message || 'Recovery code generated. Save it now.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to generate recovery code.';
+      setAccountSecurityError(message);
+    } finally {
+      setAccountSecurityBusy(false);
+    }
+  };
+
+  const handleCreateBackup = async () => {
+    setBackupBusy(true);
+    setBackupMessage('');
+    try {
+      const created = await createBackup();
+      setBackupMessage(`Backup created: ${created.name}`);
+      const latestStatus = await fetchBackupStatus();
+      setBackupStatus(latestStatus);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to create backup.';
+      setBackupMessage(message);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
 
   const editProfileModal = (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
@@ -1251,8 +1422,54 @@ export function Settings() {
         </p>
       </div>
 
-      <div className="space-y-6">
-        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
+      <div className="grid grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)] gap-4 md:gap-6">
+        <aside className="lg:sticky lg:top-4 lg:self-start rounded-lg border border-gray-200 bg-white p-3">
+          <p className="px-2 pb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Sections</p>
+          <nav className="space-y-1" aria-label="Settings section navigation">
+            {SETTINGS_NAV.map((group) => {
+              const isGroupActive = activeSettingsStep === group.id;
+              const Icon = group.icon;
+              return (
+                <div key={group.id} className="space-y-1">
+                  <button
+                    onClick={() => handleSelectSettingsStep(group.id)}
+                    className={`w-full flex items-center gap-2 rounded-md px-2.5 py-2 text-sm transition-colors ${
+                      isGroupActive
+                        ? 'bg-blue-50 text-blue-800 border border-blue-200'
+                        : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                    }`}
+                  >
+                    <Icon className="w-4 h-4 shrink-0" />
+                    <span className="font-medium">{group.label}</span>
+                  </button>
+                  {isGroupActive && (
+                    <div className="ml-6 space-y-1 border-l border-gray-200 pl-2">
+                      {group.sections.map((section) => {
+                        const isSectionActive = activeSettingsSection === section.id;
+                        return (
+                          <button
+                            key={section.id}
+                            onClick={() => handleSelectSettingsSection(group.id, section.id)}
+                            className={`w-full text-left rounded-md px-2 py-1.5 text-xs transition-colors ${
+                              isSectionActive
+                                ? 'bg-blue-50 text-blue-700 font-semibold'
+                                : 'text-gray-600 hover:bg-gray-50'
+                            }`}
+                          >
+                            {section.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </nav>
+        </aside>
+
+        <div className="space-y-6">
+        <div className={`${activeSettingsSection === 'alerts-routing' ? '' : 'hidden'} bg-white rounded-lg border border-gray-200 p-4 sm:p-6`}>
           <div className="flex items-center gap-3 mb-4 sm:mb-6">
             <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
               <Bell className="w-5 h-5 text-blue-600" />
@@ -1268,12 +1485,10 @@ export function Settings() {
               {
                 title: 'Critical Intruder Alerts',
                 desc: 'Immediate alert for INTRUDER and DOOR_FORCE escalation.',
-                enabled: true,
               },
               {
                 title: 'Critical Fire Alerts',
                 desc: 'Immediate alert for FIRE fusion output.',
-                enabled: true,
               },
             ].map((item) => (
               <div
@@ -1284,38 +1499,98 @@ export function Settings() {
                   <p className="font-medium text-gray-900">{item.title}</p>
                   <p className="text-sm text-gray-600 break-words">{item.desc}</p>
                 </div>
-                <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                  <input type="checkbox" className="sr-only peer" defaultChecked={item.enabled} />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-100 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600" />
-                </label>
+                <span className="shrink-0 rounded-full border border-green-200 bg-green-50 px-3 py-1 text-xs font-medium text-green-700">
+                  Always on
+                </span>
               </div>
             ))}
           </div>
         </div>
 
-        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
+        <div className={`${activeSettingsSection === 'runtime-access' ? '' : 'hidden'} bg-white rounded-lg border border-gray-200 p-4 sm:p-6`}>
           <div className="flex items-center gap-3 mb-4 sm:mb-6">
             <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
-              <Shield className="w-5 h-5 text-blue-600" />
+              <Wifi className="w-5 h-5 text-blue-600" />
             </div>
             <div>
-              <h3 className="font-semibold text-gray-900">Fusion & Detection Parameters</h3>
-              <p className="text-sm text-gray-600">Threshold windows used by the multi-sensor logic.</p>
+              <h3 className="font-semibold text-gray-900">Backend Access</h3>
+              <p className="text-sm text-gray-600">Configure local and remote backend URLs used by mobile clients.</p>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {fusionSettings.map((setting) => (
-              <div key={setting.key} className="rounded-lg border border-gray-200 p-4">
-                <p className="text-[11px] sm:text-xs font-mono text-gray-500 break-all">{setting.key}</p>
-                <p className="text-lg font-semibold text-gray-900 mt-1">{setting.value}</p>
-                <p className="text-sm text-gray-600 mt-1">{setting.description}</p>
-              </div>
-            ))}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {(() => {
+              const lanSetting = runtimeSettingByKey.get('LAN_BASE_URL');
+              const tailscaleSetting = runtimeSettingByKey.get('TAILSCALE_BASE_URL');
+              const lanDraft = runtimeDrafts.LAN_BASE_URL ?? '';
+              const tailscaleDraft = runtimeDrafts.TAILSCALE_BASE_URL ?? '';
+              const lanSaving = runtimeSavingKey === 'LAN_BASE_URL';
+              const tailscaleSaving = runtimeSavingKey === 'TAILSCALE_BASE_URL';
+              const lanMessage = runtimeSaveMessages.LAN_BASE_URL || '';
+              const tailscaleMessage = runtimeSaveMessages.TAILSCALE_BASE_URL || '';
+
+              return (
+                <>
+                  <div className="rounded-lg border border-gray-200 p-4 space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Local LAN URL</p>
+                    <input
+                      type="text"
+                      value={lanDraft}
+                      onChange={(event) => handleRuntimeDraftChange('LAN_BASE_URL', event.target.value)}
+                      placeholder="http://192.168.x.x:8765"
+                      disabled={Boolean(runtimeSavingKey) || !lanSetting || lanSetting.editable === false}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900"
+                    />
+                    <p className="text-xs text-gray-600 break-all">
+                      Active: {remoteLinks?.lanUrl || 'LAN URL unavailable'}
+                    </p>
+                    <button
+                      onClick={() => {
+                        if (lanSetting) {
+                          void handleSaveRuntimeSetting(lanSetting);
+                        }
+                      }}
+                      disabled={Boolean(runtimeSavingKey) || !lanSetting || lanSetting.editable === false}
+                      className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                    >
+                      {lanSaving ? 'Saving...' : 'Save LAN URL'}
+                    </button>
+                    {lanMessage ? <p className="text-xs text-gray-700">{lanMessage}</p> : null}
+                  </div>
+
+                  <div className="rounded-lg border border-gray-200 p-4 space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Tailscale URL</p>
+                    <input
+                      type="text"
+                      value={tailscaleDraft}
+                      onChange={(event) => handleRuntimeDraftChange('TAILSCALE_BASE_URL', event.target.value)}
+                      placeholder="http://100.x.x.x:8765 or https://host.ts.net"
+                      disabled={Boolean(runtimeSavingKey) || !tailscaleSetting || tailscaleSetting.editable === false}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900"
+                    />
+                    <p className="text-xs text-gray-600 break-all">
+                      Active: {remoteLinks?.tailscaleUrl || 'Tailscale URL not configured'}
+                    </p>
+                    <button
+                      onClick={() => {
+                        if (tailscaleSetting) {
+                          void handleSaveRuntimeSetting(tailscaleSetting);
+                        }
+                      }}
+                      disabled={Boolean(runtimeSavingKey) || !tailscaleSetting || tailscaleSetting.editable === false}
+                      className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                    >
+                      {tailscaleSaving ? 'Saving...' : 'Save Tailscale URL'}
+                    </button>
+                    {tailscaleMessage ? <p className="text-xs text-gray-700">{tailscaleMessage}</p> : null}
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
 
-        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
+        <div className={`${activeSettingsSection === 'profiles-authorized' ? '' : 'hidden'} bg-white rounded-lg border border-gray-200 p-4 sm:p-6`}>
           <div className="flex items-center gap-3 mb-4 sm:mb-6">
             <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
               <User className="w-5 h-5 text-blue-600" />
@@ -1391,51 +1666,19 @@ export function Settings() {
           </button>
         </div>
 
-        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
+        <div className={`${activeSettingsSection === 'runtime-controls' ? '' : 'hidden'} bg-white rounded-lg border border-gray-200 p-4 sm:p-6`}>
           <div className="flex items-center gap-3 mb-4 sm:mb-6">
             <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
-              <Wifi className="w-5 h-5 text-blue-600" />
+              <Shield className="w-5 h-5 text-blue-600" />
             </div>
             <div>
-              <h3 className="font-semibold text-gray-900">Connectivity & Runtime</h3>
-              <p className="text-sm text-gray-600">Core endpoints used by the Windows local-first stack.</p>
+              <h3 className="font-semibold text-gray-900">Connection, Detection & Health Runtime</h3>
+              <p className="text-sm text-gray-600">Common live controls for backend routes, detection sensitivity, and node health.</p>
             </div>
           </div>
 
-          <div className="space-y-3">
-            {connectivitySettings.map((setting) => (
-              <div key={setting.key} className="rounded-lg border border-gray-200 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-[11px] sm:text-sm font-mono text-gray-900 break-all">{setting.key}</p>
-                  <Database className="w-4 h-4 text-gray-500 shrink-0" />
-                </div>
-                <p className="text-sm font-medium text-gray-900 mt-1 break-all">{setting.value}</p>
-                <p className="text-xs text-gray-600 mt-1">{setting.description}</p>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-4 p-3 rounded-lg bg-gray-50 border border-gray-200 text-sm text-gray-700 break-words">
-            <p>
-              Monitored scope: {systemProfile.monitoredAreas.join(' and ')}. Contract preserved:{' '}
-              {systemProfile.apiContract}.
-            </p>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
-          <div className="flex items-center gap-3 mb-4 sm:mb-6">
-            <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
-              <Database className="w-5 h-5 text-blue-600" />
-            </div>
-            <div>
-              <h3 className="font-semibold text-gray-900">Runtime Variable Overrides</h3>
-              <p className="text-sm text-gray-600">Update selected .env-backed runtime values without editing .env.</p>
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            {runtimeNonSecretSettings.map((setting) => {
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {runtimeMainSettings.map((setting) => {
               const currentDraft = runtimeDrafts[setting.key] ?? setting.value;
               const saving = runtimeSavingKey === setting.key;
               const message = runtimeSaveMessages[setting.key] || '';
@@ -1443,12 +1686,9 @@ export function Settings() {
                 <div key={setting.key} className="rounded-lg border border-gray-200 p-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="text-[11px] sm:text-sm font-mono text-gray-900 break-all">{setting.key}</p>
-                    <div className="flex items-center gap-2 text-xs text-gray-600">
-                      <span className="rounded-full bg-gray-100 px-2 py-0.5">{setting.group || 'Runtime'}</span>
-                      <span className="rounded-full bg-green-50 text-green-700 px-2 py-0.5">
-                        {setting.liveApply ? 'Live' : 'Restart'}
-                      </span>
-                    </div>
+                    <span className="rounded-full bg-green-50 text-green-700 px-2 py-0.5 text-xs">
+                      {setting.liveApply ? 'Live apply' : 'Restart'}
+                    </span>
                   </div>
                   <p className="text-xs text-gray-600 mt-1">{setting.description}</p>
 
@@ -1477,7 +1717,7 @@ export function Settings() {
                           handleRuntimeDraftChange(setting.key, event.target.value);
                         }}
                         disabled={Boolean(runtimeSavingKey)}
-                        className="w-full sm:w-72 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                        className="w-full sm:w-56 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
                       />
                     )}
 
@@ -1495,84 +1735,135 @@ export function Settings() {
                 </div>
               );
             })}
+
+            {runtimeMainSettings.length === 0 && (
+              <div className="rounded-lg border border-gray-200 p-4 text-sm text-gray-600">
+                No primary runtime controls reported by backend.
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className={`${activeSettingsSection === 'runtime-security' ? '' : 'hidden'} bg-white rounded-lg border border-gray-200 p-4 sm:p-6`}>
+          <div className="flex items-center gap-3 mb-4 sm:mb-6">
+            <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
+              <Shield className="w-5 h-5 text-blue-600" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-gray-900">Account Security</h3>
+              <p className="text-sm text-gray-600">Manage admin password and emergency recovery code.</p>
+            </div>
           </div>
 
-          <div className="mt-6">
-            <h4 className="font-medium text-gray-900 mb-3">Secrets (Configured / Replace)</h4>
-            <div className="space-y-3">
-              {runtimeSecretSettings.map((setting) => {
-                const key = setting.key;
-                const replacing = Boolean(runtimeSecretReplaceMode[key]);
-                const saving = runtimeSavingKey === key;
-                const message = runtimeSaveMessages[key] || '';
-                const configured = Boolean(setting.configured);
-                const draft = runtimeDrafts[key] ?? '';
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="rounded-lg border border-gray-200 p-4 space-y-3">
+              <p className="text-sm font-medium text-gray-900">Change Password</p>
+              <input
+                type="password"
+                value={currentPassword}
+                onChange={(event) => setCurrentPassword(event.target.value)}
+                placeholder="Current password"
+                disabled={accountSecurityBusy}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+              />
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                placeholder="New password (min 8 chars)"
+                disabled={accountSecurityBusy}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+              />
+              <button
+                onClick={() => {
+                  void handleChangePassword();
+                }}
+                disabled={accountSecurityBusy}
+                className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+              >
+                {accountSecurityBusy ? 'Saving...' : 'Update Password'}
+              </button>
+            </div>
 
-                return (
-                  <div key={key} className="rounded-lg border border-gray-200 p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-[11px] sm:text-sm font-mono text-gray-900 break-all">{key}</p>
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-xs ${
-                          configured ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'
-                        }`}
-                      >
-                        {configured ? 'Configured' : 'Unconfigured'}
-                      </span>
-                    </div>
-                    <p className="text-xs text-gray-600 mt-1">{setting.description}</p>
+            <div className="rounded-lg border border-gray-200 p-4 space-y-3">
+              <p className="text-sm font-medium text-gray-900">Recovery Code</p>
+              <p className="text-xs text-gray-600">
+                Generate a one-time recovery code and store it securely. It is required for forgot-password resets.
+              </p>
+              <button
+                onClick={() => {
+                  void handleGenerateRecoveryCode();
+                }}
+                disabled={accountSecurityBusy}
+                className="px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60"
+              >
+                {accountSecurityBusy ? 'Generating...' : 'Generate Recovery Code'}
+              </button>
+              {recoveryCode ? (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                  <p className="text-xs font-semibold text-amber-800">Save this now (shown once):</p>
+                  <p className="mt-1 font-mono text-sm text-amber-800 break-all">{recoveryCode}</p>
+                </div>
+              ) : null}
+            </div>
+          </div>
 
-                    {!replacing ? (
-                      <button
-                        onClick={() => {
-                          handleRuntimeSecretReplaceToggle(key, true);
-                        }}
-                        disabled={Boolean(runtimeSavingKey)}
-                        className="mt-3 px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60"
-                      >
-                        Replace
-                      </button>
-                    ) : (
-                      <div className="mt-3 flex flex-col sm:flex-row sm:items-center gap-2">
-                        <input
-                          type="password"
-                          value={draft}
-                          onChange={(event) => {
-                            handleRuntimeDraftChange(key, event.target.value);
-                          }}
-                          placeholder="Enter replacement value"
-                          disabled={Boolean(runtimeSavingKey)}
-                          className="w-full sm:w-80 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
-                        />
-                        <button
-                          onClick={() => {
-                            void handleSaveRuntimeSetting(setting);
-                          }}
-                          disabled={Boolean(runtimeSavingKey)}
-                          className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
-                        >
-                          {saving ? 'Saving...' : 'Save'}
-                        </button>
-                        <button
-                          onClick={() => {
-                            handleRuntimeSecretReplaceToggle(key, false);
-                          }}
-                          disabled={Boolean(runtimeSavingKey)}
-                          className="px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    )}
-                    {message ? <p className="mt-2 text-xs text-gray-700 break-words">{message}</p> : null}
-                  </div>
-                );
-              })}
+          {accountSecurityError ? <p className="mt-3 text-sm text-red-600">{accountSecurityError}</p> : null}
+          {accountSecurityMessage ? <p className="mt-3 text-sm text-green-700">{accountSecurityMessage}</p> : null}
+        </div>
+
+        <div className={`${activeSettingsSection === 'runtime-backup' ? '' : 'hidden'} bg-white rounded-lg border border-gray-200 p-4 sm:p-6`}>
+          <div className="flex items-center gap-3 mb-4 sm:mb-6">
+            <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
+              <Database className="w-5 h-5 text-blue-600" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-gray-900">Backup & Retention</h3>
+              <p className="text-sm text-gray-600">Create full backups and inspect automatic cleanup activity.</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="rounded-lg border border-gray-200 p-4 space-y-3">
+              <p className="text-sm font-medium text-gray-900">Backups</p>
+              <p className="text-xs text-gray-600">Stored backups: {backupStatus?.count ?? 0}</p>
+              <p className="text-xs text-gray-600 break-all">
+                Latest: {backupStatus?.latest ? `${backupStatus.latest.name} (${Math.max(1, Math.round(backupStatus.latest.sizeBytes / 1024))} KB)` : 'No backups yet'}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => {
+                    void handleCreateBackup();
+                  }}
+                  disabled={backupBusy}
+                  className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                >
+                  {backupBusy ? 'Creating...' : 'Create Backup Now'}
+                </button>
+                {backupStatus?.latest ? (
+                  <a
+                    href={`/api/ui/backup/download/${backupStatus.latest.name}`}
+                    className="px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                  >
+                    Download Latest
+                  </a>
+                ) : null}
+              </div>
+              {backupMessage ? <p className="text-xs text-gray-700 break-words">{backupMessage}</p> : null}
+            </div>
+
+            <div className="rounded-lg border border-gray-200 p-4 space-y-2">
+              <p className="text-sm font-medium text-gray-900">Retention Status</p>
+              <p className="text-xs text-gray-600">Events: {retentionStatus?.eventRetentionDays ?? '—'} days</p>
+              <p className="text-xs text-gray-600">Logs: {retentionStatus?.logRetentionDays ?? '—'} days</p>
+              <p className="text-xs text-gray-600">Snapshots (regular/critical): {retentionStatus?.regularSnapshotRetentionDays ?? '—'} / {retentionStatus?.criticalSnapshotRetentionDays ?? '—'} days</p>
+              <p className="text-xs text-gray-600">Last cleanup: {retentionStatus?.lastRunTs ? new Date(retentionStatus.lastRunTs).toLocaleString() : 'Not yet reported'}</p>
+              <p className="text-xs text-gray-600">Last deleted: events {retentionStatus?.lastEventsDeleted ?? 0}, logs {retentionStatus?.lastLogsDeleted ?? 0}, snapshots {retentionStatus?.lastSnapshotsDeleted ?? 0}</p>
             </div>
           </div>
         </div>
 
-        <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6">
+        <div className={`${activeSettingsSection === 'mobile-remote' ? '' : 'hidden'} bg-white rounded-lg border border-gray-200 p-4 sm:p-6`}>
           <div className="flex items-center gap-3 mb-4">
             <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
               <Camera className="w-5 h-5 text-blue-600" />
@@ -1632,13 +1923,7 @@ export function Settings() {
                 Tailscale: <span className="font-mono">{remoteLinks?.tailscaleUrl || 'Not configured'}</span>
               </p>
               <p className="break-all">
-                mDNS: <span className="font-mono">{remoteLinks?.mdnsUrl || 'Not available'}</span>
-              </p>
-              <p className="break-all">
                 LAN: <span className="font-mono">{remoteLinks?.lanUrl || 'Unavailable'}</span>
-              </p>
-              <p className="text-xs text-gray-600 break-words">
-                mDNS status: {mdnsStatus?.published ? 'Published' : mdnsStatus?.detail || 'Unavailable'}
               </p>
             </div>
 
@@ -1665,14 +1950,6 @@ export function Settings() {
         </div>
       </div>
 
-      <div className="flex flex-col sm:flex-row sm:justify-end gap-3 pt-6 border-t border-gray-200">
-        <button className="w-full sm:w-auto px-6 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
-          Revert
-        </button>
-        <button className="w-full sm:w-auto px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors inline-flex items-center justify-center gap-2">
-          <Save className="w-4 h-4" />
-          Save Changes
-        </button>
       </div>
 
       {showAddUserModal && addUserModal}

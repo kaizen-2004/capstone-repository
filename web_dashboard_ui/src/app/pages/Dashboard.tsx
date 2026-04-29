@@ -5,17 +5,8 @@ import { AlertCard } from '../components/AlertCard';
 import { KPICard } from '../components/KPICard';
 import { CameraPreview } from '../components/CameraPreview';
 import { fetchDailyStats, fetchLiveEvents, fetchLiveNodes } from '../data/liveApi';
-import {
-  type Alert,
-  type CameraFeed,
-  type KPI,
-  type SensorStatus,
-  mockAlerts,
-  recentEvents,
-  kpiData,
-  cameraFeeds as fallbackCameraFeeds,
-  systemProfile,
-} from '../data/mockData';
+import { systemProfile } from '../data/appConfig';
+import type { Alert, CameraFeed, KPI, SensorStatus } from '../data/types';
 
 type FilterType = 'all' | 'intruder' | 'fire' | 'sensor' | 'authorized' | 'system';
 
@@ -41,35 +32,31 @@ function downloadCsv(fileName: string, rows: Array<Array<unknown>>): void {
 }
 
 function buildKpis(
-  kpisFallback: KPI[],
   sensorStatuses: SensorStatus[],
   dailyStats: Awaited<ReturnType<typeof fetchDailyStats>>,
 ): KPI[] {
   const latest = dailyStats[dailyStats.length - 1];
   const previous = dailyStats[dailyStats.length - 2];
-  if (!latest) {
-    return kpisFallback;
-  }
   const onlineNodes = sensorStatuses.filter((node) => node.status === 'online').length;
   return [
     {
       label: 'Authorized Faces',
-      value: latest.authorizedFaces,
-      trend: previous ? latest.authorizedFaces - previous.authorizedFaces : 0,
+      value: latest?.authorizedFaces ?? 0,
+      trend: latest && previous ? latest.authorizedFaces - previous.authorizedFaces : undefined,
       icon: 'UserCheck',
       subtitle: 'Today',
     },
     {
-      label: 'Unknown Detections',
-      value: latest.unknownDetections,
-      trend: previous ? latest.unknownDetections - previous.unknownDetections : 0,
+      label: 'Non-Authorized Detections',
+      value: latest?.unknownDetections ?? 0,
+      trend: latest && previous ? latest.unknownDetections - previous.unknownDetections : undefined,
       icon: 'UserX',
       subtitle: 'Today',
     },
     {
       label: 'Fire Fusion Alerts',
-      value: latest.fireAlerts,
-      trend: previous ? latest.fireAlerts - previous.fireAlerts : 0,
+      value: latest?.fireAlerts ?? 0,
+      trend: latest && previous ? latest.fireAlerts - previous.fireAlerts : undefined,
       icon: 'ShieldAlert',
       subtitle: 'Today',
     },
@@ -84,13 +71,15 @@ function buildKpis(
 
 export function Dashboard() {
   const navigate = useNavigate();
-  const [alerts, setAlerts] = useState<Alert[]>(mockAlerts);
-  const [events, setEvents] = useState<Alert[]>(recentEvents);
-  const [kpis, setKpis] = useState<KPI[]>(kpiData);
-  const [cameraFeeds, setCameraFeeds] = useState<CameraFeed[]>(fallbackCameraFeeds);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [events, setEvents] = useState<Alert[]>([]);
+  const [kpis, setKpis] = useState<KPI[]>([]);
+  const [cameraFeeds, setCameraFeeds] = useState<CameraFeed[]>([]);
   const [eventFilter, setEventFilter] = useState<FilterType>('all');
   const [isExporting, setIsExporting] = useState(false);
   const [exportMessage, setExportMessage] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -108,9 +97,17 @@ export function Dashboard() {
         setAlerts(eventsLive.alerts);
         setEvents(eventsLive.events);
         setCameraFeeds(nodesLive.cameraFeeds);
-        setKpis(buildKpis(kpiData, nodesLive.sensorStatuses, stats));
-      } catch {
-        // Keep fallback data when backend is unavailable.
+        setKpis(buildKpis(nodesLive.sensorStatuses, stats));
+        setLoadError('');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unable to load live dashboard data.';
+        if (!cancelled) {
+          setLoadError(message);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
     };
 
@@ -130,7 +127,7 @@ export function Dashboard() {
       prev.map((alert) => (alert.id === id ? { ...alert, acknowledged: true } : alert)),
     );
 
-    const numericId = Number.parseInt(id.replace('alert-', ''), 10);
+    const numericId = Number.parseInt(id.replace(/^alert-/, ''), 10);
     if (!Number.isFinite(numericId) || numericId <= 0) {
       return;
     }
@@ -163,6 +160,13 @@ export function Dashboard() {
       : timelineEvents.filter((event) => event.type === eventFilter);
   const activeAlertCount = criticalAlerts.length + warningAlerts.length;
   const latestEventTimestamp = timelineEvents[0]?.timestamp;
+  const liveLocations = useMemo(() => {
+    const locations = [...cameraFeeds.map((feed) => feed.location), ...timelineEvents.map((event) => event.location)]
+      .map((location) => String(location || '').trim())
+      .filter(Boolean);
+    return Array.from(new Set(locations));
+  }, [cameraFeeds, timelineEvents]);
+  const monitoringScope = liveLocations.length > 0 ? liveLocations.join(' and ') : 'reported live areas';
 
   const handleExportDailySummary = async () => {
     if (isExporting) {
@@ -190,7 +194,16 @@ export function Dashboard() {
 
       rows.push(['Condo Monitoring Dashboard - Daily Summary']);
       rows.push(['Generated At', now.toISOString()]);
-      rows.push(['Monitored Areas', systemProfile.monitoredAreas.join(' + ')]);
+      rows.push([
+        'Monitored Areas',
+        Array.from(
+          new Set(
+            nodesLive.sensorStatuses
+              .map((node) => String(node.location || '').trim())
+              .filter(Boolean),
+          ),
+        ).join(' + ') || 'No live areas reported',
+      ]);
       rows.push([]);
 
       rows.push(['Summary']);
@@ -282,7 +295,7 @@ export function Dashboard() {
         <div>
           <h2 className="text-xl md:text-2xl font-semibold text-gray-900">Dashboard Overview</h2>
           <p className="text-sm md:text-base text-gray-600 mt-1">
-            Focused monitoring for {systemProfile.monitoredAreas.join(' and ')}.
+            Focused monitoring for {monitoringScope}.
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
             <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-medium text-blue-700">
@@ -308,6 +321,16 @@ export function Dashboard() {
       </div>
       {exportMessage && (
         <div className="text-sm text-gray-700">{exportMessage}</div>
+      )}
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          Live data unavailable: {loadError}
+        </div>
+      )}
+      {isLoading && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
+          Loading live dashboard data...
+        </div>
       )}
 
       <div className="bg-white rounded-lg border border-gray-200 p-4 md:p-5 grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -367,7 +390,7 @@ export function Dashboard() {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-base md:text-lg font-semibold text-gray-900">Camera Feeds</h3>
-            <span className="text-xs text-gray-500">{cameraFeeds.length} configured</span>
+            <span className="text-xs text-gray-500">{cameraFeeds.length} live feed{cameraFeeds.length === 1 ? '' : 's'}</span>
           </div>
           {cameraFeeds.map((feed) => (
             <CameraPreview
@@ -379,6 +402,11 @@ export function Dashboard() {
               onViewLive={() => navigate('/live')}
             />
           ))}
+          {cameraFeeds.length === 0 && !isLoading && (
+            <div className="rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-600">
+              No live camera feeds reported by the backend.
+            </div>
+          )}
         </div>
 
         <div className="lg:col-span-2 space-y-4">

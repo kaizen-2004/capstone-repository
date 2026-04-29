@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router';
 import { 
   LayoutDashboard, 
@@ -11,6 +11,7 @@ import {
   LogOut
 } from 'lucide-react';
 import { useAuth } from './AuthGate';
+import { fetchLiveEvents, fetchLiveNodes } from '../data/liveApi';
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
@@ -31,6 +32,40 @@ interface SidebarProps {
 export function Sidebar({ isOpen = true, onClose, desktopHidden = false, onDesktopToggle }: SidebarProps) {
   const { user, logout } = useAuth();
   const [loggingOut, setLoggingOut] = useState(false);
+  const [reviewQueueCount, setReviewQueueCount] = useState(0);
+  const [offlineNodeCount, setOfflineNodeCount] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadBadges = async () => {
+      try {
+        const [eventsPayload, nodesPayload] = await Promise.all([fetchLiveEvents(), fetchLiveNodes()]);
+        if (cancelled) {
+          return;
+        }
+        const queueCount = eventsPayload.events.filter((event) => event.reviewStatus === 'needs_review').length;
+        const offlineCount = nodesPayload.sensorStatuses.filter((sensor) => sensor.status === 'offline').length;
+        setReviewQueueCount(queueCount);
+        setOfflineNodeCount(offlineCount);
+      } catch {
+        if (!cancelled) {
+          setReviewQueueCount(0);
+          setOfflineNodeCount(0);
+        }
+      }
+    };
+
+    void loadBadges();
+    const timer = window.setInterval(() => {
+      void loadBadges();
+    }, 12000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const handleLogout = async () => {
     if (loggingOut) {
@@ -125,6 +160,16 @@ export function Sidebar({ isOpen = true, onClose, desktopHidden = false, onDeskt
                 >
                   <item.icon className="w-5 h-5" />
                   <span className="font-medium">{item.name}</span>
+                  {item.href === '/events' && reviewQueueCount > 0 ? (
+                    <span className="ml-auto rounded-full bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-200">
+                      {reviewQueueCount}
+                    </span>
+                  ) : null}
+                  {item.href === '/sensors' && offlineNodeCount > 0 ? (
+                    <span className="ml-auto rounded-full bg-rose-500/20 px-2 py-0.5 text-[11px] font-semibold text-rose-200">
+                      {offlineNodeCount}
+                    </span>
+                  ) : null}
                 </NavLink>
               </li>
             ))}
@@ -134,7 +179,7 @@ export function Sidebar({ isOpen = true, onClose, desktopHidden = false, onDeskt
         {/* System Info */}
         <div className="px-6 py-4 border-t border-gray-800">
           <div className="text-xs text-gray-400">
-            <p>Windows local-first stack</p>
+            <p>Local-first monitoring stack</p>
             <p className="mt-1">Sensor transport: HTTP</p>
           </div>
           <button

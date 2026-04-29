@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'core/storage/settings_store.dart';
+import 'screens/login_screen.dart';
 import 'screens/shell_screen.dart';
 
 class CondoGuardianApp extends StatefulWidget {
@@ -14,9 +15,12 @@ class CondoGuardianApp extends StatefulWidget {
 }
 
 class _CondoGuardianAppState extends State<CondoGuardianApp> {
+  late bool _authenticated;
+
   @override
   void initState() {
     super.initState();
+    _authenticated = widget.settingsStore.authToken.trim().isNotEmpty;
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
       DeviceOrientation.portraitDown,
@@ -47,8 +51,30 @@ class _CondoGuardianAppState extends State<CondoGuardianApp> {
       themeMode: ThemeMode.system,
       theme: _buildLightTheme(),
       darkTheme: _buildDarkTheme(),
-      home: ShellScreen(settingsStore: widget.settingsStore),
+      home: _authenticated
+          ? ShellScreen(
+              settingsStore: widget.settingsStore,
+              onSessionInvalidated: _handleSessionInvalidated,
+            )
+          : LoginScreen(
+              settingsStore: widget.settingsStore,
+              onAuthenticated: _handleAuthenticated,
+            ),
     );
+  }
+
+  void _handleAuthenticated() {
+    if (!mounted) {
+      return;
+    }
+    setState(() => _authenticated = true);
+  }
+
+  void _handleSessionInvalidated() {
+    if (!mounted) {
+      return;
+    }
+    setState(() => _authenticated = false);
   }
 
   static ThemeData _buildDarkTheme() {
