@@ -422,6 +422,7 @@ RUNTIME_SETTING_SPECS: dict[str, dict[str, Any]] = {
         "group": "Connectivity",
         "value_type": "str",
         "input_type": "text",
+        "allow_empty": True,
         "live_apply": True,
     },
     "CAMERA_DOOR_STREAM_URL": {
@@ -429,6 +430,7 @@ RUNTIME_SETTING_SPECS: dict[str, dict[str, Any]] = {
         "group": "Connectivity",
         "value_type": "str",
         "input_type": "text",
+        "allow_empty": True,
         "live_apply": True,
     },
     "WEBPUSH_VAPID_PUBLIC_KEY": {
@@ -581,6 +583,8 @@ def _normalize_runtime_setting_value(key: str, value: str, settings: Settings) -
         return raw
 
     if not raw:
+        if bool(spec.get("allow_empty", False)):
+            return ""
         default_value = _runtime_default_value(key, settings).strip()
         if default_value:
             return default_value
