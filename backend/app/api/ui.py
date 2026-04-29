@@ -922,6 +922,8 @@ def api_status(request: Request) -> dict:
     nodes = payload.get("sensor_statuses", [])
     online = sum(1 for row in nodes if str(row.get("status") or "").lower() == "online")
     offline = sum(1 for row in nodes if str(row.get("status") or "").lower() != "online")
+    face_status = request.app.state.face_service.model_status()
+    fire_status = request.app.state.fire_service.model_status()
     return {
         "ok": True,
         "backend": "online",
@@ -929,6 +931,10 @@ def api_status(request: Request) -> dict:
         "nodes_online": online,
         "nodes_offline": offline,
         "last_sync": str(payload.get("system_health", {}).get("last_sync") or ""),
+        "models": {
+            "face": face_status,
+            "fire": fire_status,
+        },
     }
 
 

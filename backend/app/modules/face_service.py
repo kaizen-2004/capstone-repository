@@ -593,3 +593,12 @@ class FaceService:
         verdict = self.classify_frame_with_bbox(image_bgr, threshold)
         verdict.pop("bbox", None)
         return verdict
+
+    def model_status(self) -> dict[str, Any]:
+        ready = self._detector is not None and self._recognizer is not None
+        return {
+            "loaded": bool(ready),
+            "detector_model_path": str(self.detector_model_path),
+            "recognizer_model_path": str(self.recognizer_model_path),
+            "error": "" if ready else (self._model_error or "face_models_unavailable"),
+        }

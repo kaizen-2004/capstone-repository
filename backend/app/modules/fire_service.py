@@ -472,3 +472,14 @@ class FireService:
                 "error": str(exc),
                 "model_loaded": self._net is not None,
             }
+
+    def model_status(self) -> dict[str, Any]:
+        loaded = self._net is not None
+        return {
+            "loaded": bool(loaded),
+            "model_path": str(self.model_path),
+            "detector": "yolov8_onnx_opencv_dnn"
+            if self._model_kind == "yolo_onnx"
+            else "firenet_opencv_dnn",
+            "error": "" if loaded else (self._model_error or "fire_model_unavailable"),
+        }

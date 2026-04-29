@@ -455,6 +455,16 @@ async def lifespan(app: FastAPI):
     mdns_publisher.start()
     camera_manager.start()
     supervisor.start()
+    face_model_status = face_service.model_status()
+    fire_model_status = fire_service.model_status()
+    store.log(
+        "INFO",
+        "model status "
+        f"face_loaded={face_model_status.get('loaded')} "
+        f"face_error={face_model_status.get('error') or 'none'} "
+        f"fire_loaded={fire_model_status.get('loaded')} "
+        f"fire_error={fire_model_status.get('error') or 'none'}",
+    )
     store.log("INFO", "Backend startup complete")
 
     try:
