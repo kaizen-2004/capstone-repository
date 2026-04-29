@@ -7,7 +7,6 @@ db/thesis.db
 models/
 raw_logs/
 reports/
-.env
 *.log
 .arduino-build/
 __pycache__/
