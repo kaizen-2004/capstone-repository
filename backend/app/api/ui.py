@@ -417,6 +417,20 @@ RUNTIME_SETTING_SPECS: dict[str, dict[str, Any]] = {
         "allow_empty": True,
         "live_apply": True,
     },
+    "CAMERA_INDOOR_STREAM_URL": {
+        "description": "Indoor camera RTSP stream URL",
+        "group": "Connectivity",
+        "value_type": "str",
+        "input_type": "text",
+        "live_apply": True,
+    },
+    "CAMERA_DOOR_STREAM_URL": {
+        "description": "Door camera RTSP stream URL",
+        "group": "Connectivity",
+        "value_type": "str",
+        "input_type": "text",
+        "live_apply": True,
+    },
     "WEBPUSH_VAPID_PUBLIC_KEY": {
         "description": "VAPID public key used by web push subscriptions",
         "group": "Secrets",
@@ -508,6 +522,10 @@ def _runtime_default_value(key: str, settings: Settings) -> str:
         return settings.lan_base_url
     if key == "TAILSCALE_BASE_URL":
         return settings.tailscale_base_url
+    if key == "CAMERA_INDOOR_STREAM_URL":
+        return settings.camera_indoor_rtsp
+    if key == "CAMERA_DOOR_STREAM_URL":
+        return settings.camera_door_rtsp
     if key == "WEBPUSH_VAPID_PUBLIC_KEY":
         return settings.webpush_vapid_public_key
     if key == "WEBPUSH_VAPID_PRIVATE_KEY":
@@ -800,6 +818,14 @@ def _apply_runtime_setting(key: str, value: str, request: Request) -> None:
         if normalized_key == "LAN_BASE_URL" and mdns_publisher is not None:
             mdns_publisher.stop()
             mdns_publisher.start()
+        return
+
+    if normalized_key in {"CAMERA_INDOOR_STREAM_URL", "CAMERA_DOOR_STREAM_URL"}:
+        stream_applier = getattr(request.app.state, "apply_camera_stream_override", None)
+        if stream_applier is None:
+            raise ValueError("camera stream override service unavailable")
+        node_id = "cam_indoor" if normalized_key == "CAMERA_INDOOR_STREAM_URL" else "cam_door"
+        stream_applier(node_id, value)
         return
 
     if notification_dispatcher is not None:

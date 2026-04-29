@@ -1522,15 +1522,29 @@ export function Settings() {
             {(() => {
               const lanSetting = runtimeSettingByKey.get('LAN_BASE_URL');
               const tailscaleSetting = runtimeSettingByKey.get('TAILSCALE_BASE_URL');
+              const indoorCameraSetting = runtimeSettingByKey.get('CAMERA_INDOOR_STREAM_URL');
+              const doorCameraSetting = runtimeSettingByKey.get('CAMERA_DOOR_STREAM_URL');
               const lanDraft = runtimeDrafts.LAN_BASE_URL ?? '';
               const tailscaleDraft = runtimeDrafts.TAILSCALE_BASE_URL ?? '';
+              const indoorCameraDraft = runtimeDrafts.CAMERA_INDOOR_STREAM_URL ?? '';
+              const doorCameraDraft = runtimeDrafts.CAMERA_DOOR_STREAM_URL ?? '';
               const lanSaving = runtimeSavingKey === 'LAN_BASE_URL';
               const tailscaleSaving = runtimeSavingKey === 'TAILSCALE_BASE_URL';
+              const indoorCameraSaving = runtimeSavingKey === 'CAMERA_INDOOR_STREAM_URL';
+              const doorCameraSaving = runtimeSavingKey === 'CAMERA_DOOR_STREAM_URL';
               const lanMessage = runtimeSaveMessages.LAN_BASE_URL || '';
               const tailscaleMessage = runtimeSaveMessages.TAILSCALE_BASE_URL || '';
+              const indoorCameraMessage = runtimeSaveMessages.CAMERA_INDOOR_STREAM_URL || '';
+              const doorCameraMessage = runtimeSaveMessages.CAMERA_DOOR_STREAM_URL || '';
+              const hasCameraRuntimeKeys = Boolean(indoorCameraSetting) && Boolean(doorCameraSetting);
 
               return (
                 <>
+                  {!hasCameraRuntimeKeys ? (
+                    <div className="lg:col-span-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                      Camera stream settings are unavailable from the current backend runtime. Restart the backend to load the latest runtime keys.
+                    </div>
+                  ) : null}
                   <div className="rounded-lg border border-gray-200 p-4 space-y-2">
                     <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Local LAN URL</p>
                     <input
@@ -1538,7 +1552,7 @@ export function Settings() {
                       value={lanDraft}
                       onChange={(event) => handleRuntimeDraftChange('LAN_BASE_URL', event.target.value)}
                       placeholder="http://192.168.x.x:8765"
-                      disabled={Boolean(runtimeSavingKey) || !lanSetting || lanSetting.editable === false}
+                      disabled={lanSaving || !lanSetting || lanSetting.editable === false}
                       className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900"
                     />
                     <p className="text-xs text-gray-600 break-all">
@@ -1565,7 +1579,7 @@ export function Settings() {
                       value={tailscaleDraft}
                       onChange={(event) => handleRuntimeDraftChange('TAILSCALE_BASE_URL', event.target.value)}
                       placeholder="http://100.x.x.x:8765 or https://host.ts.net"
-                      disabled={Boolean(runtimeSavingKey) || !tailscaleSetting || tailscaleSetting.editable === false}
+                      disabled={tailscaleSaving || !tailscaleSetting || tailscaleSetting.editable === false}
                       className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900"
                     />
                     <p className="text-xs text-gray-600 break-all">
@@ -1583,6 +1597,60 @@ export function Settings() {
                       {tailscaleSaving ? 'Saving...' : 'Save Tailscale URL'}
                     </button>
                     {tailscaleMessage ? <p className="text-xs text-gray-700">{tailscaleMessage}</p> : null}
+                  </div>
+
+                  <div className="rounded-lg border border-gray-200 p-4 space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Indoor Camera Stream</p>
+                    <input
+                      type="text"
+                      value={indoorCameraDraft}
+                      onChange={(event) => handleRuntimeDraftChange('CAMERA_INDOOR_STREAM_URL', event.target.value)}
+                      placeholder="rtsp://user:pass@host:554/stream"
+                      disabled={indoorCameraSaving || !indoorCameraSetting || indoorCameraSetting.editable === false}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900"
+                    />
+                    <p className="text-xs text-gray-600 break-all">
+                      Active: {runtimeSettingByKey.get('CAMERA_INDOOR_STREAM_URL')?.value || 'Not configured'}
+                    </p>
+                    <button
+                      onClick={() => {
+                        if (indoorCameraSetting) {
+                          void handleSaveRuntimeSetting(indoorCameraSetting);
+                        }
+                      }}
+                      disabled={Boolean(runtimeSavingKey) || !indoorCameraSetting || indoorCameraSetting.editable === false}
+                      className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                    >
+                      {indoorCameraSaving ? 'Saving...' : 'Save Indoor Stream'}
+                    </button>
+                    {indoorCameraMessage ? <p className="text-xs text-gray-700">{indoorCameraMessage}</p> : null}
+                  </div>
+
+                  <div className="rounded-lg border border-gray-200 p-4 space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Door Camera Stream</p>
+                    <input
+                      type="text"
+                      value={doorCameraDraft}
+                      onChange={(event) => handleRuntimeDraftChange('CAMERA_DOOR_STREAM_URL', event.target.value)}
+                      placeholder="rtsp://user:pass@host:554/stream"
+                      disabled={doorCameraSaving || !doorCameraSetting || doorCameraSetting.editable === false}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900"
+                    />
+                    <p className="text-xs text-gray-600 break-all">
+                      Active: {runtimeSettingByKey.get('CAMERA_DOOR_STREAM_URL')?.value || 'Not configured'}
+                    </p>
+                    <button
+                      onClick={() => {
+                        if (doorCameraSetting) {
+                          void handleSaveRuntimeSetting(doorCameraSetting);
+                        }
+                      }}
+                      disabled={Boolean(runtimeSavingKey) || !doorCameraSetting || doorCameraSetting.editable === false}
+                      className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                    >
+                      {doorCameraSaving ? 'Saving...' : 'Save Door Stream'}
+                    </button>
+                    {doorCameraMessage ? <p className="text-xs text-gray-700">{doorCameraMessage}</p> : null}
                   </div>
                 </>
               );

@@ -44,7 +44,9 @@ export function Sidebar({ isOpen = true, onClose, desktopHidden = false, onDeskt
         if (cancelled) {
           return;
         }
-        const queueCount = eventsPayload.events.filter((event) => event.reviewStatus === 'needs_review').length;
+        const pendingAlerts = eventsPayload.alerts.filter((alert) => alert.reviewStatus === 'needs_review').length;
+        const pendingEvents = eventsPayload.events.filter((event) => event.reviewStatus === 'needs_review').length;
+        const queueCount = pendingAlerts + pendingEvents;
         const offlineCount = nodesPayload.sensorStatuses.filter((sensor) => sensor.status === 'offline').length;
         setReviewQueueCount(queueCount);
         setOfflineNodeCount(offlineCount);
@@ -161,7 +163,7 @@ export function Sidebar({ isOpen = true, onClose, desktopHidden = false, onDeskt
                   <item.icon className="w-5 h-5" />
                   <span className="font-medium">{item.name}</span>
                   {item.href === '/events' && reviewQueueCount > 0 ? (
-                    <span className="ml-auto rounded-full bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-200">
+                    <span className="ml-auto rounded-full bg-rose-500/20 px-2 py-0.5 text-[11px] font-semibold text-rose-200">
                       {reviewQueueCount}
                     </span>
                   ) : null}
