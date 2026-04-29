@@ -147,6 +147,13 @@ def _env_webcam_single_node(name: str, default: str = "cam_door") -> str:
     return default
 
 
+def _first_existing_path(candidates: list[Path]) -> Path:
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
 def load_settings() -> Settings:
     load_env_file()
 
@@ -154,6 +161,26 @@ def load_settings() -> Settings:
     project_root = backend_root.parent
     storage_root = backend_root / "storage"
     db_path = Path(os.environ.get("BACKEND_DB_PATH", storage_root / "system.db"))
+
+    default_face_detector_model = _first_existing_path(
+        [
+            storage_root / "models" / "face" / "face_detection.onnx",
+            storage_root / "models" / "face" / "face_detection_yunet_2023mar.onnx",
+        ]
+    )
+    default_face_recognizer_model = _first_existing_path(
+        [
+            storage_root / "models" / "face" / "face_recognition.onnx",
+            storage_root / "models" / "face" / "face_recognition_sface_2021dec.onnx",
+        ]
+    )
+    default_fire_model = _first_existing_path(
+        [
+            storage_root / "models" / "fire" / "fire_detection.onnx",
+            storage_root / "models" / "fire" / "yolov8n_fire_smoke.onnx",
+            storage_root / "models" / "fire" / "firenet.pb",
+        ]
+    )
 
     settings = Settings(
         project_root=project_root,
@@ -195,23 +222,13 @@ def load_settings() -> Settings:
         face_detector_model_path=Path(
             os.environ.get(
                 "FACE_DETECTOR_MODEL_PATH",
-                str(
-                    storage_root
-                    / "models"
-                    / "face"
-                    / "face_detection_yunet_2023mar.onnx"
-                ),
+                str(default_face_detector_model),
             )
         ),
         face_recognizer_model_path=Path(
             os.environ.get(
                 "FACE_RECOGNIZER_MODEL_PATH",
-                str(
-                    storage_root
-                    / "models"
-                    / "face"
-                    / "face_recognition_sface_2021dec.onnx"
-                ),
+                str(default_face_recognizer_model),
             )
         ),
         face_detect_score_threshold=_env_float(
@@ -225,7 +242,7 @@ def load_settings() -> Settings:
         fire_model_path=Path(
             os.environ.get(
                 "FIRE_MODEL_PATH",
-                str(storage_root / "models" / "fire" / "firenet.pb"),
+                str(default_fire_model),
             )
         ),
         fire_model_threshold=_env_float("FIRE_MODEL_THRESHOLD", 0.60, 0.05, 0.99),
