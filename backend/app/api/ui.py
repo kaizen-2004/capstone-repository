@@ -35,8 +35,11 @@ from ..schemas.api import (
 
 router = APIRouter(tags=["ui"])
 
-FACE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.35
-FIRE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.35
+FACE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.5
+FIRE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.5
+DEBUG_OVERLAY_FAILURE_COOLDOWN_SECONDS = 10.0
+DEBUG_OVERLAY_MAX_CONSECUTIVE_FAILURES = 3
+DEBUG_OVERLAY_LOG_INTERVAL_SECONDS = 8.0
 
 ASSISTANT_NODE_LABELS: dict[str, str] = {
     "cam_indoor": "Indoor Camera",
@@ -1591,7 +1594,45 @@ def camera_frame(node_id: str, request: Request, face_debug: bool = False) -> Re
 
 def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None:
     try:
+        if frame is None or not hasattr(frame, "shape"):
+            return
+        if int(frame.size) <= 0:
+            return
+
         normalized_node = node_id.strip().lower() or "unknown"
+        now = time.monotonic()
+
+        state_raw = getattr(request.app.state, "debug_overlay_state", None)
+        state_by_node: dict[str, dict[str, Any]]
+        if isinstance(state_raw, dict):
+            state_by_node = cast(dict[str, dict[str, Any]], state_raw)
+        else:
+            state_by_node = {}
+            request.app.state.debug_overlay_state = state_by_node
+        node_state = state_by_node.setdefault(normalized_node, {})
+
+        def _log_debug_error(message: str) -> None:
+            last_log_at = float(node_state.get("last_log_at") or 0.0)
+            if (now - last_log_at) < DEBUG_OVERLAY_LOG_INTERVAL_SECONDS:
+                return
+            node_state["last_log_at"] = now
+            store.log("ERROR", f"debug overlay node={normalized_node}: {message}")
+
+        def _mark_failure(message: str) -> None:
+            failures = int(node_state.get("failures") or 0) + 1
+            node_state["failures"] = failures
+            node_state["last_failure_at"] = now
+            if failures >= DEBUG_OVERLAY_MAX_CONSECUTIVE_FAILURES:
+                node_state["cooldown_until"] = now + DEBUG_OVERLAY_FAILURE_COOLDOWN_SECONDS
+            _log_debug_error(f"{message}; failures={failures}")
+
+        def _mark_success() -> None:
+            node_state["failures"] = 0
+            node_state["cooldown_until"] = 0.0
+
+        cooldown_until = float(node_state.get("cooldown_until") or 0.0)
+        infer_allowed = now >= cooldown_until
+
         cache_raw = getattr(request.app.state, "face_debug_cache", None)
         cache: dict[str, dict[str, Any]]
         if isinstance(cache_raw, dict):
@@ -1600,27 +1641,34 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
             cache = {}
             request.app.state.face_debug_cache = cache
 
-        now = time.monotonic()
         cached_entry = cache.get(normalized_node)
         verdicts: list[dict[str, Any]] = []
         if isinstance(cached_entry, dict):
-            cached_ts = float(cached_entry.get("ts") or 0.0)
             cached_verdicts = cached_entry.get("verdicts")
-            if (now - cached_ts) <= FACE_DEBUG_CLASSIFY_INTERVAL_SECONDS and isinstance(
-                cached_verdicts, list
-            ):
+            if isinstance(cached_verdicts, list):
                 verdicts = [
                     cast(dict[str, Any], item)
                     for item in cached_verdicts
                     if isinstance(item, dict)
                 ]
 
-        if not verdicts:
-            latest = request.app.state.face_service.classify_faces_with_bbox(
-                frame, max_faces=5
-            )
-            verdicts = latest if isinstance(latest, list) else []
-            cache[normalized_node] = {"ts": now, "verdicts": verdicts}
+        should_refresh_face = infer_allowed
+        if isinstance(cached_entry, dict):
+            cached_ts = float(cached_entry.get("ts") or 0.0)
+            if (now - cached_ts) <= FACE_DEBUG_CLASSIFY_INTERVAL_SECONDS:
+                should_refresh_face = False
+
+        face_ok = True
+        if should_refresh_face:
+            try:
+                latest = request.app.state.face_service.classify_faces_with_bbox(
+                    frame, max_faces=5
+                )
+                verdicts = latest if isinstance(latest, list) else []
+                cache[normalized_node] = {"ts": now, "verdicts": verdicts}
+            except Exception as exc:
+                face_ok = False
+                _mark_failure(f"face inference failed: {exc}")
 
         drawn = 0
         for verdict in verdicts:
@@ -1670,26 +1718,36 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
             fire_cache = {}
             request.app.state.fire_debug_cache = fire_cache
 
-        fire_now = time.monotonic()
         fire_cached_entry = fire_cache.get(normalized_node)
         fire_result: dict[str, Any] = {}
         if isinstance(fire_cached_entry, dict):
-            fire_cached_ts = float(fire_cached_entry.get("ts") or 0.0)
             cached_result = fire_cached_entry.get("result")
-            if (fire_now - fire_cached_ts) <= FIRE_DEBUG_CLASSIFY_INTERVAL_SECONDS and isinstance(
-                cached_result, dict
-            ):
+            if isinstance(cached_result, dict):
                 fire_result = cast(dict[str, Any], cached_result)
 
-        if not fire_result:
-            latest_fire = request.app.state.fire_service.detect_flame(frame)
-            fire_result = latest_fire if isinstance(latest_fire, dict) else {}
-            fire_cache[normalized_node] = {"ts": fire_now, "result": fire_result}
+        should_refresh_fire = infer_allowed
+        if isinstance(fire_cached_entry, dict):
+            fire_cached_ts = float(fire_cached_entry.get("ts") or 0.0)
+            if (now - fire_cached_ts) <= FIRE_DEBUG_CLASSIFY_INTERVAL_SECONDS:
+                should_refresh_fire = False
+
+        fire_ok = True
+        if should_refresh_fire:
+            try:
+                frame_for_fire = frame.copy()
+                latest_fire = request.app.state.fire_service.detect_flame(frame_for_fire)
+                fire_result = latest_fire if isinstance(latest_fire, dict) else {}
+                fire_cache[normalized_node] = {"ts": now, "result": fire_result}
+            except Exception as exc:
+                fire_ok = False
+                _mark_failure(f"fire inference failed: {exc}")
 
         fire_score = float(fire_result.get("confidence") or 0.0)
         fire_detected = bool(fire_result.get("flame"))
         detected_class = str(fire_result.get("detected_class") or "none").strip().lower()
-        class_label = detected_class.upper() if detected_class and detected_class != "none" else "NONE"
+        class_label = (
+            detected_class.upper() if detected_class and detected_class != "none" else "NONE"
+        )
         fire_color = (0, 0, 255) if fire_detected else (60, 180, 255)
         fire_text = f"FIRE {'YES' if fire_detected else 'NO'} [{class_label}] {fire_score:.1f}%"
         cv2.putText(
@@ -1724,8 +1782,14 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
                 2,
                 cv2.LINE_AA,
             )
-    except Exception:
-        pass
+
+        if face_ok and fire_ok and infer_allowed:
+            _mark_success()
+    except Exception as exc:
+        try:
+            store.log("ERROR", f"debug overlay fatal node={node_id}: {exc}")
+        except Exception:
+            pass
 
 
 @router.get("/camera/stream/{node_id}")
