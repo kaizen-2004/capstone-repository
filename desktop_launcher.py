@@ -7,7 +7,7 @@ import uvicorn
 
 from backend.app.main import app
 
-HOST = os.getenv("CONDO_GUARDIAN_HOST", "127.0.0.1")
+HOST = os.getenv("CONDO_GUARDIAN_HOST", "0.0.0.0")
 PORT = int(os.getenv("CONDO_GUARDIAN_PORT", "8765"))
 URL = f"http://127.0.0.1:{PORT}/dashboard"
 
