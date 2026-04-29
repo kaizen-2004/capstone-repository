@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -14,10 +15,15 @@ class ApiException implements Exception {
 }
 
 class ApiClient {
-  ApiClient({required this.baseUrl, required this.token});
+  ApiClient({
+    required this.baseUrl,
+    required this.token,
+    this.timeout = const Duration(seconds: 10),
+  });
 
   final String baseUrl;
   final String token;
+  final Duration timeout;
 
   String get _normalizedToken {
     final trimmed = token.trim();
@@ -36,22 +42,26 @@ class ApiClient {
 
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
-        if (_normalizedToken.isNotEmpty) 'Authorization': 'Bearer $_normalizedToken',
+        if (_normalizedToken.isNotEmpty)
+          'Authorization': 'Bearer $_normalizedToken',
       };
 
   Future<Map<String, dynamic>> getJson(String path,
       {Map<String, dynamic>? query}) async {
-    final response = await http.get(_uri(path, query), headers: _headers);
+    final response =
+        await http.get(_uri(path, query), headers: _headers).timeout(timeout);
     return _decodeResponse(response);
   }
 
   Future<Map<String, dynamic>> postJson(
       String path, Map<String, dynamic> body) async {
-    final response = await http.post(
-      _uri(path),
-      headers: _headers,
-      body: jsonEncode(body),
-    );
+    final response = await http
+        .post(
+          _uri(path),
+          headers: _headers,
+          body: jsonEncode(body),
+        )
+        .timeout(timeout);
     return _decodeResponse(response);
   }
 
@@ -76,7 +86,7 @@ class ApiClient {
         filename: fileName,
       ),
     );
-    final streamed = await request.send();
+    final streamed = await request.send().timeout(timeout);
     final response = await http.Response.fromStream(streamed);
     return _decodeResponse(response);
   }

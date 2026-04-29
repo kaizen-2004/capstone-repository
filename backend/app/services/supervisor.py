@@ -5,6 +5,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import cv2
+
 from ..db import store
 from ..modules.event_engine import infer_location_from_node
 from ..modules.face_service import FaceService
@@ -60,8 +62,10 @@ class Supervisor:
         )
         self.fire_scan_seconds = max(1, int(fire_scan_seconds))
         self.fire_alert_cooldown_seconds = max(10, int(fire_alert_cooldown_seconds))
+        self.fire_confirmation_hits_required = 2
         self._fire_visible_by_node: dict[str, bool] = {}
         self._fire_miss_by_node: dict[str, int] = {}
+        self._fire_confirm_streak_by_node: dict[str, int] = {}
         self._fire_last_logged_at_by_node: dict[str, float] = {}
         self.authorized_presence_logging_enabled = bool(
             authorized_presence_logging_enabled and face_scan_dependencies_ready
@@ -200,6 +204,7 @@ class Supervisor:
             if camera_status != "online":
                 misses = self._fire_miss_by_node.get(node_id, 0) + 1
                 self._fire_miss_by_node[node_id] = misses
+                self._fire_confirm_streak_by_node[node_id] = 0
                 if misses >= miss_reset_threshold:
                     self._fire_visible_by_node[node_id] = False
                 continue
@@ -209,15 +214,26 @@ class Supervisor:
                 if frame is None:
                     misses = self._fire_miss_by_node.get(node_id, 0) + 1
                     self._fire_miss_by_node[node_id] = misses
+                    self._fire_confirm_streak_by_node[node_id] = 0
                     if misses >= miss_reset_threshold:
                         self._fire_visible_by_node[node_id] = False
                     continue
 
                 fire_result = self.fire_service.detect_flame(frame)
-                flame_detected = bool(fire_result.get("flame"))
+                detected_class = str(fire_result.get("detected_class") or "").strip().lower()
+                flame_detected = bool(fire_result.get("flame")) and detected_class in {
+                    "",
+                    "fire",
+                }
 
                 if flame_detected:
                     self._fire_miss_by_node[node_id] = 0
+                    streak = self._fire_confirm_streak_by_node.get(node_id, 0) + 1
+                    self._fire_confirm_streak_by_node[node_id] = streak
+                    confirmed = streak >= int(self.fire_confirmation_hits_required)
+                    if not confirmed:
+                        continue
+
                     was_visible = self._fire_visible_by_node.get(node_id, False)
                     last_logged_at = self._fire_last_logged_at_by_node.get(node_id, 0.0)
 
@@ -228,9 +244,85 @@ class Supervisor:
 
                     if entered_view and cooldown_ready:
                         try:
+                            snapshot_frame = frame.copy()
+                            fire_bbox = fire_result.get("bbox")
+                            if isinstance(fire_bbox, list) and len(fire_bbox) == 4:
+                                fx, fy, fw, fh = [int(value) for value in fire_bbox]
+                                confidence = float(fire_result.get("confidence") or 0.0)
+                                label = f"FIRE {confidence:.1f}%"
+                                cv2.rectangle(
+                                    snapshot_frame,
+                                    (fx, fy),
+                                    (fx + fw, fy + fh),
+                                    (0, 0, 255),
+                                    2,
+                                )
+                                cv2.putText(
+                                    snapshot_frame,
+                                    label,
+                                    (max(4, fx), max(20, fy - 8)),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.55,
+                                    (0, 0, 255),
+                                    2,
+                                    cv2.LINE_AA,
+                                )
+
+                            if self.face_service is not None:
+                                try:
+                                    verdicts = self.face_service.classify_faces_with_bbox(
+                                        snapshot_frame,
+                                        max_faces=5,
+                                    )
+                                except Exception:
+                                    verdicts = []
+
+                                if isinstance(verdicts, list):
+                                    for verdict in verdicts:
+                                        bbox = verdict.get("bbox")
+                                        if not (isinstance(bbox, list) and len(bbox) == 4):
+                                            continue
+                                        x, y, w, h = [int(value) for value in bbox]
+                                        is_authorized = (
+                                            str(verdict.get("result") or "").lower()
+                                            == "authorized"
+                                        )
+                                        face_color = (
+                                            (50, 205, 50)
+                                            if is_authorized
+                                            else (0, 165, 255)
+                                        )
+                                        face_state = (
+                                            "AUTHORIZED"
+                                            if is_authorized
+                                            else "NON-AUTHORIZED"
+                                        )
+                                        face_confidence = float(
+                                            verdict.get("confidence") or 0.0
+                                        )
+                                        face_label = (
+                                            f"{face_state} {face_confidence:.1f}%"
+                                        )
+                                        cv2.rectangle(
+                                            snapshot_frame,
+                                            (x, y),
+                                            (x + w, y + h),
+                                            face_color,
+                                            2,
+                                        )
+                                        cv2.putText(
+                                            snapshot_frame,
+                                            face_label,
+                                            (max(4, x), max(20, y - 8)),
+                                            cv2.FONT_HERSHEY_SIMPLEX,
+                                            0.5,
+                                            face_color,
+                                            2,
+                                            cv2.LINE_AA,
+                                        )
                             snapshot_path = self.camera_manager.save_snapshot(
                                 node_id,
-                                frame,
+                                snapshot_frame,
                                 "fire_confirmed_continuous",
                             )
                         except Exception:
@@ -288,6 +380,7 @@ class Supervisor:
 
                 misses = self._fire_miss_by_node.get(node_id, 0) + 1
                 self._fire_miss_by_node[node_id] = misses
+                self._fire_confirm_streak_by_node[node_id] = 0
                 if misses >= miss_reset_threshold:
                     self._fire_visible_by_node[node_id] = False
             except Exception as exc:
@@ -605,7 +698,10 @@ class Supervisor:
                     )
 
     def _run_retention(self) -> None:
-        store.cleanup_old_records(self.event_retention_days, self.log_retention_days)
+        cleanup_counts = store.cleanup_old_records(
+            self.event_retention_days,
+            self.log_retention_days,
+        )
 
         now = datetime.now(timezone.utc)
         regular_cutoff = now - timedelta(days=self.regular_snapshot_retention_days)
@@ -614,6 +710,7 @@ class Supervisor:
         if not self.snapshot_root.exists():
             return
 
+        deleted_snapshots = 0
         for day_dir in self.snapshot_root.iterdir():
             if not day_dir.is_dir():
                 continue
@@ -632,6 +729,7 @@ class Supervisor:
                 if mtime < cutoff:
                     try:
                         file_path.unlink(missing_ok=True)
+                        deleted_snapshots += 1
                     except Exception:
                         continue
             try:
@@ -641,3 +739,8 @@ class Supervisor:
                     day_dir.rmdir()
                 except Exception:
                     pass
+
+        store.upsert_setting("RETENTION_LAST_RUN_TS", now.isoformat(timespec="seconds"))
+        store.upsert_setting("RETENTION_LAST_EVENTS_DELETED", str(cleanup_counts.get("events", 0)))
+        store.upsert_setting("RETENTION_LAST_LOGS_DELETED", str(cleanup_counts.get("logs", 0)))
+        store.upsert_setting("RETENTION_LAST_SNAPSHOTS_DELETED", str(deleted_snapshots))

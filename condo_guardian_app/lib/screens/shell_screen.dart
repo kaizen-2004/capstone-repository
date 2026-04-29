@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../core/network/backend_endpoint_resolver.dart';
 import '../core/network/api_client.dart';
 import '../core/storage/settings_store.dart';
 import '../services/alert_notification_coordinator.dart';
@@ -15,9 +16,14 @@ import 'provisioning_screen.dart';
 import 'settings_screen.dart';
 
 class ShellScreen extends StatefulWidget {
-  const ShellScreen({super.key, required this.settingsStore});
+  const ShellScreen({
+    super.key,
+    required this.settingsStore,
+    this.onSessionInvalidated,
+  });
 
   final SettingsStore settingsStore;
+  final VoidCallback? onSessionInvalidated;
 
   @override
   State<ShellScreen> createState() => _ShellScreenState();
@@ -27,6 +33,8 @@ class _ShellScreenState extends State<ShellScreen>
     with TickerProviderStateMixin {
   int _selectedIndex = 0;
   int? _activeAlertCount;
+  late String _activeBackendBaseUrl;
+  String _activeConnectionLabel = 'Resolving connection';
   late final AnimationController _fadeController;
   late final AlertNotificationCoordinator _alertNotificationCoordinator;
   StreamSubscription<void>? _alertTapSubscription;
@@ -77,7 +85,7 @@ class _ShellScreenState extends State<ShellScreen>
 
   BackendService _buildBackendService() => BackendService(
         ApiClient(
-          baseUrl: widget.settingsStore.backendBaseUrl,
+          baseUrl: _activeBackendBaseUrl,
           token: widget.settingsStore.authToken,
         ),
       );
@@ -92,6 +100,7 @@ class _ShellScreenState extends State<ShellScreen>
       duration: const Duration(milliseconds: 180),
       value: 1,
     );
+    _activeBackendBaseUrl = widget.settingsStore.activeBackendBaseUrl;
 
     _alertNotificationCoordinator = AlertNotificationCoordinator(
       settingsStore: widget.settingsStore,
@@ -104,7 +113,7 @@ class _ShellScreenState extends State<ShellScreen>
       }
       setState(() => _activeAlertCount = count);
     });
-    unawaited(_alertNotificationCoordinator.start());
+    unawaited(_initializeConnectionAndNotifications());
 
     _alertTapSubscription =
         _alertNotificationCoordinator.onAlertNotificationTapped.listen((_) {
@@ -124,9 +133,52 @@ class _ShellScreenState extends State<ShellScreen>
     super.dispose();
   }
 
+  Future<void> _initializeConnectionAndNotifications() async {
+    await _refreshActiveBackendUrl();
+    if (!mounted) {
+      return;
+    }
+    await _alertNotificationCoordinator.start();
+  }
+
+  Future<void> _refreshActiveBackendUrl() async {
+    try {
+      final resolved = await BackendEndpointResolver.resolve(
+        widget.settingsStore,
+        token: widget.settingsStore.authToken,
+      );
+      await BackendEndpointResolver.refreshBootstrap(
+        widget.settingsStore,
+        baseUrl: resolved.baseUrl,
+        token: widget.settingsStore.authToken,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _activeBackendBaseUrl = resolved.baseUrl;
+        _activeConnectionLabel = resolved.label;
+      });
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _activeBackendBaseUrl = widget.settingsStore.activeBackendBaseUrl;
+        _activeConnectionLabel = 'Saved endpoint';
+      });
+      final token = widget.settingsStore.authToken.trim();
+      if (token.isEmpty) {
+        widget.onSessionInvalidated?.call();
+      }
+    }
+  }
+
   void _handleSettingsSaved() {
-    setState(() {});
-    unawaited(_alertNotificationCoordinator.restart());
+    unawaited(() async {
+      await _refreshActiveBackendUrl();
+      await _alertNotificationCoordinator.restart();
+    }());
   }
 
   Future<void> _onDestinationSelected(int index) async {
@@ -141,8 +193,13 @@ class _ShellScreenState extends State<ShellScreen>
           backendService: _backendService,
           settingsStore: widget.settingsStore,
           activeAlertCount: _activeAlertCount,
+          activeBackendBaseUrl: _activeBackendBaseUrl,
+          activeConnectionLabel: _activeConnectionLabel,
         ),
-        MonitorScreen(settingsStore: widget.settingsStore),
+        MonitorScreen(
+          backendBaseUrl: _activeBackendBaseUrl,
+          authToken: widget.settingsStore.authToken,
+        ),
         AlertsScreen(
           backendService: _backendService,
           pollingSeconds: widget.settingsStore.pollingSeconds,
@@ -155,6 +212,8 @@ class _ShellScreenState extends State<ShellScreen>
         AssistantScreen(backendService: _backendService),
         SettingsScreen(
           settingsStore: widget.settingsStore,
+          activeBackendBaseUrl: _activeBackendBaseUrl,
+          activeConnectionLabel: _activeConnectionLabel,
           onSaved: _handleSettingsSaved,
         ),
       ];

@@ -12,11 +12,15 @@ class HomeScreen extends StatefulWidget {
     super.key,
     required this.backendService,
     required this.settingsStore,
+    required this.activeBackendBaseUrl,
+    required this.activeConnectionLabel,
     this.activeAlertCount,
   });
 
   final BackendService backendService;
   final SettingsStore settingsStore;
+  final String activeBackendBaseUrl;
+  final String activeConnectionLabel;
   final int? activeAlertCount;
 
   @override
@@ -90,7 +94,8 @@ class _HomeScreenState extends State<HomeScreen>
           }
           return _DataView(
             data: snapshot.data!,
-            backendUrl: widget.settingsStore.backendBaseUrl,
+            backendUrl: widget.activeBackendBaseUrl,
+            connectionLabel: widget.activeConnectionLabel,
             liveAlertCount: widget.activeAlertCount,
             staggerCtrl: _staggerCtrl,
             stateColor: _stateColor,
@@ -173,6 +178,7 @@ class _DataView extends StatelessWidget {
   const _DataView({
     required this.data,
     required this.backendUrl,
+    required this.connectionLabel,
     required this.liveAlertCount,
     required this.staggerCtrl,
     required this.stateColor,
@@ -180,6 +186,7 @@ class _DataView extends StatelessWidget {
 
   final SystemSnapshot data;
   final String backendUrl;
+  final String connectionLabel;
   final int? liveAlertCount;
   final AnimationController staggerCtrl;
   final Color Function(String) stateColor;
@@ -221,7 +228,7 @@ class _DataView extends StatelessWidget {
                   child: StatusCard(
                     title: 'System State',
                     value: data.systemState.toUpperCase(),
-                    subtitle: backendUrl,
+                    subtitle: '$connectionLabel • $backendUrl',
                     icon: Icons.shield_rounded,
                     accentColor: stateColor(data.systemState),
                     statusLabel: data.systemState.toLowerCase() == 'online'

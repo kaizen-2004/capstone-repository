@@ -1,17 +1,19 @@
 import 'package:flutter/material.dart';
 
-import '../core/network/api_client.dart';
 import '../core/storage/settings_store.dart';
-import '../services/backend_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
     required this.settingsStore,
+    required this.activeBackendBaseUrl,
+    required this.activeConnectionLabel,
     this.onSaved,
   });
 
   final SettingsStore settingsStore;
+  final String activeBackendBaseUrl;
+  final String activeConnectionLabel;
   final VoidCallback? onSaved;
 
   @override
@@ -19,48 +21,44 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  late final TextEditingController _backendBaseUrlController;
-  late final TextEditingController _usernameController;
-  late final TextEditingController _passwordController;
-  late final TextEditingController _tokenController;
+  late final TextEditingController _mdnsBaseUrlController;
+  late final TextEditingController _lanBaseUrlController;
+  late final TextEditingController _tailscaleBaseUrlController;
   late final TextEditingController _pollingController;
   String? _message;
   bool _isSuccess = false;
-  bool _isFetchingToken = false;
-  bool _obscurePassword = true;
-  bool _obscureToken = true;
+  late String _networkMode;
 
   @override
   void initState() {
     super.initState();
-    _backendBaseUrlController =
-        TextEditingController(text: widget.settingsStore.backendBaseUrl);
-    _usernameController =
-        TextEditingController(text: widget.settingsStore.authUsername);
-    _passwordController =
-        TextEditingController(text: widget.settingsStore.authPassword);
-    _tokenController =
-        TextEditingController(text: widget.settingsStore.authToken);
+    _mdnsBaseUrlController =
+        TextEditingController(text: widget.settingsStore.mdnsBaseUrl);
+    _lanBaseUrlController =
+        TextEditingController(text: widget.settingsStore.lanBaseUrl);
+    _tailscaleBaseUrlController =
+        TextEditingController(text: widget.settingsStore.tailscaleBaseUrl);
     _pollingController =
         TextEditingController(text: '${widget.settingsStore.pollingSeconds}');
+    _networkMode = widget.settingsStore.networkMode;
   }
 
   @override
   void dispose() {
-    _backendBaseUrlController.dispose();
-    _usernameController.dispose();
-    _passwordController.dispose();
-    _tokenController.dispose();
+    _mdnsBaseUrlController.dispose();
+    _lanBaseUrlController.dispose();
+    _tailscaleBaseUrlController.dispose();
     _pollingController.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
-    await widget.settingsStore
-        .setBackendBaseUrl(_backendBaseUrlController.text.trim());
-    await widget.settingsStore.setAuthUsername(_usernameController.text.trim());
-    await widget.settingsStore.setAuthPassword(_passwordController.text);
-    await widget.settingsStore.setAuthToken(_tokenController.text.trim());
+    await widget.settingsStore.setConnectionProfiles(
+      mdnsBaseUrl: _mdnsBaseUrlController.text.trim(),
+      lanBaseUrl: _lanBaseUrlController.text.trim(),
+      tailscaleBaseUrl: _tailscaleBaseUrlController.text.trim(),
+      networkMode: _networkMode,
+    );
     await widget.settingsStore
         .setPollingSeconds(int.tryParse(_pollingController.text.trim()) ?? 10);
     widget.onSaved?.call();
@@ -71,72 +69,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _message = 'Settings saved. Connections refreshed.';
       _isSuccess = true;
     });
-  }
-
-  Future<void> _fetchTokenFromCredentials() async {
-    final backendBaseUrl = _backendBaseUrlController.text.trim();
-    final username = _usernameController.text.trim();
-    final password = _passwordController.text;
-
-    if (backendBaseUrl.isEmpty || username.isEmpty || password.isEmpty) {
-      setState(() {
-        _message = 'Enter backend URL, username, and password first.';
-        _isSuccess = false;
-      });
-      return;
-    }
-
-    setState(() {
-      _isFetchingToken = true;
-      _message = null;
-    });
-
-    try {
-      final service = BackendService(
-        ApiClient(baseUrl: backendBaseUrl, token: ''),
-      );
-      final token = await service.loginAndGetToken(
-        username: username,
-        password: password,
-      );
-
-      _tokenController.text = token;
-
-      await widget.settingsStore.setBackendBaseUrl(backendBaseUrl);
-      await widget.settingsStore.setAuthUsername(username);
-      await widget.settingsStore.setAuthPassword(password);
-      await widget.settingsStore.setAuthToken(token);
-
-      widget.onSaved?.call();
-
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _message = 'Signed in. Bearer token refreshed.';
-        _isSuccess = true;
-      });
-    } on ApiException catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _message = error.message;
-        _isSuccess = false;
-      });
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _message = 'Unable to fetch token. Check connection and credentials.';
-        _isSuccess = false;
-      });
-    } finally {
-      if (mounted) {
-        setState(() => _isFetchingToken = false);
-      }
-    }
   }
 
   Widget _sectionHeader(String label, {IconData? icon}) {
@@ -173,90 +105,89 @@ class _SettingsScreenState extends State<SettingsScreen> {
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
       children: [
         _sectionHeader('CONNECTION', icon: Icons.cloud_outlined),
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: cs.primary.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: cs.primary.withValues(alpha: 0.24)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Active: ${widget.activeConnectionLabel}',
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      color: cs.primary,
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                widget.activeBackendBaseUrl,
+                style: Theme.of(context).textTheme.bodySmall,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        DropdownButtonFormField<String>(
+          initialValue: _networkMode,
+          decoration: const InputDecoration(
+            labelText: 'Connection mode',
+            prefixIcon: Icon(Icons.hub_outlined, size: 20),
+          ),
+          items: const [
+            DropdownMenuItem(
+                value: 'auto', child: Text('Auto: mDNS → LAN → Tailscale')),
+            DropdownMenuItem(
+                value: 'home', child: Text('Home only: mDNS → LAN')),
+            DropdownMenuItem(
+                value: 'away', child: Text('Away only: Tailscale')),
+          ],
+          onChanged: (value) {
+            if (value == null) {
+              return;
+            }
+            setState(() => _networkMode = value);
+          },
+        ),
+        const SizedBox(height: 12),
         TextField(
-          controller: _backendBaseUrlController,
+          controller: _mdnsBaseUrlController,
           textInputAction: TextInputAction.next,
           decoration: const InputDecoration(
-            labelText: 'Backend base URL',
-            hintText: 'http://100.123.42.91:8765',
+            labelText: 'Home mDNS URL',
+            hintText: 'http://thesis-monitor.local:8765',
             prefixIcon: Icon(Icons.dns_outlined, size: 20),
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _lanBaseUrlController,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(
+            labelText: 'Home LAN URL',
+            hintText: 'http://192.168.1.50:8765',
+            prefixIcon: Icon(Icons.router_outlined, size: 20),
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _tailscaleBaseUrlController,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(
+            labelText: 'Away Tailscale URL',
+            hintText: 'http://100.x.x.x:8765',
+            prefixIcon: Icon(Icons.vpn_lock_outlined, size: 20),
           ),
         ),
         const SizedBox(height: 10),
         Text(
-          'Monitor URL is automatic: <Backend base URL>/dashboard/remote/mobile',
+          'Auto mode uses mDNS or LAN at home and Tailscale outside the house.',
           style: Theme.of(context).textTheme.bodySmall,
-        ),
-        _sectionHeader('AUTHENTICATION', icon: Icons.key_outlined),
-        TextField(
-          controller: _usernameController,
-          textInputAction: TextInputAction.next,
-          decoration: const InputDecoration(
-            labelText: 'Username',
-            prefixIcon: Icon(Icons.person_outline_rounded, size: 20),
-          ),
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _passwordController,
-          obscureText: _obscurePassword,
-          textInputAction: TextInputAction.next,
-          decoration: InputDecoration(
-            labelText: 'Password',
-            prefixIcon: const Icon(Icons.password_rounded, size: 20),
-            suffixIcon: IconButton(
-              icon: Icon(
-                _obscurePassword
-                    ? Icons.visibility_outlined
-                    : Icons.visibility_off_outlined,
-                size: 20,
-                color: cs.onSurfaceVariant,
-              ),
-              onPressed: () =>
-                  setState(() => _obscurePassword = !_obscurePassword),
-            ),
-          ),
-        ),
-        const SizedBox(height: 12),
-        FilledButton.tonalIcon(
-          onPressed: _isFetchingToken ? null : _fetchTokenFromCredentials,
-          icon: _isFetchingToken
-              ? SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: cs.onSecondaryContainer,
-                  ),
-                )
-              : const Icon(Icons.login_rounded, size: 18),
-          label: Text(
-            _isFetchingToken ? 'Signing in...' : 'Sign in and Refresh Token',
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'You can still paste a token manually below if needed.',
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _tokenController,
-          obscureText: _obscureToken,
-          decoration: InputDecoration(
-            labelText: 'Bearer token',
-            prefixIcon: const Icon(Icons.lock_outline_rounded, size: 20),
-            suffixIcon: IconButton(
-              icon: Icon(
-                _obscureToken
-                    ? Icons.visibility_outlined
-                    : Icons.visibility_off_outlined,
-                size: 20,
-                color: cs.onSurfaceVariant,
-              ),
-              onPressed: () => setState(() => _obscureToken = !_obscureToken),
-            ),
-          ),
         ),
         _sectionHeader('POLLING', icon: Icons.timer_outlined),
         TextField(

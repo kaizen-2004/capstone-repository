@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
-import '../core/storage/settings_store.dart';
-
 class MonitorScreen extends StatefulWidget {
-  const MonitorScreen({super.key, required this.settingsStore});
+  const MonitorScreen({
+    super.key,
+    required this.backendBaseUrl,
+    required this.authToken,
+  });
 
-  final SettingsStore settingsStore;
+  final String backendBaseUrl;
+  final String authToken;
 
   @override
   State<MonitorScreen> createState() => _MonitorScreenState();
@@ -20,12 +23,15 @@ class _MonitorScreenState extends State<MonitorScreen> {
   String _lastError = '';
 
   String get _mobileDashboardUrl {
-    final normalizedBase = widget.settingsStore.backendBaseUrl.endsWith('/')
-        ? widget.settingsStore.backendBaseUrl
-        : '${widget.settingsStore.backendBaseUrl}/';
-    return Uri.parse(normalizedBase)
-        .resolve('dashboard/remote/mobile')
-        .toString();
+    final normalizedBase = widget.backendBaseUrl.endsWith('/')
+        ? widget.backendBaseUrl
+        : '${widget.backendBaseUrl}/';
+    final bootstrap =
+        Uri.parse(normalizedBase).resolve('api/auth/mobile/webview-session');
+    return bootstrap.replace(queryParameters: <String, String>{
+      'token': widget.authToken.trim(),
+      'next': '/dashboard/remote/mobile',
+    }).toString();
   }
 
   @override
@@ -37,8 +43,8 @@ class _MonitorScreenState extends State<MonitorScreen> {
   @override
   void didUpdateWidget(covariant MonitorScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.settingsStore.backendBaseUrl !=
-        widget.settingsStore.backendBaseUrl) {
+    if (oldWidget.backendBaseUrl != widget.backendBaseUrl ||
+        oldWidget.authToken != widget.authToken) {
       _initController();
     }
   }

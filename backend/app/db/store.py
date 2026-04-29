@@ -226,6 +226,21 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS alert_review_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_id INTEGER NOT NULL,
+                previous_status TEXT NOT NULL,
+                next_status TEXT NOT NULL,
+                note TEXT NOT NULL,
+                reviewed_by TEXT NOT NULL,
+                reviewed_ts TEXT NOT NULL,
+                FOREIGN KEY(alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS system_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 level TEXT NOT NULL,
@@ -245,6 +260,38 @@ def init_db() -> None:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mobile_devices_seen ON mobile_devices(last_seen_ts)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_notification_log_alert ON notification_delivery_log(alert_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_notification_log_ts ON notification_delivery_log(ts DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_alert_review_history_alert ON alert_review_history(alert_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_alert_review_history_ts ON alert_review_history(reviewed_ts DESC)")
+
+        cur.execute("PRAGMA table_info(admin_users)")
+        admin_user_columns = {str(row["name"]) for row in cur.fetchall()}
+        if "recovery_code_hash" not in admin_user_columns:
+            cur.execute(
+                "ALTER TABLE admin_users ADD COLUMN recovery_code_hash TEXT NOT NULL DEFAULT ''"
+            )
+        if "recovery_code_updated_ts" not in admin_user_columns:
+            cur.execute(
+                "ALTER TABLE admin_users ADD COLUMN recovery_code_updated_ts TEXT NOT NULL DEFAULT ''"
+            )
+
+        cur.execute("PRAGMA table_info(alerts)")
+        alert_columns = {str(row["name"]) for row in cur.fetchall()}
+        if "review_status" not in alert_columns:
+            cur.execute(
+                "ALTER TABLE alerts ADD COLUMN review_status TEXT NOT NULL DEFAULT 'needs_review'"
+            )
+        if "review_note" not in alert_columns:
+            cur.execute(
+                "ALTER TABLE alerts ADD COLUMN review_note TEXT NOT NULL DEFAULT ''"
+            )
+        if "reviewed_by" not in alert_columns:
+            cur.execute(
+                "ALTER TABLE alerts ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''"
+            )
+        if "reviewed_ts" not in alert_columns:
+            cur.execute(
+                "ALTER TABLE alerts ADD COLUMN reviewed_ts TEXT NOT NULL DEFAULT ''"
+            )
 
         conn.commit()
         conn.close()
@@ -262,6 +309,18 @@ def ensure_admin_user(username: str, password: str) -> None:
                 "INSERT INTO admin_users(username, password_hash, created_ts, updated_ts) VALUES (?, ?, ?, ?)",
                 (username, hash_password(password), now, now),
             )
+        conn.commit()
+        conn.close()
+
+
+def ensure_single_admin_identity(username: str) -> None:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM admin_users WHERE username <> ?",
+            (username,),
+        )
         conn.commit()
         conn.close()
 
@@ -293,6 +352,76 @@ def create_session(user_id: int, token: str) -> None:
         )
         conn.commit()
         conn.close()
+
+
+def delete_sessions_for_user(user_id: int) -> None:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM sessions WHERE user_id = ?", (int(user_id),))
+        conn.commit()
+        conn.close()
+
+
+def get_single_admin_user() -> dict[str, Any] | None:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, username, recovery_code_hash, recovery_code_updated_ts FROM admin_users ORDER BY id ASC LIMIT 1"
+        )
+        row = cur.fetchone()
+        conn.close()
+    if row is None:
+        return None
+    return {
+        "id": int(row["id"]),
+        "username": str(row["username"]),
+        "recovery_code_hash": str(row["recovery_code_hash"] or ""),
+        "recovery_code_updated_ts": str(row["recovery_code_updated_ts"] or ""),
+    }
+
+
+def update_admin_password(user_id: int, password: str) -> None:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE admin_users SET password_hash = ?, updated_ts = ? WHERE id = ?",
+            (hash_password(password), now_iso(), int(user_id)),
+        )
+        conn.commit()
+        conn.close()
+
+
+def set_admin_recovery_code(user_id: int, recovery_code: str) -> None:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE admin_users SET recovery_code_hash = ?, recovery_code_updated_ts = ?, updated_ts = ? WHERE id = ?",
+            (hash_password(recovery_code), now_iso(), now_iso(), int(user_id)),
+        )
+        conn.commit()
+        conn.close()
+
+
+def verify_admin_recovery_code(user_id: int, recovery_code: str) -> bool:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT recovery_code_hash FROM admin_users WHERE id = ? LIMIT 1",
+            (int(user_id),),
+        )
+        row = cur.fetchone()
+        conn.close()
+    if row is None:
+        return False
+    stored_hash = str(row["recovery_code_hash"] or "")
+    if not stored_hash:
+        return False
+    return verify_password(recovery_code, stored_hash)
 
 
 def get_session_user(token: str) -> dict[str, Any] | None:
@@ -594,8 +723,11 @@ def create_alert(
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO alerts(event_id, type, severity, status, requires_ack, ack_ts, ack_by, snapshot_path, details_json, ts)
-            VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+            INSERT INTO alerts(
+                event_id, type, severity, status, requires_ack, ack_ts, ack_by,
+                snapshot_path, details_json, ts, review_status, review_note, reviewed_by, reviewed_ts
+            )
+            VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 'needs_review', '', '', '')
             """,
             (
                 event_id,
@@ -626,6 +758,76 @@ def ack_alert(alert_id: int, ack_by: str, status: str = "ACK") -> bool:
         updated = cur.rowcount > 0
         conn.close()
     return updated
+
+
+def update_alert_review(
+    alert_id: int,
+    review_status: str,
+    review_note: str,
+    reviewed_by: str,
+) -> bool:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT review_status FROM alerts WHERE id = ? LIMIT 1",
+            (int(alert_id),),
+        )
+        row = cur.fetchone()
+        if row is None:
+            conn.close()
+            return False
+        previous_status = str(row["review_status"] or "needs_review").strip().lower()
+        reviewed_ts = now_iso()
+        cur.execute(
+            "UPDATE alerts SET review_status=?, review_note=?, reviewed_by=?, reviewed_ts=? WHERE id=?",
+            (
+                review_status.strip().lower(),
+                review_note[:1000],
+                reviewed_by[:120],
+                reviewed_ts,
+                int(alert_id),
+            ),
+        )
+        if cur.rowcount > 0:
+            cur.execute(
+                """
+                INSERT INTO alert_review_history(
+                    alert_id, previous_status, next_status, note, reviewed_by, reviewed_ts
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(alert_id),
+                    previous_status,
+                    review_status.strip().lower(),
+                    review_note[:1000],
+                    reviewed_by[:120],
+                    reviewed_ts,
+                ),
+            )
+        conn.commit()
+        updated = cur.rowcount > 0
+        conn.close()
+    return updated
+
+
+def list_alert_review_history(alert_id: int, limit: int = 50) -> list[dict[str, Any]]:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, alert_id, previous_status, next_status, note, reviewed_by, reviewed_ts
+            FROM alert_review_history
+            WHERE alert_id = ?
+            ORDER BY reviewed_ts DESC, id DESC
+            LIMIT ?
+            """,
+            (int(alert_id), max(1, min(int(limit), 200))),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+        conn.close()
+    return rows
 
 
 def list_events(
@@ -1115,20 +1317,44 @@ def daily_stats(days: int) -> list[dict[str, Any]]:
                 SELECT date('now', 'localtime'), 1
                 UNION ALL
                 SELECT date(day, '-1 day'), n + 1 FROM d WHERE n < ?
+            ),
+            event_daily AS (
+                SELECT
+                    date(ts, 'localtime') AS day,
+                    SUM(CASE WHEN event_code='AUTHORIZED' THEN 1 ELSE 0 END) AS authorized_faces,
+                    SUM(CASE WHEN event_code='UNKNOWN' THEN 1 ELSE 0 END) AS unknown_detections,
+                    SUM(CASE WHEN event_code='FLAME_SIGNAL' THEN 1 ELSE 0 END) AS flame_signals,
+                    SUM(CASE WHEN event_code='SMOKE_HIGH' THEN 1 ELSE 0 END) AS smoke_high_events
+                FROM events
+                GROUP BY date(ts, 'localtime')
+            ),
+            alert_daily AS (
+                SELECT
+                    date(a.ts, 'localtime') AS day,
+                    SUM(CASE WHEN a.type='FIRE' THEN 1 ELSE 0 END) AS fire_alerts,
+                    SUM(CASE WHEN a.type IN ('INTRUDER','DOOR_TAMPER') THEN 1 ELSE 0 END) AS intruder_alerts,
+                    AVG(
+                        CASE
+                            WHEN e.ts IS NULL THEN NULL
+                            ELSE MAX((julianday(a.ts) - julianday(e.ts)) * 86400.0, 0)
+                        END
+                    ) AS avg_response_seconds
+                FROM alerts a
+                LEFT JOIN events e ON e.id = a.event_id
+                GROUP BY date(a.ts, 'localtime')
             )
             SELECT
                 d.day as date,
-                COALESCE(SUM(CASE WHEN e.event_code='AUTHORIZED' THEN 1 ELSE 0 END), 0) AS authorized_faces,
-                COALESCE(SUM(CASE WHEN e.event_code='UNKNOWN' THEN 1 ELSE 0 END), 0) AS unknown_detections,
-                COALESCE(SUM(CASE WHEN e.event_code='FLAME_SIGNAL' THEN 1 ELSE 0 END), 0) AS flame_signals,
-                COALESCE(SUM(CASE WHEN e.event_code='SMOKE_HIGH' THEN 1 ELSE 0 END), 0) AS smoke_high_events,
-                COALESCE(SUM(CASE WHEN a.type='FIRE' THEN 1 ELSE 0 END), 0) AS fire_alerts,
-                COALESCE(SUM(CASE WHEN a.type IN ('INTRUDER','DOOR_TAMPER') THEN 1 ELSE 0 END), 0) AS intruder_alerts,
-                1.4 AS avg_response_seconds
+                COALESCE(ed.authorized_faces, 0) AS authorized_faces,
+                COALESCE(ed.unknown_detections, 0) AS unknown_detections,
+                COALESCE(ed.flame_signals, 0) AS flame_signals,
+                COALESCE(ed.smoke_high_events, 0) AS smoke_high_events,
+                COALESCE(ad.fire_alerts, 0) AS fire_alerts,
+                COALESCE(ad.intruder_alerts, 0) AS intruder_alerts,
+                ROUND(COALESCE(ad.avg_response_seconds, 0), 3) AS avg_response_seconds
             FROM d
-            LEFT JOIN events e ON date(e.ts, 'localtime') = d.day
-            LEFT JOIN alerts a ON date(a.ts, 'localtime') = d.day
-            GROUP BY d.day
+            LEFT JOIN event_daily ed ON ed.day = d.day
+            LEFT JOIN alert_daily ad ON ad.day = d.day
             ORDER BY d.day ASC
             """,
             (limit,),
@@ -1150,14 +1376,17 @@ def log(level: str, message: str) -> None:
         conn.close()
 
 
-def cleanup_old_records(event_days: int, log_days: int) -> None:
+def cleanup_old_records(event_days: int, log_days: int) -> dict[str, int]:
     with _LOCK:
         conn = _conn()
         cur = conn.cursor()
         cur.execute("DELETE FROM events WHERE ts < datetime('now', ?)", (f"-{int(event_days)} day",))
+        deleted_events = max(0, int(cur.rowcount))
         cur.execute("DELETE FROM system_logs WHERE ts < datetime('now', ?)", (f"-{int(log_days)} day",))
+        deleted_logs = max(0, int(cur.rowcount))
         conn.commit()
         conn.close()
+    return {"events": deleted_events, "logs": deleted_logs}
 
 
 def event_exists_recent(event_code: str, source_node: str, window_seconds: int = 120) -> bool:

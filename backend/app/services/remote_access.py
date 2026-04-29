@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from fastapi import Request
 
 from ..core.config import Settings
+from ..db import store
 
 try:
     from zeroconf import IPVersion, ServiceInfo, Zeroconf  # type: ignore
@@ -67,6 +68,19 @@ class LinkResolver:
         path = parsed.path.rstrip("/")
         return f"{parsed.scheme}://{parsed.netloc}{path}"
 
+    def _runtime_base_url(self, key: str, fallback: str) -> str:
+        try:
+            stored = store.get_setting(key)
+        except Exception:
+            stored = None
+        return self._normalize_base_url(str(stored) if stored is not None else fallback)
+
+    def configured_lan_base_url(self) -> str:
+        return self._runtime_base_url("LAN_BASE_URL", self.settings.lan_base_url)
+
+    def resolve_tailscale_base_url(self) -> str:
+        return self._runtime_base_url("TAILSCALE_BASE_URL", self.settings.tailscale_base_url)
+
     def _join(self, base_url: str, route: str) -> str:
         if not base_url:
             return ""
@@ -94,7 +108,7 @@ class LinkResolver:
         return bool(ip.version == 4 and not ip.is_loopback and not ip.is_unspecified)
 
     def detect_lan_ip(self, request: Request | None = None) -> str:
-        explicit_lan = self._normalize_base_url(self.settings.lan_base_url)
+        explicit_lan = self.configured_lan_base_url()
         if explicit_lan:
             parsed = urlparse(explicit_lan)
             host = (parsed.hostname or "").strip()
@@ -124,7 +138,7 @@ class LinkResolver:
         return ""
 
     def resolve_lan_base_url(self, request: Request | None = None) -> str:
-        explicit_lan = self._normalize_base_url(self.settings.lan_base_url)
+        explicit_lan = self.configured_lan_base_url()
         if explicit_lan:
             return explicit_lan
         detected_ip = self.detect_lan_ip(request=request)
@@ -158,7 +172,7 @@ class LinkResolver:
         return f"http://{hostname}.local:{self.backend_port}"
 
     def resolve_links(self, request: Request | None = None) -> RemoteAccessLinks:
-        tailscale_base = self._normalize_base_url(self.settings.tailscale_base_url)
+        tailscale_base = self.resolve_tailscale_base_url()
         lan_base = self.resolve_lan_base_url(request=request)
         mdns_base = self.resolve_mdns_base_url()
 

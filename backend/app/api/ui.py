@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 import time
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlparse
 
 import cv2
 from fastapi import APIRouter, HTTPException, Request
@@ -23,7 +26,9 @@ from ..core.config import Settings
 from ..core.security import parse_iso
 from ..db import store
 from ..schemas.api import (
+    AlertReviewUpdateRequest,
     AssistantQueryRequest,
+    BackupRestoreRequest,
     CameraControlRequest,
     RuntimeSettingUpdateRequest,
 )
@@ -179,6 +184,10 @@ def _alert_to_ui(row: dict[str, Any]) -> dict[str, Any]:
         "title": str(details.get("title") or row.get("type") or "Alert"),
         "description": str(details.get("description") or ""),
         "acknowledged": str(row.get("status") or "").upper() != "ACTIVE",
+        "review_status": str(row.get("review_status") or "needs_review").lower(),
+        "review_note": str(row.get("review_note") or ""),
+        "reviewed_by": str(row.get("reviewed_by") or ""),
+        "reviewed_ts": str(row.get("reviewed_ts") or ""),
         "confidence": details.get("confidence"),
         "fusion_evidence": details.get("fusion_evidence") or [],
         "snapshot_path": snapshot_url,
@@ -226,6 +235,10 @@ def _event_to_ui(row: dict[str, Any]) -> dict[str, Any]:
         "title": str(row.get("title") or row.get("event_code") or "Event"),
         "description": str(row.get("description") or ""),
         "acknowledged": True,
+        "review_status": "archived",
+        "review_note": "",
+        "reviewed_by": "",
+        "reviewed_ts": "",
         "confidence": details.get("confidence"),
         "fusion_evidence": details.get("fusion_evidence") or [],
         "face_overlays": _face_overlays_from_details(details),
@@ -388,6 +401,22 @@ RUNTIME_SETTING_SPECS: dict[str, dict[str, Any]] = {
         "input_type": "switch",
         "live_apply": True,
     },
+    "LAN_BASE_URL": {
+        "description": "Optional fixed local backend URL; leave blank to auto-detect LAN IP",
+        "group": "Connectivity",
+        "value_type": "url",
+        "input_type": "text",
+        "allow_empty": True,
+        "live_apply": True,
+    },
+    "TAILSCALE_BASE_URL": {
+        "description": "Tailscale backend URL used by mobile clients outside the local network",
+        "group": "Connectivity",
+        "value_type": "url",
+        "input_type": "text",
+        "allow_empty": True,
+        "live_apply": True,
+    },
     "WEBPUSH_VAPID_PUBLIC_KEY": {
         "description": "VAPID public key used by web push subscriptions",
         "group": "Secrets",
@@ -475,6 +504,10 @@ def _runtime_default_value(key: str, settings: Settings) -> str:
         return "false"
     if key == "mobile_push_enabled":
         return "true"
+    if key == "LAN_BASE_URL":
+        return settings.lan_base_url
+    if key == "TAILSCALE_BASE_URL":
+        return settings.tailscale_base_url
     if key == "WEBPUSH_VAPID_PUBLIC_KEY":
         return settings.webpush_vapid_public_key
     if key == "WEBPUSH_VAPID_PRIVATE_KEY":
@@ -513,6 +546,18 @@ def _normalize_runtime_setting_value(key: str, value: str, settings: Settings) -
         step = float(spec.get("step", 0.01))
         decimals = 2 if step >= 0.01 else 4
         return f"{parsed:.{decimals}f}".rstrip("0").rstrip(".")
+
+    if value_type == "url":
+        if not raw:
+            if bool(spec.get("allow_empty", False)):
+                return ""
+            raise ValueError("value is required")
+        candidate = raw if "://" in raw else f"http://{raw}"
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("value must be a valid http(s) URL")
+        path = parsed.path.rstrip("/")
+        return f"{parsed.scheme}://{parsed.netloc}{path}".rstrip("/")
 
     if bool(spec.get("secret")):
         return raw
@@ -565,6 +610,108 @@ def _runtime_settings(settings: Settings) -> list[dict[str, Any]]:
             item["step"] = spec["step"]
         items.append(item)
     return items
+
+
+def _backup_dir(settings: Settings) -> Path:
+    path = Path(settings.storage_root) / "backups"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _list_backup_files(settings: Settings) -> list[Path]:
+    path = _backup_dir(settings)
+    files = [item for item in path.iterdir() if item.is_file() and item.suffix == ".zip"]
+    files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    return files
+
+
+def _build_backup_archive(settings: Settings, *, prefix: str = "thesis_backup", include_snapshots: bool = True) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive_name = f"{prefix}_{stamp}.zip"
+    archive_path = _backup_dir(settings) / archive_name
+
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        db_path = Path(settings.db_path)
+        if db_path.exists() and db_path.is_file():
+            archive.write(db_path, arcname="db/system.db")
+
+        snapshot_root = Path(settings.snapshot_root)
+        if include_snapshots and snapshot_root.exists() and snapshot_root.is_dir():
+            for file_path in snapshot_root.rglob("*"):
+                if file_path.is_file():
+                    archive.write(file_path, arcname=f"snapshots/{file_path.relative_to(snapshot_root)}")
+
+        manifest = {
+            "created_ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "backend_port": int(settings.backend_port),
+            "db_path": str(settings.db_path),
+            "snapshot_root": str(settings.snapshot_root),
+            "include_snapshots": bool(include_snapshots),
+        }
+        archive.writestr("manifest.json", json.dumps(manifest, indent=2))
+
+    return archive_path
+
+
+def _restore_backup_archive(settings: Settings, name: str, *, include_snapshots: bool) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.zip", name):
+        raise HTTPException(status_code=400, detail="invalid backup name")
+
+    backup_root = _backup_dir(settings).resolve()
+    archive_path = (backup_root / name).resolve()
+    if archive_path != backup_root and backup_root not in archive_path.parents:
+        raise HTTPException(status_code=404, detail="backup not found")
+    if not archive_path.exists() or not archive_path.is_file():
+        raise HTTPException(status_code=404, detail="backup not found")
+
+    db_path = Path(settings.db_path)
+    snapshot_root = Path(settings.snapshot_root)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+
+    rollback_archive = _build_backup_archive(
+        settings,
+        prefix="thesis_pre_restore",
+        include_snapshots=True,
+    )
+
+    restored_snapshots = 0
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        names = set(archive.namelist())
+        if "db/system.db" not in names:
+            raise HTTPException(status_code=400, detail="backup archive missing db/system.db")
+
+        for member in names:
+            if member.startswith("/") or ".." in member.split("/"):
+                raise HTTPException(status_code=400, detail="backup archive contains unsafe paths")
+
+        with archive.open("db/system.db", "r") as src, open(db_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+        if include_snapshots:
+            if snapshot_root.exists():
+                shutil.rmtree(snapshot_root)
+            snapshot_root.mkdir(parents=True, exist_ok=True)
+
+            for member in archive.namelist():
+                if not member.startswith("snapshots/"):
+                    continue
+                rel_name = member[len("snapshots/") :]
+                if not rel_name or rel_name.endswith("/"):
+                    continue
+                target = (snapshot_root / rel_name).resolve()
+                if target != snapshot_root and snapshot_root.resolve() not in target.parents:
+                    raise HTTPException(status_code=400, detail="backup archive contains unsafe snapshot path")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member, "r") as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                restored_snapshots += 1
+
+    return {
+        "snapshots_restored": restored_snapshots,
+        "rollback_backup_name": rollback_archive.name,
+        "scope": "database_and_snapshots" if include_snapshots else "database_only",
+    }
 
 
 def _apply_runtime_setting(key: str, value: str, request: Request) -> None:
@@ -646,6 +793,13 @@ def _apply_runtime_setting(key: str, value: str, request: Request) -> None:
 
     if normalized_key == "UNKNOWN_PRESENCE_COOLDOWN_SECONDS" and supervisor is not None:
         supervisor.unknown_presence_cooldown_seconds = max(5, int(value))
+        return
+
+    if normalized_key in {"LAN_BASE_URL", "TAILSCALE_BASE_URL"}:
+        mdns_publisher = getattr(request.app.state, "mdns_publisher", None)
+        if normalized_key == "LAN_BASE_URL" and mdns_publisher is not None:
+            mdns_publisher.stop()
+            mdns_publisher.start()
         return
 
     if notification_dispatcher is not None:
@@ -1144,6 +1298,112 @@ def ui_runtime_setting_update(
     }
 
 
+@router.get("/api/ui/backup/status")
+def ui_backup_status(request: Request) -> dict:
+    get_current_user(request)
+    settings: Settings = request.app.state.settings
+    files = _list_backup_files(settings)
+    latest = files[0] if files else None
+    return {
+        "ok": True,
+        "count": len(files),
+        "files": [
+            {
+                "name": item.name,
+                "size_bytes": int(item.stat().st_size),
+                "modified_ts": datetime.fromtimestamp(
+                    item.stat().st_mtime, tz=timezone.utc
+                ).isoformat(timespec="seconds"),
+            }
+            for item in files
+        ],
+        "latest": {
+            "name": latest.name,
+            "size_bytes": int(latest.stat().st_size),
+            "modified_ts": datetime.fromtimestamp(
+                latest.stat().st_mtime, tz=timezone.utc
+            ).isoformat(timespec="seconds"),
+        }
+        if latest
+        else None,
+    }
+
+
+@router.post("/api/ui/backup/create")
+def ui_backup_create(request: Request) -> dict:
+    get_current_user(request)
+    settings: Settings = request.app.state.settings
+    archive_path = _build_backup_archive(settings)
+    return {
+        "ok": True,
+        "name": archive_path.name,
+        "size_bytes": int(archive_path.stat().st_size),
+    }
+
+
+@router.get("/api/ui/backup/download/{name}")
+def ui_backup_download(name: str, request: Request) -> FileResponse:
+    get_current_user(request)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.zip", name):
+        raise HTTPException(status_code=400, detail="invalid backup name")
+    settings: Settings = request.app.state.settings
+    target = (_backup_dir(settings) / name).resolve()
+    backup_root = _backup_dir(settings).resolve()
+    if target != backup_root and backup_root not in target.parents:
+        raise HTTPException(status_code=404, detail="backup not found")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="backup not found")
+    return FileResponse(target, filename=name, media_type="application/zip")
+
+
+@router.post("/api/ui/backup/restore")
+def ui_backup_restore(payload: BackupRestoreRequest, request: Request) -> dict:
+    get_current_user(request)
+    settings: Settings = request.app.state.settings
+    result = _restore_backup_archive(
+        settings,
+        payload.name.strip(),
+        include_snapshots=bool(payload.include_snapshots),
+    )
+    return {
+        "ok": True,
+        "name": payload.name.strip(),
+        "snapshots_restored": int(result.get("snapshots_restored", 0)),
+        "rollback_backup_name": str(result.get("rollback_backup_name") or ""),
+        "scope": str(result.get("scope") or "database_only"),
+        "message": "Backup restored safely. A pre-restore rollback backup was created; restart backend to ensure all services use restored state.",
+    }
+
+
+@router.get("/api/ui/retention/status")
+def ui_retention_status(request: Request) -> dict:
+    get_current_user(request)
+    settings: Settings = request.app.state.settings
+
+    def _read_int(key: str, fallback: int) -> int:
+        raw = store.get_setting(key)
+        try:
+            return int(str(raw).strip()) if raw is not None else int(fallback)
+        except ValueError:
+            return int(fallback)
+
+    return {
+        "ok": True,
+        "event_retention_days": _read_int("EVENT_RETENTION_DAYS", settings.event_retention_days),
+        "log_retention_days": _read_int("LOG_RETENTION_DAYS", settings.log_retention_days),
+        "regular_snapshot_retention_days": _read_int(
+            "REGULAR_SNAPSHOT_RETENTION_DAYS", settings.regular_snapshot_retention_days
+        ),
+        "critical_snapshot_retention_days": _read_int(
+            "CRITICAL_SNAPSHOT_RETENTION_DAYS", settings.critical_snapshot_retention_days
+        ),
+        "last_run_ts": str(store.get_setting("RETENTION_LAST_RUN_TS") or ""),
+        "last_events_deleted": _read_int("RETENTION_LAST_EVENTS_DELETED", 0),
+        "last_logs_deleted": _read_int("RETENTION_LAST_LOGS_DELETED", 0),
+        "last_snapshots_deleted": _read_int("RETENTION_LAST_SNAPSHOTS_DELETED", 0),
+    }
+
+
 @router.post("/api/ui/camera/control")
 def ui_camera_control(payload: CameraControlRequest, request: Request) -> dict:
     get_current_user(request)
@@ -1192,6 +1452,49 @@ def ack_json(alert_id: int, request: Request) -> dict:
 @router.post("/api/alerts/{alert_id}/acknowledge")
 def ack_json_alias(alert_id: int, request: Request) -> dict:
     return ack_json(alert_id, request)
+
+
+@router.post("/api/alerts/{alert_id}/review")
+def update_alert_review(
+    alert_id: int,
+    payload: AlertReviewUpdateRequest,
+    request: Request,
+) -> dict:
+    user = get_current_user(request)
+    normalized_status = payload.review_status.strip().lower()
+    allowed_statuses = {
+        "needs_review",
+        "confirmed",
+        "false_positive",
+        "resolved",
+        "archived",
+    }
+    if normalized_status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail="unsupported review status")
+
+    updated = store.update_alert_review(
+        alert_id=alert_id,
+        review_status=normalized_status,
+        review_note=payload.review_note,
+        reviewed_by=str(user.get("username") or "admin"),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="alert not found")
+
+    row = store.get_alert(alert_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="alert not found")
+    return {"ok": True, "alert": _alert_to_ui(row)}
+
+
+@router.get("/api/alerts/{alert_id}/review/history")
+def alert_review_history(alert_id: int, request: Request, limit: int = 50) -> dict:
+    get_current_user(request)
+    row = store.get_alert(alert_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="alert not found")
+    history = store.list_alert_review_history(alert_id, limit=limit)
+    return {"ok": True, "history": history}
 
 
 @router.post("/api/alerts/{alert_id}/snapshot/delete")
@@ -1355,8 +1658,10 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
 
         fire_score = float(fire_result.get("confidence") or 0.0)
         fire_detected = bool(fire_result.get("flame"))
+        detected_class = str(fire_result.get("detected_class") or "none").strip().lower()
+        class_label = detected_class.upper() if detected_class and detected_class != "none" else "NONE"
         fire_color = (0, 0, 255) if fire_detected else (60, 180, 255)
-        fire_text = f"FIRE {'YES' if fire_detected else 'NO'} {fire_score:.1f}%"
+        fire_text = f"FIRE {'YES' if fire_detected else 'NO'} [{class_label}] {fire_score:.1f}%"
         cv2.putText(
             frame,
             fire_text,
@@ -1372,9 +1677,16 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
         if isinstance(fire_bbox, list) and len(fire_bbox) == 4:
             fx, fy, fw, fh = [int(value) for value in fire_bbox]
             cv2.rectangle(frame, (fx, fy), (fx + fw, fy + fh), fire_color, 2)
+            region_label = (
+                "FIRE REGION"
+                if detected_class == "fire"
+                else "SMOKE REGION"
+                if detected_class == "smoke"
+                else "DETECTION REGION"
+            )
             cv2.putText(
                 frame,
-                "FLAME REGION",
+                region_label,
                 (max(4, fx), max(74, fy - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,

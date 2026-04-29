@@ -1,53 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Camera, Maximize2, X } from 'lucide-react';
 import { StatusBadge } from '../components/StatusBadge';
-import { fetchLiveEvents, fetchLiveNodes, sendCameraControl } from '../data/liveApi';
-import {
-  cameraFeeds as fallbackCameraFeeds,
-  detectionPipelines as fallbackDetectionPipelines,
-  recentEvents as fallbackRecentEvents,
-  type Alert,
-  type CameraFeed,
-  type DetectionPipeline,
-  type Room,
-} from '../data/mockData';
-
-type FullscreenElement = HTMLElement & {
-  webkitRequestFullscreen?: () => Promise<void> | void;
-  msRequestFullscreen?: () => Promise<void> | void;
-};
-
-type FullscreenDocument = Document & {
-  webkitFullscreenElement?: Element | null;
-  msFullscreenElement?: Element | null;
-  webkitExitFullscreen?: () => Promise<void> | void;
-  msExitFullscreen?: () => Promise<void> | void;
-};
-
-type LockableScreen = Screen & {
-  orientation?: ScreenOrientation & {
-    lock?: (orientation: string) => Promise<void>;
-    unlock?: () => void;
-  };
-};
+import { fetchLiveEvents, fetchLiveNodes } from '../data/liveApi';
+import type { Alert, CameraFeed, DetectionPipeline, Room } from '../data/types';
 
 export function LiveMonitoring() {
-  const [events, setEvents] = useState<Alert[]>(fallbackRecentEvents);
-  const [cameraFeeds, setCameraFeeds] = useState<CameraFeed[]>(fallbackCameraFeeds);
-  const [detectionPipelines, setDetectionPipelines] = useState<DetectionPipeline[]>(
-    fallbackDetectionPipelines,
-  );
+  const [events, setEvents] = useState<Alert[]>([]);
+  const [cameraFeeds, setCameraFeeds] = useState<CameraFeed[]>([]);
+  const [detectionPipelines, setDetectionPipelines] = useState<DetectionPipeline[]>([]);
   const [frameRefreshTick, setFrameRefreshTick] = useState(() => Date.now());
   const [faceDebugOverlay, setFaceDebugOverlay] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [expandedFeed, setExpandedFeed] = useState<
     { location: Room; nodeId: string; streamPath?: string } | null
   >(null);
-  const pendingNativeFullscreenRef = useRef<
-    { location: Room; nodeId: string; streamPath?: string; requestedAt: number } | null
-  >(null);
-  const [flashStateByNode, setFlashStateByNode] = useState<Record<string, boolean>>({});
-  const [controlPendingByNode, setControlPendingByNode] = useState<Record<string, boolean>>({});
-  const [controlFeedbackByNode, setControlFeedbackByNode] = useState<Record<string, string>>({});
   const onlineFeedCount = cameraFeeds.filter((feed) => feed.status === 'online').length;
   const offlineFeedCount = cameraFeeds.filter((feed) => feed.status !== 'online').length;
   const needsFramePolling = useMemo(() => {
@@ -72,8 +39,16 @@ export function LiveMonitoring() {
         setEvents(mergedEvents);
         setCameraFeeds(nodesLive.cameraFeeds);
         setDetectionPipelines(nodesLive.detectionPipelines);
-      } catch {
-        // Keep fallback data if API is unavailable.
+        setLoadError('');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unable to load live monitoring data.';
+        if (!cancelled) {
+          setLoadError(message);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
     };
 
@@ -130,122 +105,6 @@ export function LiveMonitoring() {
     return ageMs <= maxAgeSeconds * 1000;
   };
 
-  const lockLandscapeIfPossible = async () => {
-    const lockableScreen = window.screen as LockableScreen;
-    const locker = lockableScreen.orientation?.lock;
-    if (!locker) {
-      return false;
-    }
-    try {
-      await locker.call(lockableScreen.orientation, 'landscape');
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  const unlockOrientationIfPossible = () => {
-    const lockableScreen = window.screen as LockableScreen;
-    try {
-      lockableScreen.orientation?.unlock?.();
-    } catch {
-      // Ignore unlock errors.
-    }
-  };
-
-  useEffect(() => {
-    const onFullscreenChange = () => {
-      const fsDoc = document as FullscreenDocument;
-      const currentFullscreen =
-        fsDoc.fullscreenElement || fsDoc.webkitFullscreenElement || fsDoc.msFullscreenElement || null;
-      if (!currentFullscreen) {
-        unlockOrientationIfPossible();
-        const pending = pendingNativeFullscreenRef.current;
-        if (pending && Date.now() - pending.requestedAt <= 3500) {
-          setExpandedFeed({
-            location: pending.location,
-            nodeId: pending.nodeId,
-            streamPath: pending.streamPath,
-          });
-        }
-        pendingNativeFullscreenRef.current = null;
-      }
-    };
-
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-    document.addEventListener('webkitfullscreenchange', onFullscreenChange as EventListener);
-    document.addEventListener('MSFullscreenChange', onFullscreenChange as EventListener);
-    return () => {
-      document.removeEventListener('fullscreenchange', onFullscreenChange);
-      document.removeEventListener('webkitfullscreenchange', onFullscreenChange as EventListener);
-      document.removeEventListener('MSFullscreenChange', onFullscreenChange as EventListener);
-    };
-  }, []);
-
-  const toggleFullscreen = async (target: HTMLElement): Promise<boolean> => {
-    const fsDoc = document as FullscreenDocument;
-    const activeFsElement =
-      fsDoc.fullscreenElement || fsDoc.webkitFullscreenElement || fsDoc.msFullscreenElement || null;
-
-    if (activeFsElement === target) {
-      if (fsDoc.exitFullscreen) {
-        await fsDoc.exitFullscreen();
-        return true;
-      }
-      if (fsDoc.webkitExitFullscreen) {
-        await fsDoc.webkitExitFullscreen();
-        return true;
-      }
-      if (fsDoc.msExitFullscreen) {
-        await fsDoc.msExitFullscreen();
-      }
-      unlockOrientationIfPossible();
-      return true;
-    }
-
-    if (activeFsElement && fsDoc.exitFullscreen) {
-      await fsDoc.exitFullscreen();
-    }
-
-    const fsTarget = target as FullscreenElement;
-    if (fsTarget.requestFullscreen) {
-      await fsTarget.requestFullscreen();
-    } else if (fsTarget.webkitRequestFullscreen) {
-      await fsTarget.webkitRequestFullscreen();
-    } else if (fsTarget.msRequestFullscreen) {
-      await fsTarget.msRequestFullscreen();
-    } else {
-      return false;
-    }
-
-    const enteredFullscreen =
-      (fsDoc.fullscreenElement || fsDoc.webkitFullscreenElement || fsDoc.msFullscreenElement || null) === target;
-    if (!enteredFullscreen) {
-      return false;
-    }
-
-    await lockLandscapeIfPossible();
-    return true;
-  };
-
-  const handleLightToggle = async (nodeId: string, turnOn: boolean) => {
-    if (controlPendingByNode[nodeId]) {
-      return;
-    }
-
-    setControlPendingByNode((prev) => ({ ...prev, [nodeId]: true }));
-    setControlFeedbackByNode((prev) => ({ ...prev, [nodeId]: 'Sending command...' }));
-    try {
-      await sendCameraControl(nodeId, turnOn ? 'flash_on' : 'flash_off');
-      setFlashStateByNode((prev) => ({ ...prev, [nodeId]: turnOn }));
-      setControlFeedbackByNode((prev) => ({ ...prev, [nodeId]: turnOn ? 'Light turned ON.' : 'Light turned OFF.' }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to send camera command.';
-      setControlFeedbackByNode((prev) => ({ ...prev, [nodeId]: message }));
-    } finally {
-      setControlPendingByNode((prev) => ({ ...prev, [nodeId]: false }));
-    }
-  };
 
   const buildCameraSrc = (path?: string) => {
     if (!path) {
@@ -276,8 +135,6 @@ export function LiveMonitoring() {
     const events = eventsForRoom(location);
     const nodeEvents = eventsForNode(nodeId);
     const isOnline = status === 'online';
-    const lightState = flashStateByNode[nodeId];
-    const lightLabel = lightState == null ? 'Light state unknown' : (lightState ? 'Light: ON' : 'Light: OFF');
     const latestFaceEvent = nodeEvents.find(
       (event) => event.eventCode === 'UNKNOWN' || event.eventCode === 'AUTHORIZED',
     );
@@ -325,59 +182,14 @@ export function LiveMonitoring() {
           </div>
 
           <button
-            onClick={(event) => {
-              const frame = event.currentTarget.closest('[data-camera-frame="true"]');
-              if (frame instanceof HTMLElement) {
-                void (async () => {
-                  try {
-                    const opened = await toggleFullscreen(frame);
-                    if (!opened) {
-                      pendingNativeFullscreenRef.current = null;
-                      setExpandedFeed({ location, nodeId, streamPath });
-                      return;
-                    }
-
-                    const requestedAt = Date.now();
-                    pendingNativeFullscreenRef.current = {
-                      location,
-                      nodeId,
-                      streamPath,
-                      requestedAt,
-                    };
-                    window.setTimeout(() => {
-                      const pending = pendingNativeFullscreenRef.current;
-                      if (!pending || pending.requestedAt !== requestedAt) {
-                        return;
-                      }
-                      const fsDoc = document as FullscreenDocument;
-                      const currentFullscreen =
-                        fsDoc.fullscreenElement ||
-                        fsDoc.webkitFullscreenElement ||
-                        fsDoc.msFullscreenElement ||
-                        null;
-                      if (!currentFullscreen) {
-                        setExpandedFeed({
-                          location: pending.location,
-                          nodeId: pending.nodeId,
-                          streamPath: pending.streamPath,
-                        });
-                      }
-                      pendingNativeFullscreenRef.current = null;
-                    }, 3500);
-                  } catch {
-                    pendingNativeFullscreenRef.current = null;
-                    setExpandedFeed({ location, nodeId, streamPath });
-                  }
-                })();
-              } else {
-                setExpandedFeed({ location, nodeId, streamPath });
-              }
+            onClick={() => {
+              setExpandedFeed({ location, nodeId, streamPath });
             }}
-            className="absolute bottom-3 right-3 p-2 bg-white/90 hover:bg-white rounded-lg transition-colors"
-            title="Toggle Fullscreen"
-            aria-label="Toggle Fullscreen"
+            className="action-cta absolute bottom-3 right-3 p-2 rounded-lg"
+            title="Expand Preview"
+            aria-label="Expand Preview"
           >
-            <Maximize2 className="w-5 h-5 text-gray-900" />
+            <Maximize2 className="w-5 h-5 text-white" />
           </button>
 
           <div className="absolute bottom-3 left-3 px-2.5 py-1 bg-black/60 text-white text-xs rounded">
@@ -402,30 +214,6 @@ export function LiveMonitoring() {
               <p className="font-medium text-gray-900 font-mono">{nodeId}</p>
             </div>
           </div>
-
-          <div className="flex flex-wrap items-center gap-2 mb-2">
-            <button
-              onClick={() => {
-                void handleLightToggle(nodeId, true);
-              }}
-              disabled={!isOnline || Boolean(controlPendingByNode[nodeId])}
-              className="w-full sm:w-auto px-3 py-2 text-xs font-medium rounded-md border border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100 disabled:bg-gray-100 disabled:text-gray-400 disabled:border-gray-200 disabled:cursor-not-allowed"
-            >
-              Light ON
-            </button>
-            <button
-              onClick={() => {
-                void handleLightToggle(nodeId, false);
-              }}
-              disabled={!isOnline || Boolean(controlPendingByNode[nodeId])}
-              className="w-full sm:w-auto px-3 py-2 text-xs font-medium rounded-md border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 disabled:bg-gray-100 disabled:text-gray-400 disabled:border-gray-200 disabled:cursor-not-allowed"
-            >
-              Light OFF
-            </button>
-          </div>
-          <span className="text-xs text-gray-600 block mb-4">
-            {controlPendingByNode[nodeId] ? 'Sending...' : (controlFeedbackByNode[nodeId] || lightLabel)}
-          </span>
 
           <div className="space-y-2">
             <h4 className="text-sm font-medium text-gray-900">Recent Activity</h4>
@@ -496,6 +284,17 @@ export function LiveMonitoring() {
           </button>
         </div>
       </div>
+
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          Live monitoring data unavailable: {loadError}
+        </div>
+      )}
+      {isLoading && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
+          Loading live camera feeds...
+        </div>
+      )}
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         {cameraFeeds.length > 0 ? (

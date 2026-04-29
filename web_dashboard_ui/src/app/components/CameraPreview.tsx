@@ -1,7 +1,7 @@
 import { Camera, Eye } from 'lucide-react';
 
 interface CameraPreviewProps {
-  location: 'Living Room' | 'Door Entrance Area';
+  location: string;
   status: 'online' | 'offline';
   nodeId?: string;
   caption?: string;
@@ -25,7 +25,7 @@ export function CameraPreview({ location, status, nodeId, caption, onViewLive }:
         {onViewLive && (
           <button
             onClick={onViewLive}
-            className="absolute bottom-3 right-3 px-3 py-1.5 bg-white/90 hover:bg-white text-gray-900 text-sm rounded-lg flex items-center gap-1.5 transition-colors"
+            className="action-cta absolute bottom-3 right-3 px-3 py-1.5 text-sm font-medium rounded-lg flex items-center gap-1.5"
           >
             <Eye className="w-4 h-4" />
             View Live

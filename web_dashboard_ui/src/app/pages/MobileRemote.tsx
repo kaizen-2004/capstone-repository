@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Camera, LogOut, RefreshCw } from 'lucide-react';
 import { fetchLiveNodes, fetchMobileRemoteStatus } from '../data/liveApi';
-import type { CameraFeed } from '../data/mockData';
+import type { CameraFeed } from '../data/types';
 import { useAuth } from '../components/AuthGate';
 
 function cameraStatusClass(status: CameraFeed['status']): string {

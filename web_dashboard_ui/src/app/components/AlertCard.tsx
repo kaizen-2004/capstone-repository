@@ -1,5 +1,5 @@
 import { AlertTriangle, Flame, UserCheck, Bell } from 'lucide-react';
-import type { Alert } from '../data/mockData';
+import type { Alert } from '../data/types';
 import { StatusBadge } from './StatusBadge';
 
 interface AlertCardProps {

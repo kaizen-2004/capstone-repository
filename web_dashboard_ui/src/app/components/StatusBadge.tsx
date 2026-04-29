@@ -1,4 +1,4 @@
-import type { SeverityLevel } from '../data/mockData';
+import type { SeverityLevel } from '../data/types';
 
 interface StatusBadgeProps {
   severity: SeverityLevel | 'online' | 'offline' | 'connected' | 'disconnected';

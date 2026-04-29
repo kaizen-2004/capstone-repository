@@ -61,6 +61,17 @@ async def lifespan(app: FastAPI):
     )
     store.init_db()
     store.ensure_admin_user(settings.admin_username, settings.admin_password)
+    store.ensure_single_admin_identity(settings.admin_username)
+    forced_password = os.environ.get("ADMIN_FORCE_PASSWORD", "").strip()
+    if forced_password:
+        admin_user = store.get_single_admin_user()
+        if admin_user is not None:
+            store.update_admin_password(int(admin_user["id"]), forced_password)
+            store.delete_sessions_for_user(int(admin_user["id"]))
+            store.log(
+                "WARNING",
+                "ADMIN_FORCE_PASSWORD applied at startup; existing sessions invalidated.",
+            )
     _seed_default_settings(settings)
     cleanup_counts = store.purge_dashboard_noise_data()
     if any(cleanup_counts.values()):
