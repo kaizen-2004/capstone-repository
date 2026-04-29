@@ -51,21 +51,14 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Verify required model files exist
+      - name: Check optional model bundle
         shell: pwsh
         run: |
-          $requiredFiles = @(
-            "backend\storage\models\face\face_detection_yunet_2023mar.onnx",
-            "backend\storage\models\face\face_recognition_sface_2021dec.onnx",
-            "backend\storage\models\fire\yolov8n_fire_smoke.onnx"
-          )
-          foreach ($file in $requiredFiles) {
-            if (!(Test-Path $file)) {
-              Write-Error "Required model file not found: $file"
-              exit 1
-            }
+          if (Test-Path "backend\storage\models") {
+            Write-Host "Model directory found and will be bundled."
+          } else {
+            Write-Warning "Model directory not found in repository. EXE will build without local models."
           }
-          Write-Host "All required model files are present."
 
       - name: Verify backend import
         shell: pwsh
@@ -85,7 +78,6 @@ jobs:
             "--name", "${env:APP_NAME}",
             "--console",
             "--add-data", "backend\web_dist;web_dist",
-            "--add-data", "backend\storage\models;backend\storage\models",
             "--collect-all", "cv2",
             "--hidden-import", "uvicorn.logging",
             "--hidden-import", "uvicorn.loops",
@@ -100,6 +92,9 @@ jobs:
           )
           if (Test-Path "tools\ffmpeg.exe") {
             $pyinstallerArgs += @("--add-binary", "tools\ffmpeg.exe;tools")
+          }
+          if (Test-Path "backend\storage\models") {
+            $pyinstallerArgs += @("--add-data", "backend\storage\models;backend\storage\models")
           }
           $pyinstallerArgs += "desktop_launcher.py"
           pyinstaller @pyinstallerArgs
