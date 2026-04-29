@@ -45,7 +45,13 @@ backend/storage/**/*.gif
 web_dashboard_ui/node_modules/
 web_dashboard_ui/dist/
 web_dashboard_ui/.vite/
+backend/web_dist/
 desktop/src-tauri/target/
+
+# PyInstaller outputs
+build/
+dist/
+*.spec
 
 # Local editor and OS files
 .vscode/

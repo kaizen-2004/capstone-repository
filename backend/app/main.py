@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -20,6 +21,38 @@ from .services.camera_http_control import CameraHttpController
 from .services.notification_dispatcher import NotificationDispatcher
 from .services.remote_access import LinkResolver, MdnsPublisher
 from .services.supervisor import Supervisor
+
+
+APP_NAME = "CondoGuardian"
+
+
+def is_packaged_runtime() -> bool:
+    return bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
+
+
+def resource_path(relative_path: str) -> Path:
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / relative_path
+    return Path(__file__).resolve().parents[2] / relative_path
+
+
+def get_app_data_dir() -> Path:
+    base = os.getenv("LOCALAPPDATA", "").strip()
+    if base:
+        app_dir = Path(base) / APP_NAME
+    else:
+        app_dir = Path.cwd() / f"{APP_NAME}Data"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    return app_dir
+
+
+def configure_packaged_db_path() -> None:
+    if not is_packaged_runtime():
+        return
+    if os.getenv("BACKEND_DB_PATH", "").strip():
+        return
+    db_path = get_app_data_dir() / "system.db"
+    os.environ["BACKEND_DB_PATH"] = str(db_path)
 
 
 def _seed_default_settings(settings) -> None:
@@ -53,6 +86,7 @@ def _camera_stream_setting_key(node_id: str) -> str | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_packaged_db_path()
     settings = load_settings()
     app.state.settings = settings
 
@@ -480,6 +514,8 @@ def _resolve_dashboard_dist_dir() -> Path:
     override = os.environ.get("DASHBOARD_DIST_DIR", "").strip()
     if override:
         return Path(override).expanduser()
+    if is_packaged_runtime():
+        return resource_path("web_dist")
     project_root = Path(__file__).resolve().parents[2]
     return project_root / "web_dashboard_ui" / "dist"
 
