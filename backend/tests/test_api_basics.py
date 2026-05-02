@@ -358,6 +358,28 @@ def test_intruder_event_cooldown_suppresses_repeats() -> None:
         assert second_payload["alert_id"] is None
 
 
+def test_smoke_warning_event_creates_fire_alert() -> None:
+    node_id = f"smoke_warning_{uuid.uuid4().hex[:8]}"
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/sensors/event",
+            json={
+                "node_id": node_id,
+                "event": "SMOKE_WARNING",
+                "location": "Living Room",
+                "value": 0.12,
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["event_code"] == "SMOKE_WARNING"
+        assert payload["classification"] == "fire"
+        assert isinstance(payload["event_id"], int)
+        assert isinstance(payload["alert_id"], int)
+
+
 def test_remote_access_and_integration_status_routes() -> None:
     with TestClient(app) as client:
         login = client.post(

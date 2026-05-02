@@ -18,6 +18,9 @@ export function MobileRemote() {
   const [statusDetail, setStatusDetail] = useState('');
   const [lastSync, setLastSync] = useState('');
   const [cameraFeeds, setCameraFeeds] = useState<CameraFeed[]>([]);
+  const [streamRetryTickByNode, setStreamRetryTickByNode] = useState<Record<string, number>>({});
+  const [reconnectingByNode, setReconnectingByNode] = useState<Record<string, boolean>>({});
+  const [retryCountByNode, setRetryCountByNode] = useState<Record<string, number>>({});
   const [refreshing, setRefreshing] = useState(false);
 
   const load = async () => {
@@ -149,15 +152,37 @@ export function MobileRemote() {
           {cameraFeeds.map((feed) => (
             <div key={feed.nodeId} className="rounded-xl overflow-hidden border border-[#1b3b5d] bg-[#081a2f]">
               <div className="relative bg-black aspect-video">
-                {feed.streamAvailable && feed.streamPath ? (
+                {feed.streamPath ? (
                   <img
-                    src={feed.streamPath}
+                    src={`${feed.streamPath}${feed.streamPath.includes('?') ? '&' : '?'}retry_tick=${streamRetryTickByNode[feed.nodeId] || 0}`}
                     alt={`${feed.location} live preview`}
                     className="absolute inset-0 h-full w-full object-cover"
+                    onError={() => {
+                      setReconnectingByNode((prev) => ({ ...prev, [feed.nodeId]: true }));
+                      setRetryCountByNode((prev) => ({
+                        ...prev,
+                        [feed.nodeId]: (prev[feed.nodeId] || 0) + 1,
+                      }));
+                      window.setTimeout(() => {
+                        setStreamRetryTickByNode((prev) => ({
+                          ...prev,
+                          [feed.nodeId]: Date.now(),
+                        }));
+                      }, 1500);
+                    }}
+                    onLoad={() => {
+                      setReconnectingByNode((prev) => ({ ...prev, [feed.nodeId]: false }));
+                      setRetryCountByNode((prev) => ({ ...prev, [feed.nodeId]: 0 }));
+                    }}
                   />
                 ) : (
                   <div className="absolute inset-0 flex items-center justify-center text-slate-400 text-sm">
                     Stream unavailable
+                  </div>
+                )}
+                {reconnectingByNode[feed.nodeId] && (
+                  <div className="absolute bottom-2 right-2 rounded bg-amber-500/90 px-2 py-0.5 text-[11px] font-medium text-white">
+                    Reconnecting ({(retryCountByNode[feed.nodeId] || 0) > 99 ? '99+' : (retryCountByNode[feed.nodeId] || 0)})...
                   </div>
                 )}
               </div>

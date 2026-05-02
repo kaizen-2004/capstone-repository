@@ -106,7 +106,7 @@ export function LiveMonitoring() {
   };
 
 
-  const buildCameraSrc = (path?: string) => {
+  const buildCameraSrc = (path?: string, retryTick = 0) => {
     if (!path) {
       return '';
     }
@@ -115,7 +115,7 @@ export function LiveMonitoring() {
     const faceDebugForPath = faceDebugOverlay;
     if (isStream) {
       const debugPart = faceDebugForPath ? '&face_debug=1' : '';
-      return `${path}${separator}fps=20${debugPart}`;
+      return `${path}${separator}fps=20${debugPart}&retry_tick=${retryTick}`;
     }
     const debugPart = faceDebugForPath ? '&face_debug=1' : '';
     return `${path}${separator}frame_tick=${frameRefreshTick}${debugPart}`;
@@ -132,6 +132,10 @@ export function LiveMonitoring() {
     streamPath?: string;
     status: CameraFeed['status'];
   }) => {
+    const [streamRetryTick, setStreamRetryTick] = useState(0);
+    const [isReconnecting, setIsReconnecting] = useState(false);
+    const [retryCount, setRetryCount] = useState(0);
+    const retryTimerRef = useRef<number | null>(null);
     const events = eventsForRoom(location);
     const nodeEvents = eventsForNode(nodeId);
     const isOnline = status === 'online';
@@ -151,7 +155,16 @@ export function LiveMonitoring() {
     const hasFreshFlame = Boolean(latestFlameEvent && isFreshEvent(latestFlameEvent.timestamp));
     const flameLabel = hasFreshFlame ? 'Flame: DETECTED' : 'Flame: IDLE';
     const flameSeverity: 'warning' | 'info' = hasFreshFlame ? 'warning' : 'info';
-    const frameSrc = buildCameraSrc(streamPath);
+    const frameSrc = buildCameraSrc(streamPath, streamRetryTick);
+
+    useEffect(() => {
+      return () => {
+        if (retryTimerRef.current !== null) {
+          window.clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = null;
+        }
+      };
+    }, []);
 
     return (
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
@@ -164,7 +177,31 @@ export function LiveMonitoring() {
               src={frameSrc}
               alt={`${location} live feed`}
               className="absolute inset-0 h-full w-full object-cover"
+              onError={() => {
+                if (retryTimerRef.current !== null) {
+                  return;
+                }
+                setIsReconnecting(true);
+                setRetryCount((prev) => prev + 1);
+                retryTimerRef.current = window.setTimeout(() => {
+                  setStreamRetryTick(Date.now());
+                  retryTimerRef.current = null;
+                }, 1500);
+              }}
+              onLoad={() => {
+                setIsReconnecting(false);
+                setRetryCount(0);
+                if (retryTimerRef.current !== null) {
+                  window.clearTimeout(retryTimerRef.current);
+                  retryTimerRef.current = null;
+                }
+              }}
             />
+          )}
+          {isReconnecting && (
+            <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded bg-amber-500/90 text-white text-xs font-medium">
+              Reconnecting ({retryCount > 99 ? '99+' : retryCount})...
+            </div>
           )}
           <Camera className="w-16 h-16 text-gray-600" />
 
@@ -251,7 +288,30 @@ export function LiveMonitoring() {
     return 'offline';
   };
 
-  const expandedFrameSrc = buildCameraSrc(expandedFeed?.streamPath);
+  const [expandedRetryTick, setExpandedRetryTick] = useState(0);
+  const [expandedReconnecting, setExpandedReconnecting] = useState(false);
+  const [expandedRetryCount, setExpandedRetryCount] = useState(0);
+  const expandedRetryTimerRef = useRef<number | null>(null);
+  const expandedFrameSrc = buildCameraSrc(expandedFeed?.streamPath, expandedRetryTick);
+
+  useEffect(() => {
+    return () => {
+      if (expandedRetryTimerRef.current !== null) {
+        window.clearTimeout(expandedRetryTimerRef.current);
+        expandedRetryTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    setExpandedRetryTick(0);
+    setExpandedRetryCount(0);
+    setExpandedReconnecting(false);
+    if (expandedRetryTimerRef.current !== null) {
+      window.clearTimeout(expandedRetryTimerRef.current);
+      expandedRetryTimerRef.current = null;
+    }
+  }, [expandedFeed?.nodeId, expandedFeed?.streamPath]);
 
   return (
     <div className="p-3 md:p-8 space-y-5 md:space-y-7">
@@ -303,7 +363,7 @@ export function LiveMonitoring() {
               key={feed.nodeId}
               location={feed.location}
               nodeId={feed.nodeId}
-              streamPath={feed.streamAvailable ? feed.streamPath : ''}
+              streamPath={feed.streamPath || ''}
               status={feed.status}
             />
           ))
@@ -357,9 +417,37 @@ export function LiveMonitoring() {
           </div>
           <div className="flex-1 rounded-lg overflow-hidden bg-black border border-white/15 flex items-center justify-center">
             {expandedFrameSrc ? (
-              <img src={expandedFrameSrc} alt="Expanded camera preview" className="w-full h-full object-contain" />
+              <img
+                src={expandedFrameSrc}
+                alt="Expanded camera preview"
+                className="w-full h-full object-contain"
+                onError={() => {
+                  if (expandedRetryTimerRef.current !== null) {
+                    return;
+                  }
+                  setExpandedReconnecting(true);
+                  setExpandedRetryCount((prev) => prev + 1);
+                  expandedRetryTimerRef.current = window.setTimeout(() => {
+                    setExpandedRetryTick(Date.now());
+                    expandedRetryTimerRef.current = null;
+                  }, 1500);
+                }}
+                onLoad={() => {
+                  setExpandedReconnecting(false);
+                  setExpandedRetryCount(0);
+                  if (expandedRetryTimerRef.current !== null) {
+                    window.clearTimeout(expandedRetryTimerRef.current);
+                    expandedRetryTimerRef.current = null;
+                  }
+                }}
+              />
             ) : (
               <p className="text-sm text-white/70">Camera stream unavailable</p>
+            )}
+            {expandedReconnecting && (
+              <div className="absolute bottom-3 right-3 px-3 py-1.5 rounded bg-amber-500/90 text-white text-xs font-medium">
+                Reconnecting ({expandedRetryCount > 99 ? '99+' : expandedRetryCount})...
+              </div>
             )}
           </div>
         </div>

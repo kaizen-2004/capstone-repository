@@ -1009,18 +1009,19 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
             (
                 row
                 for row in events
-                if str(row.get("event_code") or "").strip().upper() == "SMOKE_HIGH"
+                if str(row.get("event_code") or "").strip().upper()
+                in {"SMOKE_HIGH", "SMOKE_WARNING"}
             ),
             None,
         )
         if smoke_event is None:
-            answer = "No recent high-smoke detection is recorded."
+            answer = "No recent smoke detection is recorded."
         else:
             source_node = _assistant_node_label(smoke_event.get("source_node"))
             location = str(smoke_event.get("location") or "").strip()
             location_text = f" in {location}" if location else ""
             answer = (
-                f"The most recent high-smoke detection came from {source_node}{location_text}."
+                f"The most recent smoke detection came from {source_node}{location_text}."
             )
     elif resolved_id == "are_any_nodes_offline":
         offline_nodes = [

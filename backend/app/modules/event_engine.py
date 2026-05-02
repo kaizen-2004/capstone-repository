@@ -42,6 +42,11 @@ EVENT_META: dict[str, dict[str, str]] = {
         "severity": "warning",
         "title": "Smoke level is high",
     },
+    "SMOKE_WARNING": {
+        "type": "sensor",
+        "severity": "warning",
+        "title": "Smoke level warning",
+    },
     "SMOKE_NORMAL": {
         "type": "sensor",
         "severity": "normal",
@@ -206,7 +211,7 @@ class EventEngine:
             "suppressed": False,
         }
 
-        if event_code == "SMOKE_HIGH":
+        if event_code in {"SMOKE_HIGH", "SMOKE_WARNING"}:
             alert_id = self._handle_smoke_trigger(event_id, node_id, location, details)
             classification["classification"] = "fire"
         elif event_code in INTRUDER_TRIGGER_CODES:

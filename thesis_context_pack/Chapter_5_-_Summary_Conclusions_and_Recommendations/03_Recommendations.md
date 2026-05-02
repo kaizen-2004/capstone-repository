@@ -10,3 +10,4 @@ Based on the expected direction of the study, the following recommendations may 
 4. Expand testing for low-light and night-vision conditions so that the system's real-world monitoring limits are more clearly documented.
 5. Consider Raspberry Pi 2 for final local edge hosting only if it improves deployment practicality, presentation setup, or embedded-system alignment without degrading system responsiveness.
 6. Explore future expansion to additional monitored areas, more sensing nodes, or richer mobile notification features after the baseline prototype is fully validated.
+7. Treat occlusion-aware face analysis (for example, explicit mask and heavy face-covering detection) as a future enhancement after the current prototype baseline is finalized and validated.

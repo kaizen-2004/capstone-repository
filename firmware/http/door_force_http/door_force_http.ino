@@ -1,4 +1,5 @@
 #include <HTTPClient.h>
+#include <DNSServer.h>
 #include <Preferences.h>
 #include <Wire.h>
 #include <WebServer.h>
@@ -83,6 +84,8 @@ static const uint8_t REG_OUTX_L_G = 0x22;
 static const uint8_t WHO_AM_I_VALUE = 0x69;
 
 static const char* PROVISIONING_AP_PREFIX = "Thesis-Setup";
+static const byte PROVISIONING_DNS_PORT = 53;
+static const char* PROVISIONING_SETUP_IP = "192.168.4.1";
 static const IPAddress PROVISIONING_AP_IP(192, 168, 4, 1);
 static const IPAddress PROVISIONING_AP_GATEWAY(192, 168, 4, 1);
 static const IPAddress PROVISIONING_AP_SUBNET(255, 255, 255, 0);
@@ -156,6 +159,7 @@ uint32_t lastForceEventMs = 0;
 String setupApSsid;
 
 WebServer provisioningServer(80);
+DNSServer provisioningDnsServer;
 
 String sanitizeHostname(const String& raw) {
   String out;
@@ -429,7 +433,13 @@ String provisioningApName() {
   uint64_t chipId = ESP.getEfuseMac();
   uint32_t suffix = static_cast<uint32_t>(chipId & 0xFFFFFF);
   char buf[48];
-  snprintf(buf, sizeof(buf), "%s-%06X", PROVISIONING_AP_PREFIX, static_cast<unsigned>(suffix));
+  snprintf(
+      buf,
+      sizeof(buf),
+      "%s-%s-%06X",
+      PROVISIONING_AP_PREFIX,
+      NODE_ID,
+      static_cast<unsigned>(suffix));
   return String(buf);
 }
 
@@ -461,6 +471,7 @@ void startSetupApMode(const char* reason) {
   }
 
   setupApActive = true;
+  provisioningDnsServer.start(PROVISIONING_DNS_PORT, "*", PROVISIONING_AP_IP);
   Serial.printf("[PROV] setup AP active ssid=%s ip=%s\n",
                 setupApSsid.c_str(),
                 WiFi.softAPIP().toString().c_str());
@@ -470,6 +481,7 @@ void stopSetupApMode() {
   if (!setupApActive) {
     return;
   }
+  provisioningDnsServer.stop();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   setupApActive = false;
@@ -485,6 +497,79 @@ bool isAllowedNodeRole(const String& roleRaw) {
   role.trim();
   role.toLowerCase();
   return role == "door_force";
+}
+
+bool isAllowedNodeId(const String& nodeIdRaw) {
+  String nodeId = nodeIdRaw;
+  nodeId.trim();
+  nodeId.toLowerCase();
+  return nodeId == "door_force";
+}
+
+bool isAllowedRoomName(const String& roomRaw) {
+  String room = roomRaw;
+  room.trim();
+  room.toLowerCase();
+  return room == "living room" ||
+         room == "door entrance area" ||
+         room == "kitchen" ||
+         room == "hallway";
+}
+
+String provisioningPortalHtml() {
+  String html;
+  html.reserve(6000);
+  html += "<!doctype html><html><head><meta charset='utf-8'>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>Door Force Node Setup</title>";
+  html += "<style>body{font-family:Arial,sans-serif;background:#f2f4f8;margin:0;padding:16px;}";
+  html += ".card{max-width:460px;margin:20px auto;background:#fff;border-radius:10px;padding:18px;box-shadow:0 2px 14px rgba(0,0,0,.08);}";
+  html += "h2{margin:0 0 12px;font-size:20px;}label{display:block;font-weight:600;margin:10px 0 6px;}";
+  html += "input,select,button{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c9ced6;border-radius:8px;font-size:14px;}";
+  html += "button{margin-top:14px;background:#0a7cff;color:#fff;border:none;font-weight:700;}";
+  html += "#msg{margin-top:10px;font-size:13px;white-space:pre-wrap;}small{color:#666;display:block;margin-top:10px;}";
+  html += "</style></head><body><div class='card'>";
+  html += "<h2>Door Force Provisioning</h2>";
+  html += "<label for='ssid'>WiFi SSID</label><input id='ssid' autocomplete='off'>";
+  html += "<label for='pass'>WiFi Password</label><input id='pass' type='password' autocomplete='off'>";
+  html += "<label for='backend'>Backend Host/IP</label><input id='backend' value='192.168.1.8' autocomplete='off'>";
+  html += "<label for='port'>Backend Port</label><input id='port' type='number' value='8765' min='1' max='65535'>";
+  html += "<label for='node'>Node ID</label><select id='node'>";
+  html += "<option value='door_force' selected>door_force</option></select>";
+  html += "<label for='room'>Room Name</label><select id='room'>";
+  html += "<option value='Living Room'";
+  if (runtimeNodeLocation == "Living Room") {
+    html += " selected";
+  }
+  html += ">Living Room</option>";
+  html += "<option value='Door Entrance Area'";
+  if (runtimeNodeLocation == "Door Entrance Area") {
+    html += " selected";
+  }
+  html += ">Door Entrance Area</option>";
+  html += "<option value='Kitchen'";
+  if (runtimeNodeLocation == "Kitchen") {
+    html += " selected";
+  }
+  html += ">Kitchen</option>";
+  html += "<option value='Hallway'";
+  if (runtimeNodeLocation == "Hallway") {
+    html += " selected";
+  }
+  html += ">Hallway</option></select>";
+  html += "<button onclick='submitConfig()'>Save and Connect</button><div id='msg'></div>";
+  html += "<small>If captive portal does not auto-open, browse to http://";
+  html += PROVISIONING_SETUP_IP;
+  html += "</small></div><script>";
+  html += "const msg=document.getElementById('msg');";
+  html += "function show(t,c){msg.textContent=t;msg.style.color=c||'#333';}";
+  html += "async function submitConfig(){";
+  html += "const payload={wifi_ssid:document.getElementById('ssid').value.trim(),wifi_password:document.getElementById('pass').value,backend_host:document.getElementById('backend').value.trim(),backend_port:parseInt(document.getElementById('port').value||'0',10),node_id:document.getElementById('node').value,node_role:'door_force',room_name:document.getElementById('room').value};";
+  html += "if(!payload.wifi_ssid||!payload.backend_host||!payload.backend_port){show('Please fill SSID, backend host, and port.','#b00020');return;}";
+  html += "show('Saving configuration...');";
+  html += "try{const r=await fetch('/api/provisioning/configure',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const j=await r.json();if(r.ok&&j.ok){show('Saved. Device is connecting to WiFi...','#0a7a0a');}else{show('Failed: '+(j.error||'unknown_error'),'#b00020');}}catch(e){show('Request failed: '+e,'#b00020');}}";
+  html += "</script></body></html>";
+  return html;
 }
 
 void ensureProvisioningRoutes() {
@@ -591,6 +676,14 @@ void ensureProvisioningRoutes() {
       sendProvisioningJsonResponse(400, "{\"ok\":false,\"error\":\"invalid_node_role\"}");
       return;
     }
+    if (!isAllowedNodeId(nodeId)) {
+      sendProvisioningJsonResponse(400, "{\"ok\":false,\"error\":\"invalid_node_id\"}");
+      return;
+    }
+    if (!isAllowedRoomName(roomName)) {
+      sendProvisioningJsonResponse(400, "{\"ok\":false,\"error\":\"invalid_room_name\"}");
+      return;
+    }
 
     String backendBase = sanitizeBackendBase(
         String("http://") + backendHost + ":" + String(backendPort));
@@ -635,8 +728,10 @@ void ensureProvisioningRoutes() {
     startSetupApMode("wifi_reset");
   };
 
-  provisioningServer.on("/", HTTP_GET, [buildProvisioningInfoJson]() {
-    sendProvisioningJsonResponse(200, buildProvisioningInfoJson());
+  provisioningServer.on("/", HTTP_GET, []() {
+    provisioningServer.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    provisioningServer.sendHeader("Pragma", "no-cache");
+    provisioningServer.send(200, "text/html", provisioningPortalHtml());
   });
   provisioningServer.on("/", HTTP_OPTIONS, handleOptions);
 
@@ -680,6 +775,11 @@ void ensureProvisioningRoutes() {
   provisioningServer.on("/healthz", HTTP_OPTIONS, handleOptions);
 
   provisioningServer.onNotFound([]() {
+    if (setupApActive) {
+      provisioningServer.sendHeader("Location", String("http://") + PROVISIONING_SETUP_IP);
+      provisioningServer.send(302, "text/plain", "Redirecting to setup portal");
+      return;
+    }
     sendProvisioningJsonResponse(404, "{\"ok\":false,\"error\":\"not_found\"}");
   });
 
@@ -848,6 +948,9 @@ void connectWiFiBlocking() {
          (millis() - startedAt) < WIFI_CONNECT_TIMEOUT_MS) {
     ensureProvisioningServerState();
     if (provisioningServerStarted) {
+      if (setupApActive) {
+        provisioningDnsServer.processNextRequest();
+      }
       provisioningServer.handleClient();
     }
     delay(250);
@@ -1231,6 +1334,9 @@ void loop() {
 
   ensureProvisioningServerState();
   if (provisioningServerStarted) {
+    if (setupApActive) {
+      provisioningDnsServer.processNextRequest();
+    }
     provisioningServer.handleClient();
   }
 

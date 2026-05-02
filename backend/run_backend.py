@@ -15,6 +15,13 @@ def _ensure_project_root_on_path() -> None:
         sys.path.insert(0, project_root_str)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
 if __name__ == "__main__":
     _ensure_project_root_on_path()
     from backend.app.core.config import load_env_file
@@ -25,4 +32,5 @@ if __name__ == "__main__":
         host=os.environ.get("BACKEND_HOST", "127.0.0.1"),
         port=int(os.environ.get("BACKEND_PORT", "8765")),
         reload=False,
+        access_log=_env_bool("BACKEND_ACCESS_LOG", False),
     )

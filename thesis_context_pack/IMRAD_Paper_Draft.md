@@ -42,7 +42,7 @@ The study is significant for residents and operators because it demonstrates a p
 
 ## 1.5 Scope and Limitations
 
-The prototype scope is limited to two monitored areas (Living Room and Door Entrance Area), two smoke nodes, one door-force node, one door camera (ESP32-CAM), and one indoor RTSP camera. The current work covers controlled scenario testing and does not represent long-term full-population field deployment. Remote notification pathways are treated as optional layers; the primary evaluation focus remains local detection, logging, and dashboard response behavior.
+The prototype scope is limited to two monitored areas (Living Room and Door Entrance Area), two smoke nodes, one door-force node, one door camera (ESP32-CAM), and one indoor RTSP camera. The current work covers controlled scenario testing and does not represent long-term full-population field deployment. Remote notification pathways are treated as optional layers; the primary evaluation focus remains local detection, logging, and dashboard response behavior. Dedicated occlusion-aware face analysis (such as explicit mask or heavy face-covering detection) is acknowledged as a current limitation and is deferred to future work.
 
 ## 1.6 Research Questions
 
@@ -225,7 +225,7 @@ These SDG links are not abstract claims; they are tied directly to operational f
 
 ## 4.5 Limitations and Expected Variance
 
-The current trial scope remains constrained by controlled runs in a condo-like setup and by a limited set of camera positions, lighting conditions, and scenario repetitions. Variance can still occur in no-face edge conditions, flame-visibility limitations, or network-related delays under broader deployment contexts. These constraints do not negate the architecture-level findings; rather, they define refinement targets for expanded testing and final reporting.
+The current trial scope remains constrained by controlled runs in a condo-like setup and by a limited set of camera positions, lighting conditions, and scenario repetitions. Variance can still occur in no-face edge conditions, flame-visibility limitations, or network-related delays under broader deployment contexts. In addition, the current face pipeline does not include a dedicated occlusion-aware module, so masked or heavily covered faces may still increase no-face or uncertain outcomes in some captures. These constraints do not negate the architecture-level findings; rather, they define refinement targets for expanded testing and final reporting.
 
 The most important implication is that the prototype already exhibits coherent functional behavior and positive SDG-oriented direction, while still allowing rigorous expansion of trials in later stages.
 
@@ -243,7 +243,7 @@ Based on controlled trial results, the system exhibits promising reliability pat
 
 Future work should prioritize expanded repeated trials using logged and statistically summarized runs under advisor-approved test protocols. To strengthen deployment robustness, network configuration management should continue using centralized firmware parameters and stable addressing strategies (for example, fixed LAN planning or controlled hotspot procedures during demonstrations). For camera reliability, additional calibration runs should be performed to optimize threshold values and frame acquisition settings across low-light and high-motion conditions.
 
-At the algorithm level, future versions may incorporate richer multi-frame temporal filtering for flame confidence stabilization and stronger face-quality gating before classification to reduce no-face ambiguity. At the system level, expanding from single-unit scope to multi-unit or multi-room deployment would test scalability, data retention policy behavior, and operational maintainability. Finally, usability-centered evaluation with target users may be added to measure alert interpretability, response confidence, and practical acceptance of local-first safety monitoring workflows.
+At the algorithm level, future versions may incorporate richer multi-frame temporal filtering for flame confidence stabilization, stronger face-quality gating before classification to reduce no-face ambiguity, and dedicated occlusion-aware face analysis for masked or heavily covered faces. At the system level, expanding from single-unit scope to multi-unit or multi-room deployment would test scalability, data retention policy behavior, and operational maintainability. Finally, usability-centered evaluation with target users may be added to measure alert interpretability, response confidence, and practical acceptance of local-first safety monitoring workflows.
 
 ---
 

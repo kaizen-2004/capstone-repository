@@ -1,4 +1,5 @@
 #include <HTTPClient.h>
+#include <DNSServer.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -21,54 +22,81 @@ static const char* NODE_LOCATION = "Door Entrance Area";
 static const char* NODE_TYPE = "smoke";
 static const char* FIRMWARE_VERSION = "smoke_node2_http_v3_manual_wifi";
 
-// Adaptive TX power profile:
-// - start with moderate TX for join attempts
-// - escalate to high TX after repeated failures
-// - settle to moderate runtime TX
-#if defined(WIFI_POWER_13dBm)
-#define WIFI_TX_POWER_CONNECT_INITIAL WIFI_POWER_13dBm
+// Low TX power profile to reduce local RF noise around the analog smoke sensor.
+#if defined(WIFI_POWER_8_5dBm)
+#define WIFI_TX_POWER_CONNECT_INITIAL WIFI_POWER_8_5dBm
 #elif defined(WIFI_POWER_11dBm)
 #define WIFI_TX_POWER_CONNECT_INITIAL WIFI_POWER_11dBm
-#elif defined(WIFI_POWER_8_5dBm)
-#define WIFI_TX_POWER_CONNECT_INITIAL WIFI_POWER_8_5dBm
+#elif defined(WIFI_POWER_13dBm)
+#define WIFI_TX_POWER_CONNECT_INITIAL WIFI_POWER_13dBm
 #endif
 
-#if defined(WIFI_POWER_19_5dBm)
-#define WIFI_TX_POWER_CONNECT_ESCALATED WIFI_POWER_19_5dBm
-#elif defined(WIFI_TX_POWER_CONNECT_INITIAL)
+#if defined(WIFI_TX_POWER_CONNECT_INITIAL)
 #define WIFI_TX_POWER_CONNECT_ESCALATED WIFI_TX_POWER_CONNECT_INITIAL
 #endif
 
-#if defined(WIFI_POWER_11dBm)
-#define WIFI_TX_POWER_RUNTIME WIFI_POWER_11dBm
-#elif defined(WIFI_POWER_8_5dBm)
+#if defined(WIFI_POWER_8_5dBm)
 #define WIFI_TX_POWER_RUNTIME WIFI_POWER_8_5dBm
+#elif defined(WIFI_POWER_11dBm)
+#define WIFI_TX_POWER_RUNTIME WIFI_POWER_11dBm
 #elif defined(WIFI_TX_POWER_CONNECT_INITIAL)
 #define WIFI_TX_POWER_RUNTIME WIFI_TX_POWER_CONNECT_INITIAL
+#endif
+
+#if defined(WIFI_TX_POWER_CONNECT_INITIAL)
+#define WIFI_TX_POWER_PROVISIONING WIFI_TX_POWER_CONNECT_INITIAL
 #endif
 
 // Connectivity/retry timing.
 static const uint32_t WIFI_RETRY_INTERVAL_MS = 15000;
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 static const uint32_t REGISTER_RETRY_INTERVAL_MS = 10000;
+static const uint32_t SMOKE_EVENT_RETRY_INTERVAL_MS = 1000;
 static const uint8_t WIFI_ESCALATE_AFTER_ATTEMPTS = 2;
 
 // Sensor and heartbeat timing.
 static const uint32_t HEARTBEAT_INTERVAL_MS = 15000;
-static const uint32_t SENSOR_REPORT_INTERVAL_MS = 1000;
+static const uint32_t SENSOR_REPORT_INTERVAL_MS = 200;
 static const uint32_t WIFI_PROVISIONING_FALLBACK_MS = 30000;
 static const uint32_t PROVISIONING_SUCCESS_HOLD_MS = 30000;
 static const uint32_t PROVISIONING_CONNECT_DELAY_MS = 1500;
 
 static const int MQ2_ADC_PIN = 0;
-static const int MQ2_ADC_SAMPLES = 8;
-static const int MQ2_ADC_HIGH_THRESHOLD = 2200;
-static const int MQ2_ADC_CLEAR_THRESHOLD = 1900;
-static const uint8_t MQ2_HIGH_CONFIRM_SAMPLES = 3;
+static const int BUZZER_PIN = 5;
+static const int ADC_RESOLUTION = 4095;
+static const float ESP32_ADC_MAX_VOLTAGE = 3.3f;
+static const float DIVIDER_MULTIPLIER = 1.5f;
+static const int MQ2_ADC_SAMPLES = 10;
+static const uint32_t MQ2_ADC_SAMPLE_DELAY_MS = 2;
+static const int SMOKE_WARNING_THRESHOLD = 80;
+static const int SMOKE_HIGH_THRESHOLD = 120;
 static const uint8_t MQ2_CLEAR_CONFIRM_SAMPLES = 5;
-static const uint32_t MQ2_WARMUP_MS = 60000;
+static const uint32_t MQ2_WARMUP_MS = 0;
+static const uint32_t BUZZER_HIGH_ON_MS = 150;
+static const uint32_t BUZZER_HIGH_OFF_MS = 150;
+static const uint32_t BUZZER_WARNING_ON_MS = 100;
+static const uint32_t BUZZER_WARNING_OFF_MS = 600;
+
+enum SmokeStatus {
+  SMOKE_STATUS_NORMAL = 0,
+  SMOKE_STATUS_WARNING,
+  SMOKE_STATUS_HIGH,
+};
+
+struct Mq2Reading {
+  int avgRaw;
+  int minRaw;
+  int maxRaw;
+  float espVoltage;
+  float mq2A0Voltage;
+};
 
 static const char* PROVISIONING_AP_PREFIX = "Thesis-Setup";
+static const char* PROVISIONING_AP_PASSWORD = "12345678";
+static const byte PROVISIONING_DNS_PORT = 53;
+static const uint8_t PROVISIONING_AP_CHANNEL = 1;
+static const uint8_t PROVISIONING_AP_MAX_CLIENTS = 4;
+static const char* PROVISIONING_SETUP_IP = "192.168.4.1";
 static const IPAddress PROVISIONING_AP_IP(192, 168, 4, 1);
 static const IPAddress PROVISIONING_AP_GATEWAY(192, 168, 4, 1);
 static const IPAddress PROVISIONING_AP_SUBNET(255, 255, 255, 0);
@@ -110,6 +138,7 @@ uint32_t lastRegisterAttemptMs = 0;
 uint32_t lastWiFiStatusLogMs = 0;
 uint32_t provisioningConnectEarliestAt = 0;
 uint32_t provisioningSuccessAt = 0;
+uint32_t lastSmokeEventAttemptMs = 0;
 uint8_t wifiConnectAttempts = 0;
 uint8_t lastDisconnectReason = 0;
 bool provisioningConnectRequested = false;
@@ -120,14 +149,19 @@ bool provisioningRoutesRegistered = false;
 bool provisioningServerStarted = false;
 bool hasPreferredWiFiBssid = false;
 bool smokeLatched = false;
-uint8_t smokeHighConfirmCount = 0;
+bool buzzerOutputHigh = false;
 uint8_t smokeClearConfirmCount = 0;
 uint8_t preferredWiFiBssid[6] = {0, 0, 0, 0, 0, 0};
 int32_t preferredWiFiChannel = 0;
 uint32_t sensorWarmupUntilMs = 0;
+uint32_t lastBuzzerToggleMs = 0;
 String setupApSsid;
+SmokeStatus currentSmokeStatus = SMOKE_STATUS_NORMAL;
+SmokeStatus buzzerPatternStatus = SMOKE_STATUS_NORMAL;
+SmokeStatus notifiedSmokeStatus = SMOKE_STATUS_NORMAL;
 
 WebServer provisioningServer(80);
+DNSServer provisioningDnsServer;
 
 String sanitizeHostname(const String& raw) {
   String out;
@@ -401,7 +435,14 @@ String provisioningApName() {
   uint64_t chipId = ESP.getEfuseMac();
   uint32_t suffix = static_cast<uint32_t>(chipId & 0xFFFFFF);
   char buf[48];
-  snprintf(buf, sizeof(buf), "%s-%06X", PROVISIONING_AP_PREFIX, static_cast<unsigned>(suffix));
+  const char* nodeAlias = strcmp(NODE_ID, "smoke_node2") == 0 ? "smoke2" : "smoke1";
+  snprintf(
+      buf,
+      sizeof(buf),
+      "%s-%s-%06X",
+      PROVISIONING_AP_PREFIX,
+      nodeAlias,
+      static_cast<unsigned>(suffix));
   return String(buf);
 }
 
@@ -425,23 +466,33 @@ void startSetupApMode(const char* reason) {
   WiFi.mode(WIFI_AP);
   delay(120);
   WiFi.setSleep(false);
-  WiFi.softAPConfig(PROVISIONING_AP_IP, PROVISIONING_AP_GATEWAY, PROVISIONING_AP_SUBNET);
+#if defined(WIFI_TX_POWER_PROVISIONING)
+  WiFi.setTxPower(WIFI_TX_POWER_PROVISIONING);
+#endif
+  if (!WiFi.softAPConfig(PROVISIONING_AP_IP, PROVISIONING_AP_GATEWAY, PROVISIONING_AP_SUBNET)) {
+    Serial.println("[PROV] setup AP static IP config failed");
+  }
   setupApSsid = provisioningApName();
-  if (!WiFi.softAP(setupApSsid.c_str())) {
+  if (!WiFi.softAP(setupApSsid.c_str(), PROVISIONING_AP_PASSWORD, PROVISIONING_AP_CHANNEL, false, PROVISIONING_AP_MAX_CLIENTS)) {
     Serial.println("[PROV] failed to start setup AP");
     return;
   }
 
   setupApActive = true;
-  Serial.printf("[PROV] setup AP active ssid=%s ip=%s\n",
+  provisioningDnsServer.start(PROVISIONING_DNS_PORT, "*", PROVISIONING_AP_IP);
+  Serial.printf("[PROV] setup AP active ssid=%s password=%s ip=%s channel=%u mac=%s\n",
                 setupApSsid.c_str(),
-                WiFi.softAPIP().toString().c_str());
+                PROVISIONING_AP_PASSWORD,
+                WiFi.softAPIP().toString().c_str(),
+                static_cast<unsigned>(PROVISIONING_AP_CHANNEL),
+                WiFi.softAPmacAddress().c_str());
 }
 
 void stopSetupApMode() {
   if (!setupApActive) {
     return;
   }
+  provisioningDnsServer.stop();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   setupApActive = false;
@@ -457,6 +508,88 @@ bool isAllowedNodeRole(const String& roleRaw) {
   role.trim();
   role.toLowerCase();
   return role == "smoke_node2" || role == "smoke";
+}
+
+bool isAllowedNodeId(const String& nodeIdRaw) {
+  String nodeId = nodeIdRaw;
+  nodeId.trim();
+  nodeId.toLowerCase();
+  return nodeId == "smoke_node1" || nodeId == "smoke_node2";
+}
+
+bool isAllowedRoomName(const String& roomRaw) {
+  String room = roomRaw;
+  room.trim();
+  room.toLowerCase();
+  return room == "living room" ||
+         room == "door entrance area" ||
+         room == "kitchen" ||
+         room == "hallway";
+}
+
+String provisioningPortalHtml() {
+  String html;
+  html.reserve(6200);
+  html += "<!doctype html><html><head><meta charset='utf-8'>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>Smoke Node Setup</title>";
+  html += "<style>body{font-family:Arial,sans-serif;background:#f2f4f8;margin:0;padding:16px;}";
+  html += ".card{max-width:460px;margin:20px auto;background:#fff;border-radius:10px;padding:18px;box-shadow:0 2px 14px rgba(0,0,0,.08);}";
+  html += "h2{margin:0 0 12px;font-size:20px;}label{display:block;font-weight:600;margin:10px 0 6px;}";
+  html += "input,select,button{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c9ced6;border-radius:8px;font-size:14px;}";
+  html += "button{margin-top:14px;background:#0a7cff;color:#fff;border:none;font-weight:700;}";
+  html += "#msg{margin-top:10px;font-size:13px;white-space:pre-wrap;}small{color:#666;display:block;margin-top:10px;}";
+  html += "</style></head><body><div class='card'>";
+  html += "<h2>Smoke Node Provisioning</h2>";
+  html += "<label for='ssid'>WiFi SSID</label><input id='ssid' autocomplete='off'>";
+  html += "<label for='pass'>WiFi Password</label><input id='pass' type='password' autocomplete='off'>";
+  html += "<label for='backend'>Backend Host/IP</label><input id='backend' value='192.168.1.8' autocomplete='off'>";
+  html += "<label for='port'>Backend Port</label><input id='port' type='number' value='8765' min='1' max='65535'>";
+  html += "<label for='node'>Node ID</label><select id='node'>";
+  html += "<option value='smoke_node1'";
+  if (runtimeNodeId == "smoke_node1") {
+    html += " selected";
+  }
+  html += ">smoke_node1</option>";
+  html += "<option value='smoke_node2'";
+  if (runtimeNodeId == "smoke_node2") {
+    html += " selected";
+  }
+  html += ">smoke_node2</option></select>";
+  html += "<label for='room'>Room Name</label><select id='room'>";
+  html += "<option value='Living Room'";
+  if (runtimeNodeLocation == "Living Room") {
+    html += " selected";
+  }
+  html += ">Living Room</option>";
+  html += "<option value='Door Entrance Area'";
+  if (runtimeNodeLocation == "Door Entrance Area") {
+    html += " selected";
+  }
+  html += ">Door Entrance Area</option>";
+  html += "<option value='Kitchen'";
+  if (runtimeNodeLocation == "Kitchen") {
+    html += " selected";
+  }
+  html += ">Kitchen</option>";
+  html += "<option value='Hallway'";
+  if (runtimeNodeLocation == "Hallway") {
+    html += " selected";
+  }
+  html += ">Hallway</option></select>";
+  html += "<button onclick='submitConfig()'>Save and Connect</button><div id='msg'></div>";
+  html += "<small>If captive portal does not auto-open, browse to http://";
+  html += PROVISIONING_SETUP_IP;
+  html += "</small></div><script>";
+  html += "const msg=document.getElementById('msg');";
+  html += "function show(t,c){msg.textContent=t;msg.style.color=c||'#333';}";
+  html += "async function submitConfig(){";
+  html += "const payload={wifi_ssid:document.getElementById('ssid').value.trim(),wifi_password:document.getElementById('pass').value,backend_host:document.getElementById('backend').value.trim(),backend_port:parseInt(document.getElementById('port').value||'0',10),node_id:document.getElementById('node').value,node_role:'smoke',room_name:document.getElementById('room').value};";
+  html += "if(!payload.wifi_ssid||!payload.backend_host||!payload.backend_port){show('Please fill SSID, backend host, and port.','#b00020');return;}";
+  html += "show('Saving configuration...');";
+  html += "try{const r=await fetch('/api/provisioning/configure',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const j=await r.json();if(r.ok&&j.ok){show('Saved. Device is connecting to WiFi...','#0a7a0a');}else{show('Failed: '+(j.error||'unknown_error'),'#b00020');}}catch(e){show('Request failed: '+e,'#b00020');}}";
+  html += "</script></body></html>";
+  return html;
 }
 
 void ensureProvisioningRoutes() {
@@ -563,6 +696,14 @@ void ensureProvisioningRoutes() {
       sendProvisioningJsonResponse(400, "{\"ok\":false,\"error\":\"invalid_node_role\"}");
       return;
     }
+    if (!isAllowedNodeId(nodeId)) {
+      sendProvisioningJsonResponse(400, "{\"ok\":false,\"error\":\"invalid_node_id\"}");
+      return;
+    }
+    if (!isAllowedRoomName(roomName)) {
+      sendProvisioningJsonResponse(400, "{\"ok\":false,\"error\":\"invalid_room_name\"}");
+      return;
+    }
 
     String backendBase = sanitizeBackendBase(
         String("http://") + backendHost + ":" + String(backendPort));
@@ -607,8 +748,10 @@ void ensureProvisioningRoutes() {
     startSetupApMode("wifi_reset");
   };
 
-  provisioningServer.on("/", HTTP_GET, [buildProvisioningInfoJson]() {
-    sendProvisioningJsonResponse(200, buildProvisioningInfoJson());
+  provisioningServer.on("/", HTTP_GET, []() {
+    provisioningServer.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    provisioningServer.sendHeader("Pragma", "no-cache");
+    provisioningServer.send(200, "text/html", provisioningPortalHtml());
   });
   provisioningServer.on("/", HTTP_OPTIONS, handleOptions);
 
@@ -652,6 +795,11 @@ void ensureProvisioningRoutes() {
   provisioningServer.on("/healthz", HTTP_OPTIONS, handleOptions);
 
   provisioningServer.onNotFound([]() {
+    if (setupApActive) {
+      provisioningServer.sendHeader("Location", String("http://") + PROVISIONING_SETUP_IP);
+      provisioningServer.send(302, "text/plain", "Redirecting to setup portal");
+      return;
+    }
     sendProvisioningJsonResponse(404, "{\"ok\":false,\"error\":\"not_found\"}");
   });
 
@@ -820,6 +968,9 @@ void connectWiFiBlocking() {
          (millis() - startedAt) < WIFI_CONNECT_TIMEOUT_MS) {
     ensureProvisioningServerState();
     if (provisioningServerStarted) {
+      if (setupApActive) {
+        provisioningDnsServer.processNextRequest();
+      }
       provisioningServer.handleClient();
     }
     delay(250);
@@ -968,8 +1119,8 @@ bool postJson(const String& url, const String& body) {
   }
 
   HTTPClient http;
-  http.setConnectTimeout(3000);
-  http.setTimeout(4000);
+  http.setConnectTimeout(1000);
+  http.setTimeout(1500);
   if (!http.begin(url)) {
     Serial.printf("[HTTP] begin failed url=%s\n", url.c_str());
     return false;
@@ -977,7 +1128,16 @@ bool postJson(const String& url, const String& body) {
   http.addHeader("Content-Type", "application/json");
   int code = http.POST(body);
   if (code <= 0) {
-    Serial.printf("[HTTP] post failed url=%s code=%d\n", url.c_str(), code);
+    String error = http.errorToString(code);
+    String localIp = WiFi.localIP().toString();
+    String gatewayIp = WiFi.gatewayIP().toString();
+    Serial.printf("[HTTP] post failed url=%s code=%d error=%s local_ip=%s gateway=%s rssi=%d\n",
+                  url.c_str(),
+                  code,
+                  error.c_str(),
+                  localIp.c_str(),
+                  gatewayIp.c_str(),
+                  WiFi.RSSI());
   } else if (code >= 400) {
     Serial.printf("[HTTP] post error url=%s code=%d\n", url.c_str(), code);
   }
@@ -1010,9 +1170,9 @@ void sendHeartbeat() {
   postJson(endpoint("/api/devices/heartbeat"), body);
 }
 
-void sendSmokeEvent(float value, const char* eventCode) {
+bool sendSmokeEvent(float value, const char* eventCode) {
   if (!backendEnabled()) {
-    return;
+    return false;
   }
   String body = String("{") +
                 "\"node_id\":\"" + runtimeNodeId + "\"," +
@@ -1022,25 +1182,100 @@ void sendSmokeEvent(float value, const char* eventCode) {
   bool ok = postJson(endpoint("/api/sensors/event"), body);
   if (ok) {
     Serial.printf("[HTTP] event=%s value=%.3f\n", eventCode, value);
+  } else {
+    Serial.printf("[HTTP] event=%s failed value=%.3f\n", eventCode, value);
   }
+  return ok;
 }
 
-int readMq2Raw() {
+Mq2Reading readMq2() {
   long sum = 0;
+  int minReading = ADC_RESOLUTION;
+  int maxReading = 0;
+
   for (int i = 0; i < MQ2_ADC_SAMPLES; ++i) {
-    sum += analogRead(MQ2_ADC_PIN);
-    delay(2);
+    int reading = analogRead(MQ2_ADC_PIN);
+    sum += reading;
+    if (reading < minReading) {
+      minReading = reading;
+    }
+    if (reading > maxReading) {
+      maxReading = reading;
+    }
+    delay(MQ2_ADC_SAMPLE_DELAY_MS);
   }
-  return static_cast<int>(sum / MQ2_ADC_SAMPLES);
+
+  Mq2Reading result;
+  result.avgRaw = static_cast<int>(sum / MQ2_ADC_SAMPLES);
+  result.minRaw = minReading;
+  result.maxRaw = maxReading;
+  result.espVoltage = (result.avgRaw / static_cast<float>(ADC_RESOLUTION)) * ESP32_ADC_MAX_VOLTAGE;
+  result.mq2A0Voltage = result.espVoltage * DIVIDER_MULTIPLIER;
+  return result;
 }
 
 float normalizeMq2Raw(int raw) {
   if (raw < 0) {
     raw = 0;
-  } else if (raw > 4095) {
-    raw = 4095;
+  } else if (raw > ADC_RESOLUTION) {
+    raw = ADC_RESOLUTION;
   }
-  return static_cast<float>(raw) / 4095.0f;
+  return static_cast<float>(raw) / static_cast<float>(ADC_RESOLUTION);
+}
+
+SmokeStatus classifyMq2Reading(int raw) {
+  if (raw >= SMOKE_HIGH_THRESHOLD) {
+    return SMOKE_STATUS_HIGH;
+  }
+  if (raw >= SMOKE_WARNING_THRESHOLD) {
+    return SMOKE_STATUS_WARNING;
+  }
+  return SMOKE_STATUS_NORMAL;
+}
+
+const char* smokeStatusText(SmokeStatus status) {
+  switch (status) {
+    case SMOKE_STATUS_HIGH:
+      return "SMOKE_HIGH";
+    case SMOKE_STATUS_WARNING:
+      return "SMOKE_WARNING";
+    case SMOKE_STATUS_NORMAL:
+    default:
+      return "NORMAL";
+  }
+}
+
+void setBuzzerOutput(bool enabled) {
+  buzzerOutputHigh = enabled;
+  digitalWrite(BUZZER_PIN, enabled ? HIGH : LOW);
+}
+
+void updateBuzzer() {
+  uint32_t now = millis();
+
+  if (currentSmokeStatus == SMOKE_STATUS_NORMAL) {
+    buzzerPatternStatus = SMOKE_STATUS_NORMAL;
+    lastBuzzerToggleMs = now;
+    if (buzzerOutputHigh) {
+      setBuzzerOutput(false);
+    }
+    return;
+  }
+
+  if (currentSmokeStatus != buzzerPatternStatus) {
+    buzzerPatternStatus = currentSmokeStatus;
+    lastBuzzerToggleMs = now;
+    setBuzzerOutput(true);
+    return;
+  }
+
+  uint32_t onMs = currentSmokeStatus == SMOKE_STATUS_HIGH ? BUZZER_HIGH_ON_MS : BUZZER_WARNING_ON_MS;
+  uint32_t offMs = currentSmokeStatus == SMOKE_STATUS_HIGH ? BUZZER_HIGH_OFF_MS : BUZZER_WARNING_OFF_MS;
+  uint32_t intervalMs = buzzerOutputHigh ? onMs : offMs;
+  if ((uint32_t)(now - lastBuzzerToggleMs) >= intervalMs) {
+    setBuzzerOutput(!buzzerOutputHigh);
+    lastBuzzerToggleMs = now;
+  }
 }
 
 void handleWiFiStateChange() {
@@ -1076,11 +1311,14 @@ void setup() {
 
   analogReadResolution(12);
   analogSetPinAttenuation(MQ2_ADC_PIN, ADC_11db);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
   sensorWarmupUntilMs = millis() + MQ2_WARMUP_MS;
-  Serial.printf("[SENSOR] mq2 pin=%d high=%d clear=%d warmup_ms=%lu\n",
+  Serial.printf("[SENSOR] mq2 pin=%d buzzer_pin=%d warning=%d high=%d warmup_ms=%lu\n",
                 MQ2_ADC_PIN,
-                MQ2_ADC_HIGH_THRESHOLD,
-                MQ2_ADC_CLEAR_THRESHOLD,
+                BUZZER_PIN,
+                SMOKE_WARNING_THRESHOLD,
+                SMOKE_HIGH_THRESHOLD,
                 static_cast<unsigned long>(MQ2_WARMUP_MS));
 
   if (hasRuntimeWiFiConfig()) {
@@ -1094,6 +1332,8 @@ void setup() {
 }
 
 void loop() {
+  updateBuzzer();
+
   if (!setupApActive && !hasRuntimeWiFiConfig()) {
     startSetupApMode("no_credentials");
   }
@@ -1106,6 +1346,9 @@ void loop() {
 
   ensureProvisioningServerState();
   if (provisioningServerStarted) {
+    if (setupApActive) {
+      provisioningDnsServer.processNextRequest();
+    }
     provisioningServer.handleClient();
   }
 
@@ -1138,43 +1381,71 @@ void loop() {
   }
 
   if ((now - lastReadingMs) >= SENSOR_REPORT_INTERVAL_MS) {
-    int raw = readMq2Raw();
+    Mq2Reading reading = readMq2();
+    int raw = reading.avgRaw;
     float normalized = normalizeMq2Raw(raw);
+    SmokeStatus status = classifyMq2Reading(raw);
+
+    Serial.printf("[SENSOR] raw_avg=%d min=%d max=%d esp_v=%.3f mq2_a0_v=%.3f status=%s%s\n",
+                  reading.avgRaw,
+                  reading.minRaw,
+                  reading.maxRaw,
+                  reading.espVoltage,
+                  reading.mq2A0Voltage,
+                  smokeStatusText(status),
+                  (int32_t)(now - sensorWarmupUntilMs) < 0 ? " warmup" : "");
 
     if ((int32_t)(now - sensorWarmupUntilMs) < 0) {
       smokeLatched = false;
-      smokeHighConfirmCount = 0;
+      notifiedSmokeStatus = SMOKE_STATUS_NORMAL;
+      currentSmokeStatus = SMOKE_STATUS_NORMAL;
       smokeClearConfirmCount = 0;
-      Serial.printf("[SENSOR] warmup raw=%d value=%.3f\n", raw, normalized);
     } else {
-      if (raw >= MQ2_ADC_HIGH_THRESHOLD) {
-        if (smokeHighConfirmCount < 255) {
-          smokeHighConfirmCount++;
-        }
-        smokeClearConfirmCount = 0;
-      } else if (raw <= MQ2_ADC_CLEAR_THRESHOLD) {
+      if (status == SMOKE_STATUS_NORMAL) {
         if (smokeClearConfirmCount < 255) {
           smokeClearConfirmCount++;
         }
-        smokeHighConfirmCount = 0;
+        if (!smokeLatched) {
+          lastSmokeEventAttemptMs = 0;
+          notifiedSmokeStatus = SMOKE_STATUS_NORMAL;
+          currentSmokeStatus = SMOKE_STATUS_NORMAL;
+        }
       } else {
-        smokeHighConfirmCount = 0;
         smokeClearConfirmCount = 0;
       }
 
-      if (!smokeLatched && smokeHighConfirmCount >= MQ2_HIGH_CONFIRM_SAMPLES) {
-        smokeLatched = true;
-        smokeHighConfirmCount = 0;
-        sendSmokeEvent(normalized, "SMOKE_HIGH");
+      if (status != SMOKE_STATUS_NORMAL &&
+          (!smokeLatched || (status == SMOKE_STATUS_HIGH && notifiedSmokeStatus != SMOKE_STATUS_HIGH))) {
+        bool highEscalation = status == SMOKE_STATUS_HIGH && notifiedSmokeStatus != SMOKE_STATUS_HIGH;
+        if (lastSmokeEventAttemptMs == 0 || highEscalation ||
+            (uint32_t)(now - lastSmokeEventAttemptMs) >= SMOKE_EVENT_RETRY_INTERVAL_MS) {
+          const char* eventCode = status == SMOKE_STATUS_HIGH ? "SMOKE_HIGH" : "SMOKE_WARNING";
+          lastSmokeEventAttemptMs = now;
+          if (sendSmokeEvent(normalized, eventCode)) {
+            smokeLatched = true;
+            notifiedSmokeStatus = status;
+            currentSmokeStatus = status;
+          } else {
+            Serial.printf("[SENSOR] event pending status=%s; buzzer held until backend accepts event\n",
+                          smokeStatusText(status));
+          }
+        }
       } else if (smokeLatched && smokeClearConfirmCount >= MQ2_CLEAR_CONFIRM_SAMPLES) {
-        smokeLatched = false;
-        smokeClearConfirmCount = 0;
         sendSmokeEvent(normalized, "SMOKE_NORMAL");
+        smokeClearConfirmCount = 0;
+        smokeLatched = false;
+        notifiedSmokeStatus = SMOKE_STATUS_NORMAL;
+        lastSmokeEventAttemptMs = 0;
+        currentSmokeStatus = SMOKE_STATUS_NORMAL;
+      } else {
+        currentSmokeStatus = notifiedSmokeStatus;
       }
     }
 
     lastReadingMs = now;
   }
+
+  updateBuzzer();
 
   delay(20);
 }
