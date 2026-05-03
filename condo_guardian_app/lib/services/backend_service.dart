@@ -206,14 +206,51 @@ class BackendService {
       'limit': localDate == null ? 300 : 500,
       ..._localDayQuery(localDate),
     };
-    final json = await apiClient.getJson(
+    final alertsFuture = apiClient.getJson(
       'api/alerts',
       query: query,
     );
-    final items = (json['alerts'] as List<dynamic>? ?? <dynamic>[])
-        .map((item) => SnapshotItem.fromJson(item as Map<String, dynamic>))
-        .where((item) => item.snapshotPath.isNotEmpty)
-        .toList();
+    final eventsFuture = apiClient.getJson(
+      'api/events',
+      query: query,
+    );
+
+    final responses = await Future.wait([alertsFuture, eventsFuture]);
+    final alertsJson = responses[0];
+    final eventsJson = responses[1];
+    final bySnapshotPath = <String, SnapshotItem>{};
+
+    void addSnapshot(SnapshotItem item) {
+      final snapshotPath = item.snapshotPath.trim();
+      if (snapshotPath.isEmpty) {
+        return;
+      }
+
+      final current = bySnapshotPath[snapshotPath];
+      if (current == null || (item.isAlertRecord && !current.isAlertRecord)) {
+        bySnapshotPath[snapshotPath] = item;
+      }
+    }
+
+    for (final item in alertsJson['alerts'] as List<dynamic>? ?? <dynamic>[]) {
+      addSnapshot(
+        SnapshotItem.fromJson(
+          item as Map<String, dynamic>,
+          recordType: 'alert',
+        ),
+      );
+    }
+    for (final item in eventsJson['events'] as List<dynamic>? ?? <dynamic>[]) {
+      addSnapshot(
+        SnapshotItem.fromJson(
+          item as Map<String, dynamic>,
+          recordType: 'event',
+        ),
+      );
+    }
+
+    final items = bySnapshotPath.values.toList()
+      ..sort((a, b) => b.capturedAt.compareTo(a.capturedAt));
     return _filterByLocalDay(items, localDate, (item) => item.capturedAt);
   }
 
@@ -258,6 +295,28 @@ class BackendService {
       'api/alerts/$alertId/acknowledge',
       <String, dynamic>{},
     );
+  }
+
+  Future<AlertItem> updateAlertReview(
+    String alertId, {
+    required String reviewStatus,
+    String reviewNote = '',
+  }) async {
+    final json = await apiClient.postJson(
+      'api/alerts/$alertId/review',
+      <String, dynamic>{
+        'review_status': reviewStatus,
+        'review_note': reviewNote,
+      },
+    );
+    final alert = json['alert'];
+    if (alert is Map<String, dynamic>) {
+      return AlertItem.fromJson(alert);
+    }
+    if (alert is Map) {
+      return AlertItem.fromJson(Map<String, dynamic>.from(alert));
+    }
+    throw ApiException('Review saved but no alert was returned.');
   }
 
   Future<String> queryAssistant(String questionId) async {

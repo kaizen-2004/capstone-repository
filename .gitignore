@@ -4,7 +4,7 @@ snapshots/
 /data/faces
 /data/fire
 db/thesis.db
-models/
+/models/
 raw_logs/
 reports/
 *.log

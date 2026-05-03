@@ -32,6 +32,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
   String? _error;
   Timer? _timer;
   DateTime? _selectedDate;
+  String? _busyAlertId;
 
   @override
   void initState() {
@@ -77,9 +78,53 @@ class _AlertsScreenState extends State<AlertsScreen> {
   }
 
   Future<void> _acknowledge(String alertId) async {
-    await widget.backendService.acknowledgeAlert(alertId);
-    await _loadAlerts(silent: true);
-    widget.onAlertAcknowledged?.call();
+    setState(() => _busyAlertId = alertId);
+    try {
+      await widget.backendService.acknowledgeAlert(alertId);
+      await _loadAlerts(silent: true);
+      widget.onAlertAcknowledged?.call();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Acknowledge failed: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _busyAlertId = null);
+      }
+    }
+  }
+
+  Future<void> _resolveAlert(String alertId) async {
+    setState(() => _busyAlertId = alertId);
+    try {
+      await widget.backendService.updateAlertReview(
+        alertId,
+        reviewStatus: 'resolved',
+        reviewNote: 'Resolved from mobile app.',
+      );
+      await _loadAlerts(silent: true);
+      widget.onAlertAcknowledged?.call();
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Alert marked resolved.')),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Resolve failed: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _busyAlertId = null);
+      }
+    }
   }
 
   Future<void> _openEvents() async {
@@ -87,7 +132,9 @@ class _AlertsScreenState extends State<AlertsScreen> {
       MaterialPageRoute<void>(
         builder: (_) => EventsScreen(
           backendService: widget.backendService,
+          settingsStore: widget.settingsStore,
           initialDate: _selectedDate,
+          onAlertResolved: widget.onAlertAcknowledged,
         ),
       ),
     );
@@ -100,9 +147,25 @@ class _AlertsScreenState extends State<AlertsScreen> {
           backendService: widget.backendService,
           settingsStore: widget.settingsStore,
           initialDate: _selectedDate,
+          onAlertResolved: widget.onAlertAcknowledged,
         ),
       ),
     );
+  }
+
+  String _absoluteSnapshotUrl(String snapshotPath) {
+    final normalizedBase = widget.settingsStore.backendBaseUrl.endsWith('/')
+        ? widget.settingsStore.backendBaseUrl
+        : '${widget.settingsStore.backendBaseUrl}/';
+    return Uri.parse(normalizedBase).resolve(snapshotPath).toString();
+  }
+
+  Map<String, String>? get _imageHeaders {
+    final token = widget.settingsStore.authToken.trim();
+    if (token.isEmpty) {
+      return null;
+    }
+    return <String, String>{'Authorization': 'Bearer $token'};
   }
 
   DateTime _normalizeDate(DateTime value) {
@@ -218,6 +281,14 @@ class _AlertsScreenState extends State<AlertsScreen> {
     return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
   }
 
+  String _formatReviewStatusLabel(String value) {
+    final words = value.replaceAll('_', ' ').trim().split(RegExp(r'\s+'));
+    return words
+        .where((word) => word.isNotEmpty)
+        .map((word) => '${word[0].toUpperCase()}${word.substring(1)}')
+        .join(' ');
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) {
@@ -249,8 +320,12 @@ class _AlertsScreenState extends State<AlertsScreen> {
       );
     }
 
-    final active = _alerts.where((alert) => !alert.acknowledged).toList();
-    final acked = _alerts.where((alert) => alert.acknowledged).toList();
+    final active = _alerts
+        .where((alert) => !alert.acknowledged && !alert.isTerminalReviewStatus)
+        .toList();
+    final acked = _alerts
+        .where((alert) => alert.acknowledged || alert.isTerminalReviewStatus)
+        .toList();
 
     return RefreshIndicator(
       onRefresh: _loadAlerts,
@@ -261,7 +336,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
           const SizedBox(height: 8),
           if (active.isNotEmpty) ...[
             _SectionLabel(
-                label: 'Active', count: active.length, isActive: true),
+                label: 'Review Queue', count: active.length, isActive: true),
             const SizedBox(height: 8),
             ...active.map(
               (alert) => Padding(
@@ -270,7 +345,15 @@ class _AlertsScreenState extends State<AlertsScreen> {
                   alert: alert,
                   style: _severityStyle(alert.severity),
                   timeLabel: _formatDate(alert.createdAt),
+                  reviewStatusLabel:
+                      _formatReviewStatusLabel(alert.reviewStatus),
+                  snapshotUrl: alert.hasSnapshot
+                      ? _absoluteSnapshotUrl(alert.snapshotPath)
+                      : null,
+                  imageHeaders: _imageHeaders,
+                  busy: _busyAlertId == alert.id,
                   onAcknowledge: () => _acknowledge(alert.id),
+                  onResolve: () => _resolveAlert(alert.id),
                 ),
               ),
             ),
@@ -278,7 +361,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
           ],
           if (acked.isNotEmpty) ...[
             _SectionLabel(
-              label: 'Acknowledged',
+              label: 'Reviewed / Acknowledged',
               count: acked.length,
               isActive: false,
             ),
@@ -290,7 +373,15 @@ class _AlertsScreenState extends State<AlertsScreen> {
                   alert: alert,
                   style: _severityStyle(alert.severity),
                   timeLabel: _formatDate(alert.createdAt),
+                  reviewStatusLabel:
+                      _formatReviewStatusLabel(alert.reviewStatus),
+                  snapshotUrl: alert.hasSnapshot
+                      ? _absoluteSnapshotUrl(alert.snapshotPath)
+                      : null,
+                  imageHeaders: _imageHeaders,
+                  busy: _busyAlertId == alert.id,
                   onAcknowledge: null,
+                  onResolve: null,
                   dimmed: true,
                 ),
               ),
@@ -425,14 +516,24 @@ class _AlertCard extends StatelessWidget {
     required this.alert,
     required this.style,
     required this.timeLabel,
+    required this.reviewStatusLabel,
+    required this.busy,
     required this.onAcknowledge,
+    required this.onResolve,
+    this.snapshotUrl,
+    this.imageHeaders,
     this.dimmed = false,
   });
 
   final AlertItem alert;
   final ({Color bg, Color border, Color text, IconData icon}) style;
   final String timeLabel;
+  final String reviewStatusLabel;
+  final bool busy;
   final VoidCallback? onAcknowledge;
+  final VoidCallback? onResolve;
+  final String? snapshotUrl;
+  final Map<String, String>? imageHeaders;
   final bool dimmed;
 
   @override
@@ -444,114 +545,311 @@ class _AlertCard extends StatelessWidget {
       opacity: dimmed ? 0.55 : 1.0,
       child: Container(
         decoration: BoxDecoration(
-          color: dimmed ? cs.surfaceContainerHighest : style.bg,
-          borderRadius: BorderRadius.circular(14),
+          color: cs.surface,
+          borderRadius: BorderRadius.circular(18),
           border: Border.all(
             color: dimmed ? cs.outlineVariant : style.border,
-            width: dimmed ? 1 : 1.5,
+            width: dimmed ? 1 : 1.4,
           ),
+          boxShadow: [
+            BoxShadow(
+              color: cs.shadow.withValues(alpha: dimmed ? 0.02 : 0.06),
+              blurRadius: 16,
+              offset: const Offset(0, 8),
+            ),
+          ],
         ),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (snapshotUrl != null)
+              _AlertSnapshotPreview(
+                imageUrl: snapshotUrl!,
+                headers: imageHeaders,
+                severityColor: style.text,
+              ),
+            Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(style.icon, size: 18, color: style.text),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      alert.title,
-                      style: tt.bodyLarge?.copyWith(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: cs.onSurface,
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      _StatusPill(
+                        label: 'Alert #${alert.id}',
+                        color: cs.primary,
                       ),
-                      maxLines: 2,
+                      _StatusPill(
+                        label: alert.severity.toUpperCase(),
+                        color: style.text,
+                        filled: true,
+                      ),
+                      _StatusPill(
+                        label: reviewStatusLabel.isEmpty
+                            ? 'Needs Review'
+                            : reviewStatusLabel,
+                        color: const Color(0xFF1E88E5),
+                      ),
+                      if (alert.eventId != null)
+                        _StatusPill(
+                          label: 'Linked Event #${alert.eventId}',
+                          color: const Color(0xFF7E57C2),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(style.icon, size: 18, color: style.text),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          alert.title,
+                          style: tt.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w700,
+                            color: cs.onSurface,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (alert.message.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      alert.message,
+                      style: tt.bodySmall?.copyWith(
+                        height: 1.45,
+                        color: cs.onSurfaceVariant,
+                      ),
+                      maxLines: 3,
                       overflow: TextOverflow.ellipsis,
                     ),
-                  ),
-                  const SizedBox(width: 6),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: style.text.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Text(
-                      alert.severity.toUpperCase(),
-                      style: TextStyle(
-                        color: style.text,
-                        fontSize: 9,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.5,
+                  ],
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      if (alert.eventCode.isNotEmpty)
+                        _MetadataChip(
+                          icon: Icons.confirmation_number_outlined,
+                          label: alert.eventCode,
+                        ),
+                      if (alert.sourceNodeLabel.isNotEmpty)
+                        _MetadataChip(
+                          icon: Icons.memory_rounded,
+                          label: alert.sourceNodeLabel,
+                        ),
+                      if (alert.location.isNotEmpty)
+                        _MetadataChip(
+                          icon: Icons.place_outlined,
+                          label: alert.location,
+                        ),
+                      _MetadataChip(
+                        icon: Icons.access_time_rounded,
+                        label: timeLabel,
                       ),
-                    ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      if (onAcknowledge != null)
+                        OutlinedButton.icon(
+                          onPressed: busy ? null : onAcknowledge,
+                          icon: const Icon(Icons.done_rounded, size: 17),
+                          label: const Text('Acknowledge'),
+                        ),
+                      if (onResolve != null)
+                        FilledButton.tonalIcon(
+                          onPressed: busy ? null : onResolve,
+                          icon: const Icon(Icons.task_alt_rounded, size: 17),
+                          label: const Text('Resolve'),
+                        ),
+                      if (onAcknowledge == null && onResolve == null)
+                        const _ReviewedIndicator(),
+                    ],
                   ),
                 ],
               ),
-              if (alert.message.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Padding(
-                  padding: const EdgeInsets.only(left: 28),
-                  child: Text(
-                    alert.message,
-                    style: tt.bodySmall?.copyWith(height: 1.5),
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  const SizedBox(width: 28),
-                  Icon(Icons.access_time_rounded,
-                      size: 12, color: cs.onSurfaceVariant),
-                  const SizedBox(width: 4),
-                  Text(timeLabel, style: tt.bodySmall?.copyWith(fontSize: 11)),
-                  const Spacer(),
-                  if (onAcknowledge != null)
-                    TextButton(
-                      onPressed: onAcknowledge,
-                      style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 4),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                      child: const Text('Acknowledge',
-                          style: TextStyle(fontSize: 12)),
-                    )
-                  else
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.check_circle_rounded,
-                          size: 14,
-                          color: Color(0xFF26A69A),
-                        ),
-                        const SizedBox(width: 4),
-                        const Text(
-                          'Acknowledged',
-                          style: TextStyle(
-                            color: Color(0xFF26A69A),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    ),
-                ],
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
+    );
+  }
+}
+
+class _AlertSnapshotPreview extends StatelessWidget {
+  const _AlertSnapshotPreview({
+    required this.imageUrl,
+    required this.headers,
+    required this.severityColor,
+  });
+
+  final String imageUrl;
+  final Map<String, String>? headers;
+  final Color severityColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return AspectRatio(
+      aspectRatio: 16 / 9,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Image.network(
+            imageUrl,
+            headers: headers,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => Container(
+              color: Colors.black12,
+              alignment: Alignment.center,
+              child: const Text('Snapshot unavailable'),
+            ),
+          ),
+          Positioned(
+            left: 12,
+            top: 12,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.68),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: severityColor.withValues(alpha: 0.8),
+                ),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.photo_camera_outlined,
+                      color: Colors.white, size: 14),
+                  SizedBox(width: 5),
+                  Text(
+                    'Snapshot',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  const _StatusPill({
+    required this.label,
+    required this.color,
+    this.filled = false,
+  });
+
+  final String label;
+  final Color color;
+  final bool filled;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: filled ? color : color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: filled ? Colors.white : color,
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.2,
+        ),
+      ),
+    );
+  }
+}
+
+class _MetadataChip extends StatelessWidget {
+  const _MetadataChip({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.58),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: cs.onSurfaceVariant),
+          const SizedBox(width: 5),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 180),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: cs.onSurfaceVariant,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReviewedIndicator extends StatelessWidget {
+  const _ReviewedIndicator();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          Icons.check_circle_rounded,
+          size: 16,
+          color: Color(0xFF26A69A),
+        ),
+        SizedBox(width: 5),
+        Text(
+          'Reviewed',
+          style: TextStyle(
+            color: Color(0xFF26A69A),
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
     );
   }
 }

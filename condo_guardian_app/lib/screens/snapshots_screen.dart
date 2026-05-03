@@ -12,11 +12,13 @@ class SnapshotsScreen extends StatefulWidget {
     required this.backendService,
     required this.settingsStore,
     this.initialDate,
+    this.onAlertResolved,
   });
 
   final BackendService backendService;
   final SettingsStore settingsStore;
   final DateTime? initialDate;
+  final VoidCallback? onAlertResolved;
 
   @override
   State<SnapshotsScreen> createState() => _SnapshotsScreenState();
@@ -90,6 +92,34 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
     return snapshot.isPersonSnapshot ? 'Person Detected' : snapshot.title;
   }
 
+  String _formatTimestamp(DateTime value) {
+    final local = value.toLocal();
+    final date =
+        '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')}';
+    final time =
+        '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+    return '$date $time';
+  }
+
+  String _formatReviewStatusLabel(String value) {
+    final words = value.replaceAll('_', ' ').trim().split(RegExp(r'\s+'));
+    return words
+        .where((word) => word.isNotEmpty)
+        .map((word) => '${word[0].toUpperCase()}${word.substring(1)}')
+        .join(' ');
+  }
+
+  Color _severityColor(String severity) {
+    switch (severity.toLowerCase()) {
+      case 'critical':
+        return Colors.red;
+      case 'warning':
+        return Colors.orange;
+      default:
+        return Colors.blue;
+    }
+  }
+
   String _snapshotFileName(SnapshotItem snapshot) {
     final stamp = snapshot.capturedAt.toUtc().toIso8601String();
     final safeStamp = stamp.replaceAll(':', '-').replaceAll('.', '-');
@@ -143,6 +173,14 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
   }
 
   Future<void> _deleteSnapshot(SnapshotItem snapshot) async {
+    final alertId = snapshot.actionableAlertId;
+    if (alertId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Only alert snapshots can be deleted.')),
+      );
+      return;
+    }
+
     final shouldDelete = await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
@@ -168,13 +206,14 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
 
     setState(() => _busySnapshotId = snapshot.id);
     try {
-      await widget.backendService.deleteSnapshot(snapshot.id);
+      await widget.backendService.deleteSnapshot('$alertId');
       if (!mounted) {
         return;
       }
       setState(() {
-        _snapshots =
-            _snapshots.where((item) => item.id != snapshot.id).toList();
+        _snapshots = _snapshots
+            .where((item) => item.snapshotPath != snapshot.snapshotPath)
+            .toList();
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Snapshot deleted.')),
@@ -185,6 +224,41 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
       }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Delete failed: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _busySnapshotId = null);
+      }
+    }
+  }
+
+  Future<void> _resolveSnapshotAlert(SnapshotItem snapshot) async {
+    final alertId = snapshot.actionableAlertId;
+    if (alertId == null) {
+      return;
+    }
+
+    setState(() => _busySnapshotId = snapshot.id);
+    try {
+      await widget.backendService.updateAlertReview(
+        '$alertId',
+        reviewStatus: 'resolved',
+        reviewNote: 'Resolved from mobile snapshot gallery.',
+      );
+      await _loadSnapshots();
+      widget.onAlertResolved?.call();
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Alert #$alertId marked resolved.')),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Resolve failed: $error')),
       );
     } finally {
       if (mounted) {
@@ -233,7 +307,12 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                           final snapshot = _snapshots[index];
                           final url =
                               _absoluteSnapshotUrl(snapshot.snapshotPath);
+                          final canReview =
+                              snapshot.actionableAlertId != null &&
+                                  !snapshot.isTerminalReviewStatus;
+                          final canDelete = snapshot.actionableAlertId != null;
                           return Card(
+                            clipBehavior: Clip.antiAlias,
                             child: Padding(
                               padding: const EdgeInsets.all(12),
                               child: Column(
@@ -245,25 +324,98 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                                     overlays: snapshot.faceOverlays,
                                   ),
                                   const SizedBox(height: 10),
+                                  Wrap(
+                                    spacing: 6,
+                                    runSpacing: 6,
+                                    children: [
+                                      _SnapshotStatusPill(
+                                        label: snapshot.recordLabel,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .primary,
+                                      ),
+                                      _SnapshotStatusPill(
+                                        label: snapshot.severity.toUpperCase(),
+                                        color:
+                                            _severityColor(snapshot.severity),
+                                        filled: true,
+                                      ),
+                                      if (snapshot.linkedRecordLabel.isNotEmpty)
+                                        _SnapshotStatusPill(
+                                          label: snapshot.linkedRecordLabel,
+                                          color: const Color(0xFF7E57C2),
+                                        ),
+                                      if (snapshot.isAlertRecord)
+                                        _SnapshotStatusPill(
+                                          label: _formatReviewStatusLabel(
+                                              snapshot.reviewStatus),
+                                          color: const Color(0xFF1E88E5),
+                                        ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 10),
                                   Text(
                                     _displayTitle(snapshot),
                                     style:
                                         Theme.of(context).textTheme.titleMedium,
                                   ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    '${snapshot.severity.toUpperCase()} • ${snapshot.sourceNodeLabel} • ${snapshot.location}',
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
+                                  if (snapshot.message.isNotEmpty) ...[
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      snapshot.message,
+                                      maxLines: 3,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall
+                                          ?.copyWith(height: 1.45),
+                                    ),
+                                  ],
+                                  const SizedBox(height: 8),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      if (snapshot.eventCode.isNotEmpty)
+                                        _SnapshotMetadataChip(
+                                          icon: Icons
+                                              .confirmation_number_outlined,
+                                          label: snapshot.eventCode,
+                                        ),
+                                      if (snapshot.sourceNodeLabel.isNotEmpty)
+                                        _SnapshotMetadataChip(
+                                          icon: Icons.memory_rounded,
+                                          label: snapshot.sourceNodeLabel,
+                                        ),
+                                      if (snapshot.location.isNotEmpty)
+                                        _SnapshotMetadataChip(
+                                          icon: Icons.place_outlined,
+                                          label: snapshot.location,
+                                        ),
+                                      _SnapshotMetadataChip(
+                                        icon: Icons.access_time_rounded,
+                                        label: _formatTimestamp(
+                                            snapshot.capturedAt),
+                                      ),
+                                    ],
                                   ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                      snapshot.capturedAt.toLocal().toString()),
                                   const SizedBox(height: 8),
                                   Wrap(
                                     spacing: 8,
                                     runSpacing: 8,
                                     children: <Widget>[
+                                      if (canReview)
+                                        FilledButton.tonalIcon(
+                                          onPressed:
+                                              _busySnapshotId == snapshot.id
+                                                  ? null
+                                                  : () => _resolveSnapshotAlert(
+                                                      snapshot),
+                                          icon: const Icon(
+                                              Icons.task_alt_rounded,
+                                              size: 18),
+                                          label: const Text('Resolve'),
+                                        ),
                                       OutlinedButton.icon(
                                         onPressed: _busySnapshotId ==
                                                 snapshot.id
@@ -273,16 +425,17 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                                             size: 18),
                                         label: const Text('Download'),
                                       ),
-                                      OutlinedButton.icon(
-                                        onPressed: _busySnapshotId ==
-                                                snapshot.id
-                                            ? null
-                                            : () => _deleteSnapshot(snapshot),
-                                        icon: const Icon(
-                                            Icons.delete_outline_rounded,
-                                            size: 18),
-                                        label: const Text('Delete'),
-                                      ),
+                                      if (canDelete)
+                                        OutlinedButton.icon(
+                                          onPressed: _busySnapshotId ==
+                                                  snapshot.id
+                                              ? null
+                                              : () => _deleteSnapshot(snapshot),
+                                          icon: const Icon(
+                                              Icons.delete_outline_rounded,
+                                              size: 18),
+                                          label: const Text('Delete'),
+                                        ),
                                     ],
                                   ),
                                 ],
@@ -292,6 +445,79 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                         },
                       ),
                     ),
+    );
+  }
+}
+
+class _SnapshotStatusPill extends StatelessWidget {
+  const _SnapshotStatusPill({
+    required this.label,
+    required this.color,
+    this.filled = false,
+  });
+
+  final String label;
+  final Color color;
+  final bool filled;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: filled ? color : color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: filled ? Colors.white : color,
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.2,
+        ),
+      ),
+    );
+  }
+}
+
+class _SnapshotMetadataChip extends StatelessWidget {
+  const _SnapshotMetadataChip({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.58),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: cs.onSurfaceVariant),
+          const SizedBox(width: 5),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 180),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: cs.onSurfaceVariant,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
