@@ -1,0 +1,9 @@
+metric,value
+Authorized Face Detections,67.0000
+Unknown Detections,175.0000
+Fire Fusion Alerts,86.0000
+Intruder Fusion Alerts,226.0000
+Average Response Time (s),0.0317
+Authorized Detection Share (%),27.6860
+Alert Rate (/day),100.0000
+Fire Evidence Conversion (%),47.7778
