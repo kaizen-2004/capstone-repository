@@ -15,6 +15,20 @@ import type {
 
 type Json = Record<string, unknown>;
 
+const DEFAULT_FETCH_TIMEOUT_MS = 10000;
+export const AUTH_EXPIRED_EVENT = 'dashboard-auth-expired';
+
+export class AuthExpiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthExpiredError';
+  }
+}
+
+function shouldEmitAuthExpired(url: string): boolean {
+  return !url.startsWith('/api/auth/login') && !url.startsWith('/api/auth/reset-password');
+}
+
 export interface LiveEventsPayload {
   alerts: Alert[];
   events: Alert[];
@@ -309,9 +323,13 @@ function mapAlert(raw: Json, kind: 'alert' | 'event' = 'event'): Alert {
         ? rawId
         : `${kind}-${rawId}`)
     : '';
+  const eventId = toInt(raw.event_id ?? raw.eventId, 0);
+  const relatedAlertId = toInt(raw.related_alert_id ?? raw.relatedAlertId, 0);
 
   return {
     id: normalizedId,
+    eventId: eventId > 0 ? eventId : undefined,
+    relatedAlertId: relatedAlertId > 0 ? relatedAlertId : undefined,
     timestamp: String(raw.timestamp ?? ''),
     severity: normalizeSeverity(raw.severity),
     type: normalizeEventType(raw.type),
@@ -438,11 +456,39 @@ function mapRuntimeSetting(raw: Json): RuntimeSetting {
   };
 }
 
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    credentials: 'include',
-    ...init,
-  });
+async function fetchJson<T>(url: string, init?: RequestInit, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): Promise<T> {
+  const controller = new AbortController();
+  const externalSignal = init?.signal;
+  const fetchInit = { ...init, signal: controller.signal };
+  let timedOut = false;
+
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const abortFromExternalSignal = () => controller.abort();
+
+  if (externalSignal?.aborted) {
+    controller.abort();
+  } else {
+    externalSignal?.addEventListener('abort', abortFromExternalSignal, { once: true });
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      credentials: 'include',
+      ...fetchInit,
+    });
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(`Request timed out for ${url}`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+    externalSignal?.removeEventListener('abort', abortFromExternalSignal);
+  }
   let payload: unknown = null;
   try {
     payload = await response.json();
@@ -455,13 +501,22 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
       payload && typeof payload === 'object' && ('error' in payload || 'detail' in payload)
         ? String((payload as Json).error ?? (payload as Json).detail)
         : `Request failed (${response.status}) for ${url}`;
+    if (response.status === 401 && shouldEmitAuthExpired(url)) {
+      const authError = new AuthExpiredError(errorMessage || 'Session expired. Please sign in again.');
+      window.dispatchEvent(
+        new CustomEvent(AUTH_EXPIRED_EVENT, {
+          detail: { message: authError.message },
+        }),
+      );
+      throw authError;
+    }
     throw new Error(errorMessage);
   }
   return (payload || {}) as T;
 }
 
-export async function fetchLiveEvents(limit = 250): Promise<LiveEventsPayload> {
-  const payload = await fetchJson<Json>(`/api/ui/events/live?limit=${Math.max(20, Math.min(limit, 500))}`);
+export async function fetchLiveEvents(limit = 250, signal?: AbortSignal): Promise<LiveEventsPayload> {
+  const payload = await fetchJson<Json>(`/api/ui/events/live?limit=${Math.max(20, Math.min(limit, 500))}`, { signal });
   const alertsRaw = Array.isArray(payload.alerts) ? payload.alerts : [];
   const eventsRaw = Array.isArray(payload.events) ? payload.events : [];
   return {
@@ -575,8 +630,8 @@ export async function fetchRetentionStatus(): Promise<RetentionStatusPayload> {
   };
 }
 
-export async function fetchLiveNodes(): Promise<LiveNodesPayload> {
-  const payload = await fetchJson<Json>('/api/ui/nodes/live');
+export async function fetchLiveNodes(signal?: AbortSignal): Promise<LiveNodesPayload> {
+  const payload = await fetchJson<Json>('/api/ui/nodes/live', { signal });
   const sensorsRaw = Array.isArray(payload.sensor_statuses) ? payload.sensor_statuses : [];
   const servicesRaw = Array.isArray(payload.service_statuses) ? payload.service_statuses : [];
   const cameraRaw = Array.isArray(payload.camera_feeds) ? payload.camera_feeds : [];
@@ -592,8 +647,8 @@ export async function fetchLiveNodes(): Promise<LiveNodesPayload> {
   };
 }
 
-export async function fetchDailyStats(days = 7): Promise<DailyStats[]> {
-  const payload = await fetchJson<Json>(`/api/ui/stats/daily?days=${Math.max(1, Math.min(days, 31))}`);
+export async function fetchDailyStats(days = 7, signal?: AbortSignal): Promise<DailyStats[]> {
+  const payload = await fetchJson<Json>(`/api/ui/stats/daily?days=${Math.max(1, Math.min(days, 31))}`, { signal });
   const statsRaw = Array.isArray(payload.stats) ? payload.stats : [];
   return statsRaw.map((row) => mapDailyStat(row as Json));
 }
@@ -730,8 +785,8 @@ export async function trainFaceModel(): Promise<{ ok: boolean; message: string }
   };
 }
 
-export async function fetchAuthMe(): Promise<AuthUser> {
-  const payload = await fetchJson<Json>('/api/auth/me');
+export async function fetchAuthMe(signal?: AbortSignal): Promise<AuthUser> {
+  const payload = await fetchJson<Json>('/api/auth/me', { signal });
   const user = (payload.user as Json) || {};
   return {
     username: String(user.username ?? 'admin'),
@@ -802,8 +857,8 @@ export async function resetPasswordWithRecoveryCode(
   };
 }
 
-export async function fetchMobileRemoteStatus(): Promise<MobileRemoteStatus> {
-  const payload = await fetchJson<Json>('/api/remote/mobile/status');
+export async function fetchMobileRemoteStatus(signal?: AbortSignal): Promise<MobileRemoteStatus> {
+  const payload = await fetchJson<Json>('/api/remote/mobile/status', { signal });
   return {
     ok: Boolean(payload.ok),
     enabled: Boolean(payload.enabled),

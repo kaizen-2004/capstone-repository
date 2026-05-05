@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 
 import '../core/storage/settings_store.dart';
 import '../models/alert_item.dart';
+import '../models/snapshot_item.dart';
 import '../services/backend_service.dart';
+import '../widgets/snapshot_image_with_overlay.dart';
 
 class EventsScreen extends StatefulWidget {
   const EventsScreen({
@@ -238,6 +240,7 @@ class _EventCard extends StatelessWidget {
             _EventSnapshotPreview(
               imageUrl: snapshotUrl!,
               headers: imageHeaders,
+              overlays: event.faceOverlays,
               severityColor: severityColor,
             ),
           Padding(
@@ -333,11 +336,13 @@ class _EventSnapshotPreview extends StatelessWidget {
   const _EventSnapshotPreview({
     required this.imageUrl,
     required this.headers,
+    required this.overlays,
     required this.severityColor,
   });
 
   final String imageUrl;
   final Map<String, String>? headers;
+  final List<FaceOverlay> overlays;
   final Color severityColor;
 
   @override
@@ -347,15 +352,11 @@ class _EventSnapshotPreview extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          Image.network(
-            imageUrl,
+          SnapshotImageWithOverlay(
+            imageUrl: imageUrl,
             headers: headers,
-            fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => Container(
-              color: Colors.black12,
-              alignment: Alignment.center,
-              child: const Text('Snapshot unavailable'),
-            ),
+            overlays: overlays,
+            borderRadius: BorderRadius.zero,
           ),
           Positioned(
             left: 12,

@@ -37,10 +37,16 @@ export function Sidebar({ isOpen = true, onClose, desktopHidden = false, onDeskt
 
   useEffect(() => {
     let cancelled = false;
+    let controller: AbortController | null = null;
+    let timer: number | null = null;
 
     const loadBadges = async () => {
+      controller = new AbortController();
       try {
-        const [eventsPayload, nodesPayload] = await Promise.all([fetchLiveEvents(), fetchLiveNodes()]);
+        const [eventsPayload, nodesPayload] = await Promise.all([
+          fetchLiveEvents(250, controller.signal),
+          fetchLiveNodes(controller.signal),
+        ]);
         if (cancelled) {
           return;
         }
@@ -51,21 +57,31 @@ export function Sidebar({ isOpen = true, onClose, desktopHidden = false, onDeskt
         setReviewQueueCount(queueCount);
         setOfflineNodeCount(offlineCount);
       } catch {
+        if (cancelled) {
+          return;
+        }
         if (!cancelled) {
           setReviewQueueCount(0);
           setOfflineNodeCount(0);
+        }
+      } finally {
+        controller = null;
+        if (!cancelled) {
+          timer = window.setTimeout(() => {
+            void loadBadges();
+          }, 12000);
         }
       }
     };
 
     void loadBadges();
-    const timer = window.setInterval(() => {
-      void loadBadges();
-    }, 12000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      controller?.abort();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
     };
   }, []);
 

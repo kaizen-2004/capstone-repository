@@ -1,4 +1,5 @@
 import 'node_status.dart';
+import 'snapshot_item.dart';
 
 class AlertItem {
   AlertItem({
@@ -14,6 +15,7 @@ class AlertItem {
     this.sourceNode = '',
     this.location = '',
     this.snapshotPath = '',
+    this.faceOverlays = const <FaceOverlay>[],
     this.reviewStatus = 'needs_review',
     this.reviewNote = '',
     this.reviewedBy = '',
@@ -32,6 +34,7 @@ class AlertItem {
   final String sourceNode;
   final String location;
   final String snapshotPath;
+  final List<FaceOverlay> faceOverlays;
   final String reviewStatus;
   final String reviewNote;
   final String reviewedBy;
@@ -62,6 +65,33 @@ class AlertItem {
     return int.tryParse(value.toString());
   }
 
+  static List<FaceOverlay> _faceOverlaysFromJson(dynamic value) {
+    if (value is! List) {
+      return const <FaceOverlay>[];
+    }
+
+    final overlays = <FaceOverlay>[];
+    for (final item in value) {
+      Map<String, dynamic>? overlayJson;
+      if (item is Map<String, dynamic>) {
+        overlayJson = item;
+      } else if (item is Map) {
+        overlayJson = Map<String, dynamic>.from(item);
+      }
+
+      if (overlayJson == null) {
+        continue;
+      }
+
+      final overlay = FaceOverlay.fromJson(overlayJson);
+      if (overlay.width > 0 && overlay.height > 0) {
+        overlays.add(overlay);
+      }
+    }
+
+    return overlays;
+  }
+
   factory AlertItem.fromJson(Map<String, dynamic> json) {
     final message = json['message']?.toString();
     final description = json['description']?.toString();
@@ -90,6 +120,7 @@ class AlertItem {
       sourceNode: replaceKnownNodeIds(json['source_node']?.toString() ?? ''),
       location: replaceKnownNodeIds(json['location']?.toString() ?? ''),
       snapshotPath: json['snapshot_path']?.toString() ?? '',
+      faceOverlays: _faceOverlaysFromJson(json['face_overlays']),
       reviewStatus: json['review_status']?.toString() ?? 'needs_review',
       reviewNote: json['review_note']?.toString() ?? '',
       reviewedBy: json['reviewed_by']?.toString() ?? '',

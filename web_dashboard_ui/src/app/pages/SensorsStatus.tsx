@@ -12,10 +12,13 @@ export function SensorsStatus() {
 
   useEffect(() => {
     let cancelled = false;
+    let controller: AbortController | null = null;
+    let timer: number | null = null;
 
     const load = async () => {
+      controller = new AbortController();
       try {
-        const live = await fetchLiveNodes();
+        const live = await fetchLiveNodes(controller.signal);
         if (cancelled) {
           return;
         }
@@ -23,6 +26,9 @@ export function SensorsStatus() {
         setServiceStatuses(live.serviceStatuses);
         setLoadError('');
       } catch (error) {
+        if (cancelled) {
+          return;
+        }
         const message = error instanceof Error ? error.message : 'Unable to load live node data.';
         if (!cancelled) {
           setLoadError(message);
@@ -30,18 +36,22 @@ export function SensorsStatus() {
       } finally {
         if (!cancelled) {
           setIsLoading(false);
+          timer = window.setTimeout(() => {
+            void load();
+          }, 10000);
         }
+        controller = null;
       }
     };
 
     void load();
-    const timer = window.setInterval(() => {
-      void load();
-    }, 10000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      controller?.abort();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
     };
   }, []);
 

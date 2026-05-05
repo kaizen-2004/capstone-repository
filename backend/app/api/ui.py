@@ -40,6 +40,7 @@ FIRE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.5
 DEBUG_OVERLAY_FAILURE_COOLDOWN_SECONDS = 10.0
 DEBUG_OVERLAY_MAX_CONSECUTIVE_FAILURES = 3
 DEBUG_OVERLAY_LOG_INTERVAL_SECONDS = 8.0
+TERMINAL_REVIEW_STATUSES = {"false_positive", "resolved", "archived"}
 
 ASSISTANT_NODE_LABELS: dict[str, str] = {
     "cam_indoor": "Indoor Camera",
@@ -161,16 +162,30 @@ def _face_overlays_from_details(details: dict[str, Any]) -> list[dict[str, Any]]
     return overlays
 
 
+def _snapshot_url(snapshot_path: str) -> str:
+    raw_path = str(snapshot_path or "").strip()
+    if not raw_path:
+        return ""
+    return raw_path if raw_path.startswith("/") else f"/{raw_path}"
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _alert_to_ui(row: dict[str, Any]) -> dict[str, Any]:
     details = _safe_json(row.get("details_json"))
-    snapshot_path = str(row.get("snapshot_path") or "")
-    snapshot_url = ""
-    if snapshot_path:
-        snapshot_url = (
-            snapshot_path if snapshot_path.startswith("/") else f"/{snapshot_path}"
-        )
+    snapshot_url = _snapshot_url(str(row.get("snapshot_path") or ""))
+    review_status = str(row.get("review_status") or "needs_review").lower()
+    is_active = str(row.get("status") or "").upper() == "ACTIVE"
     return {
         "id": int(row["id"]),
+        "event_id": _optional_int(row.get("event_id")),
         "timestamp": str(row["ts"]),
         "severity": str(row.get("severity") or "info").lower(),
         "type": "intruder"
@@ -186,8 +201,8 @@ def _alert_to_ui(row: dict[str, Any]) -> dict[str, Any]:
         "location": str(details.get("location") or ""),
         "title": str(details.get("title") or row.get("type") or "Alert"),
         "description": str(details.get("description") or ""),
-        "acknowledged": str(row.get("status") or "").upper() != "ACTIVE",
-        "review_status": str(row.get("review_status") or "needs_review").lower(),
+        "acknowledged": (not is_active) or review_status in TERMINAL_REVIEW_STATUSES,
+        "review_status": review_status,
         "review_note": str(row.get("review_note") or ""),
         "reviewed_by": str(row.get("reviewed_by") or ""),
         "reviewed_ts": str(row.get("reviewed_ts") or ""),
@@ -227,8 +242,14 @@ def _normalize_query_timestamp(value: str | None) -> str | None:
 
 def _event_to_ui(row: dict[str, Any]) -> dict[str, Any]:
     details = _safe_json(row.get("details_json"))
+    snapshot_url = _snapshot_url(
+        str(details.get("snapshot_path") or row.get("alert_snapshot_path") or "")
+    )
     return {
         "id": int(row["id"]),
+        "related_alert_id": _optional_int(
+            row.get("related_alert_id") or details.get("alert_id")
+        ),
         "timestamp": str(row["ts"]),
         "severity": str(row.get("severity") or "info").lower(),
         "type": str(row.get("type") or "system").lower(),
@@ -244,6 +265,7 @@ def _event_to_ui(row: dict[str, Any]) -> dict[str, Any]:
         "reviewed_ts": "",
         "confidence": details.get("confidence"),
         "fusion_evidence": details.get("fusion_evidence") or [],
+        "snapshot_path": snapshot_url,
         "face_overlays": _face_overlays_from_details(details),
     }
 

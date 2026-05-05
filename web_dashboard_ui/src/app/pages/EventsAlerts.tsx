@@ -6,7 +6,7 @@ import type { Alert, SeverityLevel, EventType } from '../data/types';
 import { StatusBadge } from '../components/StatusBadge';
 
 type TimeRange = '24h' | '7d' | '30d' | 'all';
-type ReviewView = 'queue' | 'history';
+type ReviewView = 'queue' | 'history' | 'snapshots';
 type ReviewStatus = 'needs_review' | 'confirmed' | 'false_positive' | 'resolved' | 'archived';
 
 const DEFAULT_TIME_RANGE: TimeRange = '7d';
@@ -24,6 +24,14 @@ const formatReviewStatusLabel = (value: string) =>
     .replace(/_/g, ' ')
     .replace(/\b\w/g, (char) => char.toUpperCase())
     .trim();
+
+const getSnapshotCardId = (snapshotPath: string) => {
+  let hash = 0;
+  for (let index = 0; index < snapshotPath.length; index += 1) {
+    hash = ((hash << 5) - hash + snapshotPath.charCodeAt(index)) | 0;
+  }
+  return `snapshot-card-${(hash >>> 0).toString(36)}`;
+};
 
 function toCsvCell(value: unknown): string {
   const raw = String(value ?? '');
@@ -46,6 +54,94 @@ function downloadCsv(fileName: string, rows: Array<Array<unknown>>): void {
   URL.revokeObjectURL(url);
 }
 
+function SnapshotGalleryCard({
+  event,
+  highlighted,
+  onOpen,
+}: {
+  event: Alert;
+  highlighted: boolean;
+  onOpen: (event: Alert) => void;
+}) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const snapshotPath = event.snapshotPath || '';
+  const isAlert = event.id.startsWith('alert-');
+  const recordLabel = `${isAlert ? 'Alert' : 'Event'} #${event.id.replace(/^(alert|event)-/, '')}`;
+  const linkedRecord = isAlert && event.eventId
+    ? `Event #${event.eventId}`
+    : !isAlert && event.relatedAlertId
+      ? `Alert #${event.relatedAlertId}`
+      : '';
+
+  return (
+    <button
+      id={getSnapshotCardId(snapshotPath)}
+      type="button"
+      onClick={() => onOpen(event)}
+      className={`group overflow-hidden rounded-xl border bg-white text-left shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+        highlighted
+          ? 'border-blue-500 ring-4 ring-blue-200'
+          : 'border-gray-200 hover:-translate-y-0.5 hover:shadow-md'
+      }`}
+    >
+      <div className="relative aspect-video bg-gray-900">
+        {snapshotPath && !imageFailed ? (
+          <img
+            src={snapshotPath}
+            alt={`${recordLabel} snapshot`}
+            loading="lazy"
+            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+            onError={() => setImageFailed(true)}
+          />
+        ) : (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-gray-500">
+            <ImageIcon className="h-10 w-10" />
+            <span className="text-xs">Snapshot unavailable</span>
+          </div>
+        )}
+        <div className="absolute left-3 top-3 flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-black/70 px-2.5 py-1 text-xs font-semibold text-white">
+            {recordLabel}
+          </span>
+          <StatusBadge severity={event.severity} label={event.severity.toUpperCase()} size="sm" />
+        </div>
+      </div>
+
+      <div className="space-y-3 p-4">
+        <div>
+          <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-blue-700">
+            <span>{displayEventCode(event.eventCode)}</span>
+            {linkedRecord ? <span className="text-gray-500">Linked {linkedRecord}</span> : null}
+          </div>
+          <h3 className="mt-1 text-sm font-semibold text-gray-900 break-words">{event.title}</h3>
+          <p className="mt-1 text-sm text-gray-600 break-words">
+            {event.description || 'No description attached to this record.'}
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-1 text-xs text-gray-600 sm:grid-cols-2">
+          <span>{new Date(event.timestamp).toLocaleString()}</span>
+          <span className="font-mono break-all sm:text-right">{event.sourceNode}</span>
+          <span className="sm:col-span-2">{event.location || 'No location recorded'}</span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {isAlert ? (
+            <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs font-medium text-gray-700">
+              {formatReviewStatusLabel(event.reviewStatus || 'needs_review')}
+            </span>
+          ) : (
+            <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs font-medium text-gray-700">
+              Event Log
+            </span>
+          )}
+          <span className="text-xs text-gray-500">Click to open details</span>
+        </div>
+      </div>
+    </button>
+  );
+}
+
 export function EventsAlerts() {
   const navigate = useNavigate();
   const [events, setEvents] = useState<Alert[]>([]);
@@ -56,8 +152,10 @@ export function EventsAlerts() {
   const [selectedReviewStatus, setSelectedReviewStatus] = useState<ReviewStatus | 'all'>('all');
   const [selectedTimeRange, setSelectedTimeRange] = useState<TimeRange>(DEFAULT_TIME_RANGE);
   const [selectedEvent, setSelectedEvent] = useState<Alert | null>(null);
+  const [highlightedSnapshotPath, setHighlightedSnapshotPath] = useState<string | null>(null);
   const [snapshotLoadFailed, setSnapshotLoadFailed] = useState(false);
   const [ackPendingId, setAckPendingId] = useState<string | null>(null);
+  const [quickReviewPendingId, setQuickReviewPendingId] = useState<string | null>(null);
   const [reviewStatusDraft, setReviewStatusDraft] = useState<'needs_review' | 'confirmed' | 'false_positive' | 'resolved' | 'archived'>('needs_review');
   const [reviewNoteDraft, setReviewNoteDraft] = useState('');
   const [reviewSaving, setReviewSaving] = useState(false);
@@ -100,10 +198,13 @@ export function EventsAlerts() {
 
   useEffect(() => {
     let cancelled = false;
+    let controller: AbortController | null = null;
+    let timer: number | null = null;
 
     const load = async () => {
+      controller = new AbortController();
       try {
-        const payload = await fetchLiveEvents(500);
+        const payload = await fetchLiveEvents(500, controller.signal);
         if (cancelled) {
           return;
         }
@@ -114,6 +215,9 @@ export function EventsAlerts() {
         );
         setLoadError('');
       } catch (error) {
+        if (cancelled) {
+          return;
+        }
         const message = error instanceof Error ? error.message : 'Unable to load live events.';
         if (!cancelled) {
           setLoadError(message);
@@ -121,18 +225,22 @@ export function EventsAlerts() {
       } finally {
         if (!cancelled) {
           setIsLoading(false);
+          timer = window.setTimeout(() => {
+            void load();
+          }, 12000);
         }
+        controller = null;
       }
     };
 
     void load();
-    const timer = window.setInterval(() => {
-      void load();
-    }, 12000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      controller?.abort();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
     };
   }, []);
 
@@ -230,6 +338,33 @@ export function EventsAlerts() {
     }
   };
 
+  const handleQuickResolve = async (event: Alert) => {
+    if (!event.id.startsWith('alert-')) {
+      return;
+    }
+    const alertId = Number.parseInt(event.id.replace(/^alert-/, ''), 10);
+    if (!Number.isFinite(alertId) || alertId <= 0) {
+      return;
+    }
+
+    setQuickReviewPendingId(event.id);
+    try {
+      const result = await updateAlertReview(alertId, 'resolved', event.reviewNote || 'Resolved from review queue.');
+      setEvents((prev) => prev.map((item) => (item.id === event.id ? { ...item, ...result.alert } : item)));
+      setSelectedEvent((prev) => (prev && prev.id === event.id ? { ...prev, ...result.alert } : prev));
+      setSelectedAlertIds((prev) => {
+        if (!prev.has(event.id)) {
+          return prev;
+        }
+        const next = new Set(prev);
+        next.delete(event.id);
+        return next;
+      });
+    } finally {
+      setQuickReviewPendingId(null);
+    }
+  };
+
   const toggleAlertSelection = (alertId: string, selected: boolean) => {
     setSelectedAlertIds((prev) => {
       const next = new Set(prev);
@@ -312,6 +447,9 @@ export function EventsAlerts() {
         if (reviewView === 'history' && inQueue) {
           return false;
         }
+        if (reviewView === 'snapshots' && !event.snapshotPath) {
+          return false;
+        }
 
         const matchesSearch =
           event.title.toLowerCase().includes(keyword) ||
@@ -347,6 +485,31 @@ export function EventsAlerts() {
     [queueAlerts, selectedAlertIds],
   );
 
+  const snapshotGalleryEvents = useMemo(() => {
+    const bySnapshotPath = new Map<string, Alert>();
+    for (const event of filteredEvents) {
+      const snapshotPath = event.snapshotPath;
+      if (!snapshotPath) {
+        continue;
+      }
+
+      const current = bySnapshotPath.get(snapshotPath);
+      if (!current) {
+        bySnapshotPath.set(snapshotPath, event);
+        continue;
+      }
+
+      const currentIsAlert = current.id.startsWith('alert-');
+      const nextIsAlert = event.id.startsWith('alert-');
+      if (nextIsAlert && !currentIsAlert) {
+        bySnapshotPath.set(snapshotPath, event);
+      }
+    }
+    return Array.from(bySnapshotPath.values());
+  }, [filteredEvents]);
+
+  const visibleItemCount = reviewView === 'snapshots' ? snapshotGalleryEvents.length : filteredEvents.length;
+
   useEffect(() => {
     if (reviewView !== 'queue') {
       setSelectedAlertIds(new Set());
@@ -363,6 +526,35 @@ export function EventsAlerts() {
       return next.size === prev.size ? prev : next;
     });
   }, [reviewView, queueAlerts]);
+
+  useEffect(() => {
+    if (reviewView !== 'snapshots' || !highlightedSnapshotPath) {
+      return;
+    }
+
+    const scrollTimer = window.setTimeout(() => {
+      document
+        .getElementById(getSnapshotCardId(highlightedSnapshotPath))
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 100);
+    const clearTimer = window.setTimeout(() => {
+      setHighlightedSnapshotPath(null);
+    }, 2400);
+
+    return () => {
+      window.clearTimeout(scrollTimer);
+      window.clearTimeout(clearTimer);
+    };
+  }, [highlightedSnapshotPath, reviewView, snapshotGalleryEvents.length]);
+
+  const handleViewSnapshotInGallery = (event: Alert) => {
+    if (!event.snapshotPath) {
+      return;
+    }
+    setSelectedEvent(null);
+    setHighlightedSnapshotPath(event.snapshotPath);
+    setReviewView('snapshots');
+  };
 
   const renderReviewStatus = (event: Alert) => {
     const status = (event.reviewStatus || 'needs_review') as ReviewStatus;
@@ -449,6 +641,12 @@ export function EventsAlerts() {
             className={`px-3 py-1.5 text-sm rounded-md transition-colors ${reviewView === 'history' ? 'bg-white border border-gray-200 text-blue-700' : 'text-gray-600 hover:text-gray-900'}`}
           >
             History
+          </button>
+          <button
+            onClick={() => setReviewView('snapshots')}
+            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${reviewView === 'snapshots' ? 'bg-white border border-gray-200 text-blue-700' : 'text-gray-600 hover:text-gray-900'}`}
+          >
+            Snapshots
           </button>
         </div>
       </div>
@@ -596,8 +794,8 @@ export function EventsAlerts() {
         )}
         <div className="mt-3 pt-3 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs md:text-sm text-gray-600">
-            {reviewView === 'queue' ? 'Queue items' : 'History items'}:{' '}
-            <span className="font-semibold text-gray-900">{filteredEvents.length}</span>
+            {reviewView === 'queue' ? 'Queue items' : reviewView === 'snapshots' ? 'Snapshots' : 'History items'}:{' '}
+            <span className="font-semibold text-gray-900">{visibleItemCount}</span>
           </p>
           {hasActiveFilters && (
             <button
@@ -610,146 +808,205 @@ export function EventsAlerts() {
         </div>
       </div>
 
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-        <div className="lg:hidden divide-y divide-gray-200">
-          {filteredEvents.map((event) => (
-            <button
-              key={event.id}
-              onClick={() => setSelectedEvent(event)}
-              className="w-full text-left p-4 space-y-2 hover:bg-gray-50 transition-colors"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs text-gray-500">{formatDateTime(event.timestamp)}</p>
-                <StatusBadge severity={event.severity} label={event.severity.toUpperCase()} size="sm" />
-              </div>
-
-              {reviewView === 'queue' && event.id.startsWith('alert-') && (
-                <label className="inline-flex items-center gap-2 text-xs text-gray-700">
-                  <input
-                    type="checkbox"
-                    checked={selectedAlertIds.has(event.id)}
-                    onChange={(e) => {
-                      e.stopPropagation();
-                      toggleAlertSelection(event.id, e.target.checked);
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                  Select
-                </label>
-              )}
-
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-gray-900 break-words">
-                    {displayEventCode(event.eventCode)}
-                  </p>
-                  <p className="text-sm font-medium text-gray-900 mt-1 break-words">{event.title}</p>
-                  <p className="text-sm text-gray-600 mt-1 break-words">{event.description}</p>
-                </div>
-              </div>
-
-              <div className="text-xs text-gray-600 flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span>{event.location}</span>
-                <span className="text-gray-400">|</span>
-                <span className="font-mono break-all">{event.sourceNode}</span>
-              </div>
-
-              <div>
-                {renderReviewStatus(event)}
-              </div>
-            </button>
-          ))}
-        </div>
-
-        <div className="hidden lg:block overflow-x-auto">
-          <table className="w-full min-w-[860px]">
-            <thead className="bg-gray-50 border-b border-gray-200">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Pick
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Time
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Code
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Event
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Location
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Source Node
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Severity
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Status
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Action
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {filteredEvents.map((event) => (
-                <tr key={event.id} className="hover:bg-gray-50 transition-colors">
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
-                    {reviewView === 'queue' && event.id.startsWith('alert-') ? (
-                      <input
-                        type="checkbox"
-                        checked={selectedAlertIds.has(event.id)}
-                        onChange={(e) => toggleAlertSelection(event.id, e.target.checked)}
-                      />
-                    ) : (
-                      '—'
-                    )}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {formatDateTime(event.timestamp)}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                    {displayEventCode(event.eventCode)}
-                  </td>
-                  <td className="px-6 py-4">
-                    <div>
-                      <p className="text-sm font-medium text-gray-900">{event.title}</p>
-                      <p className="text-sm text-gray-600">{event.description}</p>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{event.location}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-700">
-                    {event.sourceNode}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <StatusBadge severity={event.severity} label={event.severity.toUpperCase()} size="sm" />
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    {renderReviewStatus(event)}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <button
-                      onClick={() => setSelectedEvent(event)}
-                      className="text-sm text-blue-600 hover:text-blue-700 font-medium"
-                    >
-                      View Details
-                    </button>
-                  </td>
-                </tr>
+      {reviewView === 'snapshots' ? (
+        <div>
+          {snapshotGalleryEvents.length > 0 ? (
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {snapshotGalleryEvents.map((event) => (
+                <SnapshotGalleryCard
+                  key={event.snapshotPath}
+                  event={event}
+                  highlighted={highlightedSnapshotPath === event.snapshotPath}
+                  onOpen={(selected) => setSelectedEvent(selected)}
+                />
               ))}
-            </tbody>
-          </table>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-gray-200 bg-white py-12 text-center">
+              <p className="text-gray-600">No snapshots found matching your filters.</p>
+            </div>
+          )}
         </div>
+      ) : (
+        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+          <div className="lg:hidden divide-y divide-gray-200">
+            {filteredEvents.map((event) => (
+              <div
+                key={event.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedEvent(event)}
+                onKeyDown={(keyEvent) => {
+                  if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
+                    keyEvent.preventDefault();
+                    setSelectedEvent(event);
+                  }
+                }}
+                className="w-full text-left p-4 space-y-2 hover:bg-gray-50 transition-colors"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs text-gray-500">{formatDateTime(event.timestamp)}</p>
+                  <StatusBadge severity={event.severity} label={event.severity.toUpperCase()} size="sm" />
+                </div>
 
-        {filteredEvents.length === 0 && (
-          <div className="text-center py-12">
-            <p className="text-gray-600">No events found matching your filters.</p>
+                {reviewView === 'queue' && event.id.startsWith('alert-') && (
+                  <label
+                    className="inline-flex items-center gap-2 text-xs text-gray-700"
+                    onClick={(clickEvent) => clickEvent.stopPropagation()}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedAlertIds.has(event.id)}
+                      onChange={(e) => {
+                        e.stopPropagation();
+                        toggleAlertSelection(event.id, e.target.checked);
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    Select
+                  </label>
+                )}
+
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900 break-words">
+                      {displayEventCode(event.eventCode)}
+                    </p>
+                    <p className="text-sm font-medium text-gray-900 mt-1 break-words">{event.title}</p>
+                    <p className="text-sm text-gray-600 mt-1 break-words">{event.description}</p>
+                  </div>
+                </div>
+
+                <div className="text-xs text-gray-600 flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span>{event.location}</span>
+                  <span className="text-gray-400">|</span>
+                  <span className="font-mono break-all">{event.sourceNode}</span>
+                </div>
+
+                <div>
+                  {renderReviewStatus(event)}
+                </div>
+
+                {reviewView === 'queue' && event.id.startsWith('alert-') && (
+                  <button
+                    type="button"
+                    onClick={(clickEvent) => {
+                      clickEvent.stopPropagation();
+                      void handleQuickResolve(event);
+                    }}
+                    disabled={quickReviewPendingId === event.id}
+                    className="w-full rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs font-medium text-green-700 hover:bg-green-100 disabled:opacity-60"
+                  >
+                    {quickReviewPendingId === event.id ? 'Resolving...' : 'Resolve without opening'}
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
-        )}
-      </div>
+
+          <div className="hidden lg:block overflow-x-auto">
+            <table className="w-full min-w-[860px]">
+              <thead className="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                    Pick
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                    Time
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                    Code
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                    Event
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                    Location
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                    Source Node
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                    Severity
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                    Action
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {filteredEvents.map((event) => (
+                  <tr key={event.id} className="hover:bg-gray-50 transition-colors">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                      {reviewView === 'queue' && event.id.startsWith('alert-') ? (
+                        <input
+                          type="checkbox"
+                          checked={selectedAlertIds.has(event.id)}
+                          onChange={(e) => toggleAlertSelection(event.id, e.target.checked)}
+                        />
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      {formatDateTime(event.timestamp)}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                      {displayEventCode(event.eventCode)}
+                    </td>
+                    <td className="px-6 py-4">
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">{event.title}</p>
+                        <p className="text-sm text-gray-600">{event.description}</p>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{event.location}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-700">
+                      {event.sourceNode}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <StatusBadge severity={event.severity} label={event.severity.toUpperCase()} size="sm" />
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {renderReviewStatus(event)}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center gap-3">
+                        {reviewView === 'queue' && event.id.startsWith('alert-') ? (
+                          <button
+                            onClick={() => {
+                              void handleQuickResolve(event);
+                            }}
+                            disabled={quickReviewPendingId === event.id}
+                            className="text-sm font-medium text-green-700 hover:text-green-800 disabled:opacity-60"
+                          >
+                            {quickReviewPendingId === event.id ? 'Resolving...' : 'Resolve'}
+                          </button>
+                        ) : null}
+                      <button
+                        onClick={() => setSelectedEvent(event)}
+                        className="text-sm text-blue-600 hover:text-blue-700 font-medium"
+                      >
+                        View Details
+                      </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {filteredEvents.length === 0 && (
+            <div className="text-center py-12">
+              <p className="text-gray-600">No events found matching your filters.</p>
+            </div>
+          )}
+        </div>
+      )}
 
       {selectedEvent && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
@@ -817,7 +1074,17 @@ export function EventsAlerts() {
               </div>
 
               <div>
-                <p className="text-sm font-medium text-gray-900 mb-2">Camera Snapshot</p>
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-medium text-gray-900">Camera Snapshot</p>
+                  {selectedEvent.snapshotPath ? (
+                    <button
+                      onClick={() => handleViewSnapshotInGallery(selectedEvent)}
+                      className="rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100 transition-colors"
+                    >
+                      View in Snapshot Gallery
+                    </button>
+                  ) : null}
+                </div>
                 <div className="bg-gray-900 aspect-video rounded-lg flex items-center justify-center">
                   {selectedEvent.snapshotPath && !snapshotLoadFailed ? (
                     <img
@@ -829,7 +1096,10 @@ export function EventsAlerts() {
                       }}
                     />
                   ) : (
-                    <ImageIcon className="w-12 h-12 text-gray-600" />
+                    <div className="flex flex-col items-center gap-2 text-gray-600">
+                      <ImageIcon className="w-12 h-12" />
+                      <span className="text-xs">Snapshot unavailable</span>
+                    </div>
                   )}
                 </div>
               </div>

@@ -29,26 +29,39 @@ export function MainLayout() {
 
   useEffect(() => {
     let cancelled = false;
+    let controller: AbortController | null = null;
+    let timer: number | null = null;
 
     const load = async () => {
+      controller = new AbortController();
       try {
-        const live = await fetchLiveNodes();
+        const live = await fetchLiveNodes(controller.signal);
         if (!cancelled) {
           setSystemHealth(live.systemHealth);
         }
       } catch {
+        if (cancelled) {
+          return;
+        }
         setSystemHealth(null);
+      } finally {
+        controller = null;
+        if (!cancelled) {
+          timer = window.setTimeout(() => {
+            void load();
+          }, 10000);
+        }
       }
     };
 
     void load();
-    const timer = window.setInterval(() => {
-      void load();
-    }, 10000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      controller?.abort();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
     };
   }, []);
 

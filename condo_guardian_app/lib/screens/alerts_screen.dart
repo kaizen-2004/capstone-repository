@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 
 import '../core/storage/settings_store.dart';
 import '../models/alert_item.dart';
+import '../models/snapshot_item.dart';
 import '../services/backend_service.dart';
+import '../widgets/snapshot_image_with_overlay.dart';
 import 'events_screen.dart';
 import 'snapshots_screen.dart';
 
@@ -567,6 +569,7 @@ class _AlertCard extends StatelessWidget {
               _AlertSnapshotPreview(
                 imageUrl: snapshotUrl!,
                 headers: imageHeaders,
+                overlays: alert.faceOverlays,
                 severityColor: style.text,
               ),
             Padding(
@@ -694,11 +697,13 @@ class _AlertSnapshotPreview extends StatelessWidget {
   const _AlertSnapshotPreview({
     required this.imageUrl,
     required this.headers,
+    required this.overlays,
     required this.severityColor,
   });
 
   final String imageUrl;
   final Map<String, String>? headers;
+  final List<FaceOverlay> overlays;
   final Color severityColor;
 
   @override
@@ -708,15 +713,11 @@ class _AlertSnapshotPreview extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          Image.network(
-            imageUrl,
+          SnapshotImageWithOverlay(
+            imageUrl: imageUrl,
             headers: headers,
-            fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => Container(
-              color: Colors.black12,
-              alignment: Alignment.center,
-              child: const Text('Snapshot unavailable'),
-            ),
+            overlays: overlays,
+            borderRadius: BorderRadius.zero,
           ),
           Positioned(
             left: 12,

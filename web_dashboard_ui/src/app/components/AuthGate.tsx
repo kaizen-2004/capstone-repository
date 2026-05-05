@@ -1,5 +1,6 @@
 import { createContext, FormEvent, ReactNode, useContext, useEffect, useState } from 'react';
 import {
+  AUTH_EXPIRED_EVENT,
   fetchAuthMe,
   login,
   logout,
@@ -38,10 +39,29 @@ export function AuthGate({ children }: AuthGateProps) {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
+    const handleAuthExpired = () => {
+      setUser(null);
+      setPassword('');
+      setRecoveryCode('');
+      setNewPassword('');
+      setResetMode(false);
+      setSubmitting(false);
+      setLoading(false);
+      setError('Session expired. Please sign in again.');
+    };
+
+    window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+    return () => {
+      window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     const checkAuth = async () => {
       try {
-        const current = await fetchAuthMe();
+        const current = await fetchAuthMe(controller.signal);
         if (!cancelled) {
           setUser(current);
         }
@@ -58,6 +78,7 @@ export function AuthGate({ children }: AuthGateProps) {
     void checkAuth();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, []);
 
@@ -69,6 +90,7 @@ export function AuthGate({ children }: AuthGateProps) {
       const current = await login(username.trim(), password);
       setUser(current);
       setPassword('');
+      setError('');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Login failed';
       setError(message);

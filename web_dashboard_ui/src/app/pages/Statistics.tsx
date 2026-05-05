@@ -22,15 +22,21 @@ export function Statistics() {
 
   useEffect(() => {
     let cancelled = false;
+    let controller: AbortController | null = null;
+    let timer: number | null = null;
 
     const load = async () => {
+      controller = new AbortController();
       try {
-        const stats = await fetchDailyStats(7);
+        const stats = await fetchDailyStats(7, controller.signal);
         if (!cancelled) {
           setDailyStats(stats);
           setLoadError('');
         }
       } catch (error) {
+        if (cancelled) {
+          return;
+        }
         const message = error instanceof Error ? error.message : 'Unable to load live statistics.';
         if (!cancelled) {
           setLoadError(message);
@@ -38,18 +44,22 @@ export function Statistics() {
       } finally {
         if (!cancelled) {
           setIsLoading(false);
+          timer = window.setTimeout(() => {
+            void load();
+          }, 20000);
         }
+        controller = null;
       }
     };
 
     void load();
-    const timer = window.setInterval(() => {
-      void load();
-    }, 20000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      controller?.abort();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
     };
   }, []);
 

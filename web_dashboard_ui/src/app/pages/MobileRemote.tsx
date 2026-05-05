@@ -23,20 +23,25 @@ export function MobileRemote() {
   const [retryCountByNode, setRetryCountByNode] = useState<Record<string, number>>({});
   const [refreshing, setRefreshing] = useState(false);
 
-  const load = async () => {
+  const load = async (signal?: AbortSignal) => {
     setRefreshing(true);
     try {
       const [mobileStatus, nodesLive] = await Promise.all([
-        fetchMobileRemoteStatus(),
-        fetchLiveNodes(),
+        fetchMobileRemoteStatus(signal),
+        fetchLiveNodes(signal),
       ]);
+      if (signal?.aborted) {
+        return;
+      }
       setEnabled(mobileStatus.enabled);
       setStatusDetail(mobileStatus.detail);
       setCameraFeeds(nodesLive.cameraFeeds);
       setLastSync(new Date().toISOString());
     } finally {
-      setRefreshing(false);
-      setLoading(false);
+      if (!signal?.aborted) {
+        setRefreshing(false);
+        setLoading(false);
+      }
     }
   };
 
@@ -49,27 +54,35 @@ export function MobileRemote() {
 
   useEffect(() => {
     let cancelled = false;
+    let controller: AbortController | null = null;
+    let timer: number | null = null;
 
     const run = async () => {
+      controller = new AbortController();
       try {
-        await load();
+        await load(controller.signal);
       } catch {
         if (!cancelled) {
           setLoading(false);
+        }
+      } finally {
+        controller = null;
+        if (!cancelled) {
+          timer = window.setTimeout(() => {
+            void run();
+          }, 12000);
         }
       }
     };
 
     void run();
-    const timer = window.setInterval(() => {
-      if (!cancelled) {
-        void load();
-      }
-    }, 12000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      controller?.abort();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
     };
   }, []);
 

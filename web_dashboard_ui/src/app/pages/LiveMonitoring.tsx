@@ -4,16 +4,236 @@ import { StatusBadge } from '../components/StatusBadge';
 import { fetchLiveEvents, fetchLiveNodes } from '../data/liveApi';
 import type { Alert, CameraFeed, DetectionPipeline, Room } from '../data/types';
 
+type ExpandedCameraFeed = {
+  location: Room;
+  nodeId: string;
+  streamPath?: string;
+  status: CameraFeed['status'];
+  streamAvailable?: boolean;
+};
+
+function formatEventTime(timestamp: string) {
+  const date = new Date(timestamp);
+  return date.toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function isFreshEvent(timestamp: string, maxAgeSeconds = 90) {
+  const ageMs = Date.now() - new Date(timestamp).getTime();
+  if (!Number.isFinite(ageMs)) {
+    return false;
+  }
+  return ageMs <= maxAgeSeconds * 1000;
+}
+
+function buildCameraSrc(path: string | undefined, retryTick: number, faceDebugOverlay: boolean, frameRefreshTick: number) {
+  if (!path) {
+    return '';
+  }
+  const separator = path.includes('?') ? '&' : '?';
+  const isStream = path.includes('/camera/stream/');
+  if (isStream) {
+    const debugPart = faceDebugOverlay ? '&face_debug=1' : '';
+    const fps = faceDebugOverlay ? 8 : 20;
+    return `${path}${separator}fps=${fps}${debugPart}&retry_tick=${retryTick}`;
+  }
+  const debugPart = faceDebugOverlay ? '&face_debug=1' : '';
+  return `${path}${separator}frame_tick=${frameRefreshTick}${debugPart}`;
+}
+
+function CameraPanel({
+  location,
+  nodeId,
+  streamPath,
+  status,
+  streamAvailable,
+  roomEvents,
+  nodeEvents,
+  faceDebugOverlay,
+  frameRefreshTick,
+  onExpand,
+}: {
+  location: Room;
+  nodeId: string;
+  streamPath?: string;
+  status: CameraFeed['status'];
+  streamAvailable?: boolean;
+  roomEvents: Alert[];
+  nodeEvents: Alert[];
+  faceDebugOverlay: boolean;
+  frameRefreshTick: number;
+  onExpand: (feed: ExpandedCameraFeed) => void;
+}) {
+  const [streamRetryTick, setStreamRetryTick] = useState(0);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const retryTimerRef = useRef<number | null>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const isOnline = status === 'online';
+  const canLoadStream = isOnline && Boolean(streamPath) && streamAvailable !== false;
+  const latestFaceEvent = nodeEvents.find(
+    (event) => event.eventCode === 'UNKNOWN' || event.eventCode === 'AUTHORIZED',
+  );
+  const latestFlameEvent = nodeEvents.find((event) => event.eventCode === 'FLAME_SIGNAL');
+
+  const hasFreshFace = Boolean(latestFaceEvent && isFreshEvent(latestFaceEvent.timestamp));
+  const faceLabel = hasFreshFace
+    ? `Face: ${latestFaceEvent?.eventCode === 'UNKNOWN' ? 'NON-AUTHORIZED' : 'AUTHORIZED'}`
+    : 'Face: IDLE';
+  const faceSeverity: 'warning' | 'online' | 'info' = hasFreshFace
+    ? (latestFaceEvent?.eventCode === 'UNKNOWN' ? 'warning' : 'online')
+    : 'info';
+
+  const hasFreshFlame = Boolean(latestFlameEvent && isFreshEvent(latestFlameEvent.timestamp));
+  const flameLabel = hasFreshFlame ? 'Flame: DETECTED' : 'Flame: IDLE';
+  const flameSeverity: 'warning' | 'info' = hasFreshFlame ? 'warning' : 'info';
+  const frameSrc = canLoadStream
+    ? buildCameraSrc(streamPath, streamRetryTick, faceDebugOverlay, frameRefreshTick)
+    : '';
+
+  useEffect(() => {
+    return () => {
+      if (retryTimerRef.current !== null) {
+        window.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+      if (imageRef.current) {
+        imageRef.current.removeAttribute('src');
+        imageRef.current.load();
+      }
+    };
+  }, []);
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+      <div
+        className="relative bg-gray-900 aspect-video flex items-center justify-center"
+        data-camera-frame="true"
+      >
+        {frameSrc && (
+          <img
+            ref={imageRef}
+            src={frameSrc}
+            alt={`${location} live feed`}
+            className="absolute inset-0 h-full w-full object-cover"
+            onError={() => {
+              if (retryTimerRef.current !== null) {
+                return;
+              }
+              setIsReconnecting(true);
+              setRetryCount((prev) => prev + 1);
+              retryTimerRef.current = window.setTimeout(() => {
+                setStreamRetryTick(Date.now());
+                retryTimerRef.current = null;
+              }, 1500);
+            }}
+            onLoad={() => {
+              setIsReconnecting(false);
+              setRetryCount(0);
+              if (retryTimerRef.current !== null) {
+                window.clearTimeout(retryTimerRef.current);
+                retryTimerRef.current = null;
+              }
+            }}
+          />
+        )}
+        {isReconnecting && (
+          <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded bg-amber-500/90 text-white text-xs font-medium">
+            Reconnecting ({retryCount > 99 ? '99+' : retryCount})...
+          </div>
+        )}
+        <Camera className="w-16 h-16 text-gray-600" />
+
+        <div className="absolute top-3 left-3 flex items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-red-600 text-white text-xs font-semibold">
+            <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
+            LIVE
+          </span>
+          <StatusBadge severity={isOnline ? 'online' : 'offline'} label={nodeId} size="sm" />
+        </div>
+
+        <div className="absolute top-3 right-3 flex flex-col gap-1.5">
+          <StatusBadge severity={faceSeverity} label={faceLabel} size="sm" />
+          <StatusBadge severity={flameSeverity} label={flameLabel} size="sm" />
+        </div>
+
+        <button
+          onClick={() => {
+            onExpand({ location, nodeId, streamPath, status, streamAvailable });
+          }}
+          className="action-cta absolute bottom-3 right-3 p-2 rounded-lg"
+          title="Expand Preview"
+          aria-label="Expand Preview"
+        >
+          <Maximize2 className="w-5 h-5 text-white" />
+        </button>
+
+        <div className="absolute bottom-3 left-3 px-2.5 py-1 bg-black/60 text-white text-xs rounded">
+          {new Date().toLocaleString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })}
+        </div>
+      </div>
+
+      <div className="p-3 md:p-4 border-t border-gray-200">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+          <div>
+            <h3 className="font-semibold text-gray-900">{location}</h3>
+            <p className="text-sm text-gray-600">Night-vision RTSP stream (event-triggered analysis)</p>
+          </div>
+          <div className="text-left sm:text-right text-sm">
+            <p className="text-gray-500">Node</p>
+            <p className="font-medium text-gray-900 font-mono">{nodeId}</p>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <h4 className="text-sm font-medium text-gray-900">Recent Activity</h4>
+          <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
+            {roomEvents.length > 0 ? (
+              roomEvents.map((event) => (
+                <div key={event.id} className="flex items-start gap-3 p-2.5 bg-gray-50 rounded-lg">
+                  <div className="flex-shrink-0 w-1.5 h-1.5 bg-blue-600 rounded-full mt-1.5" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-sm font-medium text-gray-900 break-words">{event.title}</p>
+                      <StatusBadge
+                        severity={event.severity}
+                        label={event.eventCode === 'UNKNOWN' ? 'NON-AUTHORIZED' : event.eventCode}
+                        size="sm"
+                      />
+                    </div>
+                    <p className="text-xs text-gray-600 mt-0.5">{formatEventTime(event.timestamp)}</p>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-gray-500 text-center py-4">No recent activity</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function LiveMonitoring() {
   const [events, setEvents] = useState<Alert[]>([]);
   const [cameraFeeds, setCameraFeeds] = useState<CameraFeed[]>([]);
   const [detectionPipelines, setDetectionPipelines] = useState<DetectionPipeline[]>([]);
   const [frameRefreshTick, setFrameRefreshTick] = useState(() => Date.now());
-  const [faceDebugOverlay, setFaceDebugOverlay] = useState(false);
+  const [faceDebugOverlay, setFaceDebugOverlay] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [expandedFeed, setExpandedFeed] = useState<
-    { location: Room; nodeId: string; streamPath?: string } | null
+    { location: Room; nodeId: string; streamPath?: string; status: CameraFeed['status']; streamAvailable?: boolean } | null
   >(null);
   const onlineFeedCount = cameraFeeds.filter((feed) => feed.status === 'online').length;
   const offlineFeedCount = cameraFeeds.filter((feed) => feed.status !== 'online').length;
@@ -26,10 +246,16 @@ export function LiveMonitoring() {
 
   useEffect(() => {
     let cancelled = false;
+    let controller: AbortController | null = null;
+    let timer: number | null = null;
 
     const load = async () => {
+      controller = new AbortController();
       try {
-        const [eventsLive, nodesLive] = await Promise.all([fetchLiveEvents(250), fetchLiveNodes()]);
+        const [eventsLive, nodesLive] = await Promise.all([
+          fetchLiveEvents(250, controller.signal),
+          fetchLiveNodes(controller.signal),
+        ]);
         if (cancelled) {
           return;
         }
@@ -41,6 +267,9 @@ export function LiveMonitoring() {
         setDetectionPipelines(nodesLive.detectionPipelines);
         setLoadError('');
       } catch (error) {
+        if (cancelled) {
+          return;
+        }
         const message = error instanceof Error ? error.message : 'Unable to load live monitoring data.';
         if (!cancelled) {
           setLoadError(message);
@@ -48,18 +277,22 @@ export function LiveMonitoring() {
       } finally {
         if (!cancelled) {
           setIsLoading(false);
+          timer = window.setTimeout(() => {
+            void load();
+          }, 12000);
         }
+        controller = null;
       }
     };
 
     void load();
-    const timer = window.setInterval(() => {
-      void load();
-    }, 12000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      controller?.abort();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
     };
   }, []);
 
@@ -75,15 +308,6 @@ export function LiveMonitoring() {
     };
   }, [needsFramePolling]);
 
-  const formatTime = (timestamp: string) => {
-    const date = new Date(timestamp);
-    return date.toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-  };
-
   const eventsByRoom = useMemo(() => {
     return events.reduce<Record<string, Alert[]>>((acc, event) => {
       const key = String(event.location || '');
@@ -95,193 +319,6 @@ export function LiveMonitoring() {
     }, {});
   }, [events]);
 
-  const eventsForRoom = (room: Room) => (eventsByRoom[String(room)] || []).slice(0, 5);
-  const eventsForNode = (nodeId: string) => events.filter((event) => event.sourceNode === nodeId);
-  const isFreshEvent = (timestamp: string, maxAgeSeconds = 90) => {
-    const ageMs = Date.now() - new Date(timestamp).getTime();
-    if (!Number.isFinite(ageMs)) {
-      return false;
-    }
-    return ageMs <= maxAgeSeconds * 1000;
-  };
-
-
-  const buildCameraSrc = (path?: string, retryTick = 0) => {
-    if (!path) {
-      return '';
-    }
-    const separator = path.includes('?') ? '&' : '?';
-    const isStream = path.includes('/camera/stream/');
-    const faceDebugForPath = faceDebugOverlay;
-    if (isStream) {
-      const debugPart = faceDebugForPath ? '&face_debug=1' : '';
-      return `${path}${separator}fps=20${debugPart}&retry_tick=${retryTick}`;
-    }
-    const debugPart = faceDebugForPath ? '&face_debug=1' : '';
-    return `${path}${separator}frame_tick=${frameRefreshTick}${debugPart}`;
-  };
-
-  const CameraPanel = ({
-    location,
-    nodeId,
-    streamPath,
-    status,
-  }: {
-    location: Room;
-    nodeId: string;
-    streamPath?: string;
-    status: CameraFeed['status'];
-  }) => {
-    const [streamRetryTick, setStreamRetryTick] = useState(0);
-    const [isReconnecting, setIsReconnecting] = useState(false);
-    const [retryCount, setRetryCount] = useState(0);
-    const retryTimerRef = useRef<number | null>(null);
-    const events = eventsForRoom(location);
-    const nodeEvents = eventsForNode(nodeId);
-    const isOnline = status === 'online';
-    const latestFaceEvent = nodeEvents.find(
-      (event) => event.eventCode === 'UNKNOWN' || event.eventCode === 'AUTHORIZED',
-    );
-    const latestFlameEvent = nodeEvents.find((event) => event.eventCode === 'FLAME_SIGNAL');
-
-    const hasFreshFace = Boolean(latestFaceEvent && isFreshEvent(latestFaceEvent.timestamp));
-    const faceLabel = hasFreshFace
-      ? `Face: ${latestFaceEvent?.eventCode === 'UNKNOWN' ? 'NON-AUTHORIZED' : 'AUTHORIZED'}`
-      : 'Face: IDLE';
-    const faceSeverity: 'warning' | 'online' | 'info' = hasFreshFace
-      ? (latestFaceEvent?.eventCode === 'UNKNOWN' ? 'warning' : 'online')
-      : 'info';
-
-    const hasFreshFlame = Boolean(latestFlameEvent && isFreshEvent(latestFlameEvent.timestamp));
-    const flameLabel = hasFreshFlame ? 'Flame: DETECTED' : 'Flame: IDLE';
-    const flameSeverity: 'warning' | 'info' = hasFreshFlame ? 'warning' : 'info';
-    const frameSrc = buildCameraSrc(streamPath, streamRetryTick);
-
-    useEffect(() => {
-      return () => {
-        if (retryTimerRef.current !== null) {
-          window.clearTimeout(retryTimerRef.current);
-          retryTimerRef.current = null;
-        }
-      };
-    }, []);
-
-    return (
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-        <div
-          className="relative bg-gray-900 aspect-video flex items-center justify-center"
-          data-camera-frame="true"
-        >
-          {frameSrc && (
-            <img
-              src={frameSrc}
-              alt={`${location} live feed`}
-              className="absolute inset-0 h-full w-full object-cover"
-              onError={() => {
-                if (retryTimerRef.current !== null) {
-                  return;
-                }
-                setIsReconnecting(true);
-                setRetryCount((prev) => prev + 1);
-                retryTimerRef.current = window.setTimeout(() => {
-                  setStreamRetryTick(Date.now());
-                  retryTimerRef.current = null;
-                }, 1500);
-              }}
-              onLoad={() => {
-                setIsReconnecting(false);
-                setRetryCount(0);
-                if (retryTimerRef.current !== null) {
-                  window.clearTimeout(retryTimerRef.current);
-                  retryTimerRef.current = null;
-                }
-              }}
-            />
-          )}
-          {isReconnecting && (
-            <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded bg-amber-500/90 text-white text-xs font-medium">
-              Reconnecting ({retryCount > 99 ? '99+' : retryCount})...
-            </div>
-          )}
-          <Camera className="w-16 h-16 text-gray-600" />
-
-          <div className="absolute top-3 left-3 flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-red-600 text-white text-xs font-semibold">
-              <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
-              LIVE
-            </span>
-            <StatusBadge severity={isOnline ? 'online' : 'offline'} label={nodeId} size="sm" />
-          </div>
-
-          <div className="absolute top-3 right-3 flex flex-col gap-1.5">
-            <StatusBadge severity={faceSeverity} label={faceLabel} size="sm" />
-            <StatusBadge severity={flameSeverity} label={flameLabel} size="sm" />
-          </div>
-
-          <button
-            onClick={() => {
-              setExpandedFeed({ location, nodeId, streamPath });
-            }}
-            className="action-cta absolute bottom-3 right-3 p-2 rounded-lg"
-            title="Expand Preview"
-            aria-label="Expand Preview"
-          >
-            <Maximize2 className="w-5 h-5 text-white" />
-          </button>
-
-          <div className="absolute bottom-3 left-3 px-2.5 py-1 bg-black/60 text-white text-xs rounded">
-            {new Date().toLocaleString('en-US', {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-            })}
-          </div>
-        </div>
-
-        <div className="p-3 md:p-4 border-t border-gray-200">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
-            <div>
-              <h3 className="font-semibold text-gray-900">{location}</h3>
-              <p className="text-sm text-gray-600">Night-vision RTSP stream (event-triggered analysis)</p>
-            </div>
-            <div className="text-left sm:text-right text-sm">
-              <p className="text-gray-500">Node</p>
-              <p className="font-medium text-gray-900 font-mono">{nodeId}</p>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <h4 className="text-sm font-medium text-gray-900">Recent Activity</h4>
-            <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
-              {events.length > 0 ? (
-                events.map((event) => (
-                  <div key={event.id} className="flex items-start gap-3 p-2.5 bg-gray-50 rounded-lg">
-                    <div className="flex-shrink-0 w-1.5 h-1.5 bg-blue-600 rounded-full mt-1.5" />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <p className="text-sm font-medium text-gray-900 break-words">{event.title}</p>
-                        <StatusBadge
-                          severity={event.severity}
-                          label={event.eventCode === 'UNKNOWN' ? 'NON-AUTHORIZED' : event.eventCode}
-                          size="sm"
-                        />
-                      </div>
-                      <p className="text-xs text-gray-600 mt-0.5">{formatTime(event.timestamp)}</p>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <p className="text-sm text-gray-500 text-center py-4">No recent activity</p>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
   const getPipelineSeverity = (state: 'active' | 'degraded' | 'offline') => {
     if (state === 'active') return 'online';
     if (state === 'degraded') return 'warning';
@@ -292,13 +329,23 @@ export function LiveMonitoring() {
   const [expandedReconnecting, setExpandedReconnecting] = useState(false);
   const [expandedRetryCount, setExpandedRetryCount] = useState(0);
   const expandedRetryTimerRef = useRef<number | null>(null);
-  const expandedFrameSrc = buildCameraSrc(expandedFeed?.streamPath, expandedRetryTick);
+  const expandedImageRef = useRef<HTMLImageElement | null>(null);
+  const expandedCanLoadStream = Boolean(
+    expandedFeed && expandedFeed.status === 'online' && expandedFeed.streamAvailable !== false,
+  );
+  const expandedFrameSrc = expandedCanLoadStream
+    ? buildCameraSrc(expandedFeed?.streamPath, expandedRetryTick, faceDebugOverlay, frameRefreshTick)
+    : '';
 
   useEffect(() => {
     return () => {
       if (expandedRetryTimerRef.current !== null) {
         window.clearTimeout(expandedRetryTimerRef.current);
         expandedRetryTimerRef.current = null;
+      }
+      if (expandedImageRef.current) {
+        expandedImageRef.current.removeAttribute('src');
+        expandedImageRef.current.load();
       }
     };
   }, []);
@@ -310,6 +357,10 @@ export function LiveMonitoring() {
     if (expandedRetryTimerRef.current !== null) {
       window.clearTimeout(expandedRetryTimerRef.current);
       expandedRetryTimerRef.current = null;
+    }
+    if (expandedImageRef.current) {
+      expandedImageRef.current.removeAttribute('src');
+      expandedImageRef.current.load();
     }
   }, [expandedFeed?.nodeId, expandedFeed?.streamPath]);
 
@@ -364,7 +415,13 @@ export function LiveMonitoring() {
               location={feed.location}
               nodeId={feed.nodeId}
               streamPath={feed.streamPath || ''}
+              streamAvailable={feed.streamAvailable}
               status={feed.status}
+              roomEvents={(eventsByRoom[String(feed.location)] || []).slice(0, 5)}
+              nodeEvents={events.filter((event) => event.sourceNode === feed.nodeId)}
+              faceDebugOverlay={faceDebugOverlay}
+              frameRefreshTick={frameRefreshTick}
+              onExpand={setExpandedFeed}
             />
           ))
         ) : (
@@ -418,6 +475,7 @@ export function LiveMonitoring() {
           <div className="flex-1 rounded-lg overflow-hidden bg-black border border-white/15 flex items-center justify-center">
             {expandedFrameSrc ? (
               <img
+                ref={expandedImageRef}
                 src={expandedFrameSrc}
                 alt="Expanded camera preview"
                 className="w-full h-full object-contain"

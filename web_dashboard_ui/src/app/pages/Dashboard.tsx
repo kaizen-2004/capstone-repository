@@ -83,13 +83,16 @@ export function Dashboard() {
 
   useEffect(() => {
     let cancelled = false;
+    let controller: AbortController | null = null;
+    let timer: number | null = null;
 
     const load = async () => {
+      controller = new AbortController();
       try {
         const [eventsLive, stats, nodesLive] = await Promise.all([
-          fetchLiveEvents(250),
-          fetchDailyStats(2),
-          fetchLiveNodes(),
+          fetchLiveEvents(250, controller.signal),
+          fetchDailyStats(2, controller.signal),
+          fetchLiveNodes(controller.signal),
         ]);
         if (cancelled) {
           return;
@@ -100,6 +103,9 @@ export function Dashboard() {
         setKpis(buildKpis(nodesLive.sensorStatuses, stats));
         setLoadError('');
       } catch (error) {
+        if (cancelled) {
+          return;
+        }
         const message = error instanceof Error ? error.message : 'Unable to load live dashboard data.';
         if (!cancelled) {
           setLoadError(message);
@@ -107,18 +113,22 @@ export function Dashboard() {
       } finally {
         if (!cancelled) {
           setIsLoading(false);
+          timer = window.setTimeout(() => {
+            void load();
+          }, 12000);
         }
+        controller = null;
       }
     };
 
     void load();
-    const timer = window.setInterval(() => {
-      void load();
-    }, 12000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      controller?.abort();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
     };
   }, []);
 

@@ -766,6 +766,8 @@ def update_alert_review(
     review_note: str,
     reviewed_by: str,
 ) -> bool:
+    normalized_status = review_status.strip().lower()
+    terminal_statuses = {"false_positive", "resolved", "archived"}
     with _LOCK:
         conn = _conn()
         cur = conn.cursor()
@@ -779,17 +781,39 @@ def update_alert_review(
             return False
         previous_status = str(row["review_status"] or "needs_review").strip().lower()
         reviewed_ts = now_iso()
-        cur.execute(
-            "UPDATE alerts SET review_status=?, review_note=?, reviewed_by=?, reviewed_ts=? WHERE id=?",
-            (
-                review_status.strip().lower(),
-                review_note[:1000],
-                reviewed_by[:120],
-                reviewed_ts,
-                int(alert_id),
-            ),
-        )
-        if cur.rowcount > 0:
+        if normalized_status in terminal_statuses:
+            cur.execute(
+                """
+                UPDATE alerts
+                SET review_status=?, review_note=?, reviewed_by=?, reviewed_ts=?,
+                    status=CASE WHEN status='ACTIVE' THEN 'RESOLVED' ELSE status END,
+                    ack_ts=CASE WHEN status='ACTIVE' THEN ? ELSE ack_ts END,
+                    ack_by=CASE WHEN status='ACTIVE' THEN ? ELSE ack_by END
+                WHERE id=?
+                """,
+                (
+                    normalized_status,
+                    review_note[:1000],
+                    reviewed_by[:120],
+                    reviewed_ts,
+                    reviewed_ts,
+                    reviewed_by[:120],
+                    int(alert_id),
+                ),
+            )
+        else:
+            cur.execute(
+                "UPDATE alerts SET review_status=?, review_note=?, reviewed_by=?, reviewed_ts=? WHERE id=?",
+                (
+                    normalized_status,
+                    review_note[:1000],
+                    reviewed_by[:120],
+                    reviewed_ts,
+                    int(alert_id),
+                ),
+            )
+        updated = cur.rowcount > 0
+        if updated:
             cur.execute(
                 """
                 INSERT INTO alert_review_history(
@@ -799,14 +823,13 @@ def update_alert_review(
                 (
                     int(alert_id),
                     previous_status,
-                    review_status.strip().lower(),
+                    normalized_status,
                     review_note[:1000],
                     reviewed_by[:120],
                     reviewed_ts,
                 ),
             )
         conn.commit()
-        updated = cur.rowcount > 0
         conn.close()
     return updated
 
@@ -838,7 +861,25 @@ def list_events(
     with _LOCK:
         conn = _conn()
         cur = conn.cursor()
-        query = "SELECT * FROM events"
+        query = """
+            SELECT events.*,
+                (
+                    SELECT alerts.snapshot_path
+                    FROM alerts
+                    WHERE alerts.event_id = events.id
+                      AND COALESCE(alerts.snapshot_path, '') != ''
+                    ORDER BY alerts.ts DESC, alerts.id DESC
+                    LIMIT 1
+                ) AS alert_snapshot_path,
+                (
+                    SELECT alerts.id
+                    FROM alerts
+                    WHERE alerts.event_id = events.id
+                    ORDER BY alerts.ts DESC, alerts.id DESC
+                    LIMIT 1
+                ) AS related_alert_id
+            FROM events
+        """
         args: list[Any] = []
         clauses: list[str] = []
 
@@ -894,7 +935,14 @@ def list_active_alerts() -> list[dict[str, Any]]:
     with _LOCK:
         conn = _conn()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM alerts WHERE status='ACTIVE' ORDER BY ts DESC")
+        cur.execute(
+            """
+            SELECT * FROM alerts
+            WHERE status='ACTIVE'
+              AND COALESCE(review_status, 'needs_review') NOT IN ('false_positive', 'resolved', 'archived')
+            ORDER BY ts DESC
+            """
+        )
         rows = [dict(row) for row in cur.fetchall()]
         conn.close()
     return rows

@@ -13,6 +13,8 @@ export interface FaceOverlay {
 
 export interface Alert {
   id: string;
+  eventId?: number;
+  relatedAlertId?: number;
   timestamp: string;
   severity: SeverityLevel;
   type: EventType;

@@ -5,12 +5,13 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import auth, devices, faces, integrations, ui
+from .core.auth import SESSION_COOKIE
 from .core.config import load_env_file, load_settings
 from .db import store
 from .modules.event_engine import EventEngine
@@ -482,6 +483,19 @@ app = FastAPI(
     description="Windows local-first event-driven intruder and fire monitoring backend",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    _ = request
+    response = JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=exc.headers,
+    )
+    if exc.status_code == 401:
+        response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
 
 app.add_middleware(
     CORSMiddleware,

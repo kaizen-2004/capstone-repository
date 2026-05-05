@@ -272,6 +272,25 @@ def test_mobile_remote_status_and_config() -> None:
         assert disable.json()["enabled"] is False
 
 
+def test_mobile_auth_timeout_clears_session_cookie() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        token = client.cookies.get("session_token")
+        assert token
+        store.delete_session(token)
+
+        response = client.get("/api/remote/mobile/status")
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Session expired"
+        set_cookie = response.headers.get("set-cookie", "")
+        assert "session_token=" in set_cookie
+        assert "Max-Age=0" in set_cookie
+
+
 def test_mobile_bootstrap_device_and_preferences() -> None:
     with TestClient(app) as client:
         login = client.post(
@@ -575,6 +594,117 @@ def test_alerts_and_events_support_date_range_filters() -> None:
         event_ids = {int(row["id"]) for row in events.json().get("events", [])}
         assert event_day_one in event_ids
         assert event_day_two not in event_ids
+
+
+def test_events_expose_direct_and_linked_snapshot_paths() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        direct_snapshot_path = f"snapshots/2099-12-31/direct_{uuid.uuid4().hex[:8]}.jpg"
+        direct_event_id = store.create_event(
+            event_type="intruder",
+            event_code="SNAPSHOT_DIRECT_TEST",
+            source_node="cam_door",
+            location="Door Entrance Area",
+            severity="critical",
+            title="Direct snapshot test",
+            description="event has its own snapshot path",
+            details={"snapshot_path": direct_snapshot_path},
+        )
+
+        linked_snapshot_path = f"snapshots/2099-12-31/linked_{uuid.uuid4().hex[:8]}.jpg"
+        linked_event_id = store.create_event(
+            event_type="fire",
+            event_code="SNAPSHOT_LINKED_TEST",
+            source_node="cam_indoor",
+            location="Living Room",
+            severity="warning",
+            title="Linked snapshot test",
+            description="event uses its alert snapshot path",
+        )
+        linked_alert_id = store.create_alert(
+            alert_type="FIRE",
+            severity="critical",
+            status="ACTIVE",
+            requires_ack=True,
+            title="Linked snapshot alert",
+            description="alert stores the snapshot path",
+            source_node="cam_indoor",
+            location="Living Room",
+            event_id=linked_event_id,
+            snapshot_path=linked_snapshot_path,
+        )
+
+        events_response = client.get("/api/events?limit=500")
+        assert events_response.status_code == 200
+        events_by_id = {
+            int(row["id"]): row for row in events_response.json().get("events", [])
+        }
+        assert events_by_id[direct_event_id]["snapshot_path"] == f"/{direct_snapshot_path}"
+        assert events_by_id[linked_event_id]["snapshot_path"] == f"/{linked_snapshot_path}"
+        assert events_by_id[linked_event_id]["related_alert_id"] == linked_alert_id
+
+        live_response = client.get("/api/ui/events/live?limit=500")
+        assert live_response.status_code == 200
+        live_events_by_id = {
+            int(row["id"]): row for row in live_response.json().get("events", [])
+        }
+        live_alerts_by_id = {
+            int(row["id"]): row for row in live_response.json().get("alerts", [])
+        }
+        assert live_events_by_id[linked_event_id]["snapshot_path"] == f"/{linked_snapshot_path}"
+        assert live_events_by_id[linked_event_id]["related_alert_id"] == linked_alert_id
+        assert live_alerts_by_id[linked_alert_id]["event_id"] == linked_event_id
+        assert live_alerts_by_id[linked_alert_id]["snapshot_path"] == f"/{linked_snapshot_path}"
+
+
+def test_resolved_alert_review_clears_active_alert_state() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        alert_id = store.create_alert(
+            alert_type="INTRUDER",
+            severity="critical",
+            status="ACTIVE",
+            requires_ack=True,
+            title="Resolve Review Test",
+            description="terminal review status should clear active state",
+            source_node="cam_door",
+            location="Door Entrance Area",
+        )
+        active_before = {int(row["id"]) for row in store.list_active_alerts()}
+        assert alert_id in active_before
+
+        response = client.post(
+            f"/api/alerts/{alert_id}/review",
+            json={"review_status": "resolved", "review_note": "handled"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["alert"]["review_status"] == "resolved"
+        assert payload["alert"]["acknowledged"] is True
+
+        updated = store.get_alert(alert_id)
+        assert updated is not None
+        assert str(updated.get("status") or "") == "RESOLVED"
+        active_after = {int(row["id"]) for row in store.list_active_alerts()}
+        assert alert_id not in active_after
+
+        live_response = client.get("/api/ui/events/live?limit=500")
+        assert live_response.status_code == 200
+        live_alert = next(
+            row
+            for row in live_response.json().get("alerts", [])
+            if int(row["id"]) == alert_id
+        )
+        assert live_alert["acknowledged"] is True
 
 
 def test_face_profile_update_contract() -> None:

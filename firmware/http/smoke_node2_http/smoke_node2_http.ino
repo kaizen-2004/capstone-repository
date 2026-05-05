@@ -62,7 +62,7 @@ static const uint32_t PROVISIONING_SUCCESS_HOLD_MS = 30000;
 static const uint32_t PROVISIONING_CONNECT_DELAY_MS = 1500;
 
 static const int MQ2_ADC_PIN = 0;
-static const int BUZZER_PIN = 5;
+static const int BUZZER_PIN = 10;
 static const int ADC_RESOLUTION = 4095;
 static const float ESP32_ADC_MAX_VOLTAGE = 3.3f;
 static const float DIVIDER_MULTIPLIER = 1.5f;
