@@ -11,6 +11,19 @@ function cameraStatusClass(status: CameraFeed['status']): string {
   return 'border-slate-500/40 bg-slate-500/20 text-slate-300';
 }
 
+function buildCameraSrc(path: string | undefined, retryTick: number): string {
+  if (!path) {
+    return '';
+  }
+
+  const separator = path.includes('?') ? '&' : '?';
+  const isStream = path.includes('/camera/stream/');
+  if (isStream) {
+    return `${path}${separator}fps=8&retry_tick=${retryTick}`;
+  }
+  return `${path}${separator}frame_tick=${retryTick}`;
+}
+
 export function MobileRemote() {
   const { user, logout } = useAuth();
   const [loading, setLoading] = useState(true);
@@ -157,7 +170,7 @@ export function MobileRemote() {
             <h2 className="text-sm font-semibold text-slate-100">Camera Monitor</h2>
           </div>
           <p className="mt-1 text-xs text-slate-400">
-            Live feed only. Dashboard cards and controls are managed in the mobile app.
+            Live feed only. Face overlays are disabled here for smoother mobile FPS.
           </p>
         </section>
 
@@ -167,7 +180,7 @@ export function MobileRemote() {
               <div className="relative bg-black aspect-video">
                 {feed.streamPath ? (
                   <img
-                    src={`${feed.streamPath}${feed.streamPath.includes('?') ? '&' : '?'}retry_tick=${streamRetryTickByNode[feed.nodeId] || 0}`}
+                    src={buildCameraSrc(feed.streamPath, streamRetryTickByNode[feed.nodeId] || 0)}
                     alt={`${feed.location} live preview`}
                     className="absolute inset-0 h-full w-full object-cover"
                     onError={() => {

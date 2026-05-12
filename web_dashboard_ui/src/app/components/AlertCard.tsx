@@ -4,11 +4,10 @@ import { StatusBadge } from './StatusBadge';
 
 interface AlertCardProps {
   alert: Alert;
-  onAcknowledge?: (id: string) => void;
   onClick?: () => void;
 }
 
-export function AlertCard({ alert, onAcknowledge, onClick }: AlertCardProps) {
+export function AlertCard({ alert, onClick }: AlertCardProps) {
   const getIcon = () => {
     switch (alert.type) {
       case 'intruder':
@@ -80,17 +79,6 @@ export function AlertCard({ alert, onAcknowledge, onClick }: AlertCardProps) {
             </p>
           )}
         </div>
-        {!alert.acknowledged && onAcknowledge && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onAcknowledge(alert.id);
-            }}
-            className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors whitespace-nowrap"
-          >
-            Acknowledge
-          </button>
-        )}
       </div>
     </div>
   );

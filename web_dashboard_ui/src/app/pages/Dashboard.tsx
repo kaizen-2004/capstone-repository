@@ -1,26 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Download, Filter, ChevronRight } from 'lucide-react';
+import { CalendarDays, Download, Filter, ChevronRight } from 'lucide-react';
 import { AlertCard } from '../components/AlertCard';
 import { KPICard } from '../components/KPICard';
 import { CameraPreview } from '../components/CameraPreview';
-import { fetchDailyStats, fetchLiveEvents, fetchLiveNodes } from '../data/liveApi';
+import { fetchDailyStats, fetchDailySummaryReport, fetchLiveEvents, fetchLiveNodes } from '../data/liveApi';
 import { systemProfile } from '../data/appConfig';
 import type { Alert, CameraFeed, KPI, SensorStatus } from '../data/types';
 
 type FilterType = 'all' | 'intruder' | 'fire' | 'sensor' | 'authorized' | 'system';
 
-function toCsvCell(value: unknown): string {
-  const raw = String(value ?? '');
-  if (/[",\n]/.test(raw)) {
-    return `"${raw.replace(/"/g, '""')}"`;
-  }
-  return raw;
+function currentDateInputValue(): string {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
 }
 
-function downloadCsv(fileName: string, rows: Array<Array<unknown>>): void {
-  const csv = rows.map((row) => row.map((cell) => toCsvCell(cell)).join(',')).join('\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+function downloadBlob(fileName: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
@@ -78,6 +74,7 @@ export function Dashboard() {
   const [eventFilter, setEventFilter] = useState<FilterType>('all');
   const [isExporting, setIsExporting] = useState(false);
   const [exportMessage, setExportMessage] = useState('');
+  const [reportDate, setReportDate] = useState(currentDateInputValue);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
 
@@ -132,43 +129,22 @@ export function Dashboard() {
     };
   }, []);
 
-  const handleAcknowledge = async (id: string) => {
-    setAlerts((prev) =>
-      prev.map((alert) => (alert.id === id ? { ...alert, acknowledged: true } : alert)),
-    );
-
-    const numericId = Number.parseInt(id.replace(/^alert-/, ''), 10);
-    if (!Number.isFinite(numericId) || numericId <= 0) {
-      return;
-    }
-    try {
-      const body = new URLSearchParams({ status: 'ACK' });
-      await fetch(`/ack/${numericId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString(),
-      });
-    } catch {
-      // Local optimistic update already applied.
-    }
-  };
-
   const timelineEvents = useMemo(
     () =>
-      [...alerts, ...events].sort(
+      [...events].sort(
         (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
       ),
-    [alerts, events],
+    [events],
   );
 
-  const criticalAlerts = alerts.filter((alert) => !alert.acknowledged && alert.severity === 'critical');
-  const warningAlerts = alerts.filter((alert) => !alert.acknowledged && alert.severity === 'warning');
+  const activeAlerts = alerts.filter((alert) => !alert.acknowledged);
+  const warningAlerts = activeAlerts.filter((alert) => alert.severity === 'warning');
 
   const filteredEvents =
     eventFilter === 'all'
       ? timelineEvents
       : timelineEvents.filter((event) => event.type === eventFilter);
-  const activeAlertCount = criticalAlerts.length + warningAlerts.length;
+  const activeAlertCount = activeAlerts.length;
   const latestEventTimestamp = timelineEvents[0]?.timestamp;
   const liveLocations = useMemo(() => {
     const locations = [...cameraFeeds.map((feed) => feed.location), ...timelineEvents.map((event) => event.location)]
@@ -182,93 +158,18 @@ export function Dashboard() {
     if (isExporting) {
       return;
     }
+    const selectedDate = reportDate || currentDateInputValue();
     setIsExporting(true);
     setExportMessage('');
 
     try {
-      const [statsRows, eventsLive, nodesLive] = await Promise.all([
-        fetchDailyStats(1),
-        fetchLiveEvents(500),
-        fetchLiveNodes(),
-      ]);
-
-      const today = statsRows[0];
-      const mergedEvents = [...eventsLive.alerts, ...eventsLive.events].sort(
-        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-      );
-      const activeAlerts = eventsLive.alerts.filter((alert) => !alert.acknowledged);
-
-      const now = new Date();
-      const fileDate = now.toISOString().slice(0, 10);
-      const rows: Array<Array<unknown>> = [];
-
-      rows.push(['Condo Monitoring Dashboard - Daily Summary']);
-      rows.push(['Generated At', now.toISOString()]);
-      rows.push([
-        'Monitored Areas',
-        Array.from(
-          new Set(
-            nodesLive.sensorStatuses
-              .map((node) => String(node.location || '').trim())
-              .filter(Boolean),
-          ),
-        ).join(' + ') || 'No live areas reported',
-      ]);
-      rows.push([]);
-
-      rows.push(['Summary']);
-      rows.push(['Metric', 'Value']);
-      rows.push(['Authorized Faces', today?.authorizedFaces ?? 0]);
-      rows.push(['Unknown Detections', today?.unknownDetections ?? 0]);
-      rows.push(['Fire Fusion Alerts', today?.fireAlerts ?? 0]);
-      rows.push(['Intruder Fusion Alerts', today?.intruderAlerts ?? 0]);
-      rows.push(['Online Nodes', nodesLive.sensorStatuses.filter((node) => node.status === 'online').length]);
-      rows.push(['Total Nodes', nodesLive.sensorStatuses.length]);
-      rows.push([]);
-
-      rows.push(['Active Alerts']);
-      rows.push(['Timestamp', 'Severity', 'Code', 'Title', 'Location', 'Source Node', 'Description']);
-      if (activeAlerts.length === 0) {
-        rows.push(['-', '-', '-', 'No active alerts', '-', '-', '-']);
-      } else {
-        activeAlerts.slice(0, 200).forEach((alert) => {
-          rows.push([
-            alert.timestamp,
-            alert.severity,
-            alert.eventCode,
-            alert.title,
-            alert.location,
-            alert.sourceNode,
-            alert.description,
-          ]);
-        });
-      }
-      rows.push([]);
-
-      rows.push(['Recent Events']);
-      rows.push(['Timestamp', 'Severity', 'Code', 'Type', 'Title', 'Location', 'Source Node', 'Acknowledged']);
-      if (mergedEvents.length === 0) {
-        rows.push(['-', '-', '-', '-', 'No events found', '-', '-', '-']);
-      } else {
-        mergedEvents.slice(0, 500).forEach((event) => {
-          rows.push([
-            event.timestamp,
-            event.severity,
-            event.eventCode,
-            event.type,
-            event.title,
-            event.location,
-            event.sourceNode,
-            event.acknowledged ? 'yes' : 'no',
-          ]);
-        });
-      }
-
-      downloadCsv(`daily_summary_${fileDate}.csv`, rows);
-      setExportMessage('Daily summary exported.');
+      const report = await fetchDailySummaryReport(selectedDate);
+      downloadBlob(`intruflare_daily_report_${selectedDate}.pdf`, report);
+      setExportMessage('Daily PDF report exported.');
       window.setTimeout(() => setExportMessage(''), 3000);
-    } catch {
-      setExportMessage('Export failed. Try again.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Export failed. Try again.';
+      setExportMessage(message);
       window.setTimeout(() => setExportMessage(''), 3500);
     } finally {
       setIsExporting(false);
@@ -308,9 +209,13 @@ export function Dashboard() {
             Focused monitoring for {monitoringScope}.
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-            <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-medium text-blue-700">
+            <button
+              type="button"
+              onClick={() => navigate('/events')}
+              className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-medium text-blue-700 transition-colors hover:bg-blue-100"
+            >
               Active alerts: {activeAlertCount}
-            </span>
+            </button>
             <span className="inline-flex items-center rounded-full border border-orange-200 bg-orange-50 px-2.5 py-1 font-medium text-orange-700">
               Warnings: {warningAlerts.length}
             </span>
@@ -319,15 +224,29 @@ export function Dashboard() {
             </span>
           </div>
         </div>
-        <button
-          onClick={() => void handleExportDailySummary()}
-          disabled={isExporting}
-          className="flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white border border-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-        >
-          <Download className="w-4 h-4" />
-          <span className="hidden sm:inline">{isExporting ? 'Exporting...' : 'Export Daily Summary'}</span>
-          <span className="sm:hidden">{isExporting ? '...' : 'Export'}</span>
-        </button>
+        <div className="flex flex-col sm:flex-row sm:items-end gap-2 w-full sm:w-auto">
+          <label className="flex flex-col gap-1 text-xs font-medium text-gray-600">
+            Report date
+            <span className="relative">
+              <CalendarDays className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+              <input
+                type="date"
+                value={reportDate}
+                onChange={(event) => setReportDate(event.target.value)}
+                className="w-full sm:w-40 rounded-lg border border-gray-300 bg-white py-2 pl-9 pr-3 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              />
+            </span>
+          </label>
+          <button
+            onClick={() => void handleExportDailySummary()}
+            disabled={isExporting}
+            className="flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white border border-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <Download className="w-4 h-4" />
+            <span className="hidden sm:inline">{isExporting ? 'Exporting...' : 'Export Daily Report'}</span>
+            <span className="sm:hidden">{isExporting ? '...' : 'Export'}</span>
+          </button>
+        </div>
       </div>
       {exportMessage && (
         <div className="text-sm text-gray-700">{exportMessage}</div>
@@ -357,35 +276,6 @@ export function Dashboard() {
           <p className="text-sm font-medium text-gray-900 mt-1">{timelineEvents.length} events</p>
         </div>
       </div>
-
-      {(criticalAlerts.length > 0 || warningAlerts.length > 0) && (
-        <div className="space-y-3">
-          <h3 className="text-base md:text-lg font-semibold text-gray-900">Active Alerts</h3>
-          <div className="space-y-3">
-            {criticalAlerts.map((alert) => (
-              <AlertCard
-                key={alert.id}
-                alert={alert}
-                onAcknowledge={handleAcknowledge}
-                onClick={() => navigate('/events')}
-              />
-            ))}
-            {warningAlerts.map((alert) => (
-              <AlertCard
-                key={alert.id}
-                alert={alert}
-                onAcknowledge={handleAcknowledge}
-                onClick={() => navigate('/events')}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-      {criticalAlerts.length === 0 && warningAlerts.length === 0 && (
-        <div className="rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800">
-          No active critical or warning alerts right now.
-        </div>
-      )}
 
       <div className="space-y-3">
         <h3 className="text-base md:text-lg font-semibold text-gray-900">Today's Summary</h3>

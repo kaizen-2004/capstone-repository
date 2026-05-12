@@ -17,7 +17,6 @@ import {
   createFaceProfile,
   deleteFaceProfile,
   fetchFaceTrainingStatus,
-  fetchMdnsStatus,
   fetchMobileRemoteStatus,
   fetchRemoteAccessLinks,
   fetchSettingsLive,
@@ -26,12 +25,10 @@ import {
   regenerateRecoveryCode,
   fetchBackupStatus,
   fetchRetentionStatus,
-  setMobileRemoteEnabled,
   trainFaceModel,
   updateFaceProfile,
   updateRuntimeSetting,
   type FaceTrainingStatus,
-  type MdnsStatusPayload,
   type MobileRemoteStatus,
   type BackupStatusPayload,
   type RetentionStatusPayload,
@@ -200,10 +197,7 @@ export function Settings() {
   const [profilesError, setProfilesError] = useState('');
   const [profilesMessage, setProfilesMessage] = useState('');
   const [mobileRemoteStatus, setMobileRemoteStatus] = useState<MobileRemoteStatus | null>(null);
-  const [mobileRemoteSaving, setMobileRemoteSaving] = useState(false);
-  const [mobileRemoteMessage, setMobileRemoteMessage] = useState('');
   const [remoteLinks, setRemoteLinks] = useState<RemoteAccessLinksPayload | null>(null);
-  const [mdnsStatus, setMdnsStatus] = useState<MdnsStatusPayload | null>(null);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [accountSecurityMessage, setAccountSecurityMessage] = useState('');
@@ -466,11 +460,10 @@ export function Settings() {
   }, [trainingCameraSource]);
 
   const loadSettings = useCallback(async () => {
-    const [liveResult, remoteStatusResult, linksResult, mdnsResult, backupResult, retentionResult] = await Promise.allSettled([
+    const [liveResult, remoteStatusResult, linksResult, backupResult, retentionResult] = await Promise.allSettled([
       fetchSettingsLive(),
       fetchMobileRemoteStatus(),
       fetchRemoteAccessLinks(),
-      fetchMdnsStatus(),
       fetchBackupStatus(),
       fetchRetentionStatus(),
     ]);
@@ -490,9 +483,6 @@ export function Settings() {
     }
     if (linksResult.status === 'fulfilled') {
       setRemoteLinks(linksResult.value);
-    }
-    if (mdnsResult.status === 'fulfilled') {
-      setMdnsStatus(mdnsResult.value);
     }
     if (backupResult.status === 'fulfilled') {
       setBackupStatus(backupResult.value);
@@ -807,29 +797,6 @@ export function Settings() {
     }
   };
 
-  const handleToggleMobileRemote = async (enabled: boolean) => {
-    if (mobileRemoteSaving) {
-      return;
-    }
-    setMobileRemoteSaving(true);
-    setMobileRemoteMessage('');
-    try {
-      const updated = await setMobileRemoteEnabled(enabled);
-      setMobileRemoteStatus(updated);
-      setMobileRemoteMessage(
-        updated.enabled
-          ? 'Mobile remote interface enabled.'
-          : 'Mobile remote interface disabled.',
-      );
-      window.setTimeout(() => setMobileRemoteMessage(''), 3000);
-    } catch {
-      setMobileRemoteMessage('Unable to update mobile remote interface setting.');
-      window.setTimeout(() => setMobileRemoteMessage(''), 3500);
-    } finally {
-      setMobileRemoteSaving(false);
-    }
-  };
-
   const isRuntimeBoolOn = (setting: RuntimeSetting): boolean => {
     const fallback = String(setting.value || '').trim().toLowerCase();
     const source = String(runtimeDrafts[setting.key] ?? fallback).trim().toLowerCase();
@@ -911,16 +878,8 @@ export function Settings() {
         handleRuntimeSecretReplaceToggle(key, false);
       }
       if (result.key === 'LAN_BASE_URL' || result.key === 'TAILSCALE_BASE_URL') {
-        const [linksResult, mdnsResult] = await Promise.allSettled([
-          fetchRemoteAccessLinks(),
-          fetchMdnsStatus(),
-        ]);
-        if (linksResult.status === 'fulfilled') {
-          setRemoteLinks(linksResult.value);
-        }
-        if (mdnsResult.status === 'fulfilled') {
-          setMdnsStatus(mdnsResult.value);
-        }
+        const linksResult = await fetchRemoteAccessLinks();
+        setRemoteLinks(linksResult);
       }
       setRuntimeSaveMessages((previous) => ({
         ...previous,
@@ -1947,28 +1906,19 @@ export function Settings() {
           <div className="rounded-lg border border-gray-200 p-4">
             <div className="flex items-start sm:items-center justify-between gap-4">
               <div className="min-w-0">
-                <p className="font-medium text-gray-900">Enable Mobile Remote</p>
+                <p className="font-medium text-gray-900">Mobile Remote</p>
                 <p className="text-sm text-gray-600 mt-1 break-words">
-                  Disabled by default. Keep local-only access unless secure overlay is configured.
+                  Always available for local network sessions. No manual enable switch is required.
                 </p>
               </div>
-              <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                <input
-                  type="checkbox"
-                  className="sr-only peer"
-                  checked={Boolean(mobileRemoteStatus?.enabled)}
-                  onChange={(event) => {
-                    void handleToggleMobileRemote(event.target.checked);
-                  }}
-                  disabled={mobileRemoteSaving}
-                />
-                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-100 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600 peer-disabled:opacity-60" />
-              </label>
+              <span className="shrink-0 rounded-full border border-green-200 bg-green-50 px-3 py-1 text-xs font-medium text-green-700">
+                Always on
+              </span>
             </div>
 
             <div className="mt-4 text-sm text-gray-700 space-y-2">
               <p>
-                Status: <span className="font-medium">{mobileRemoteStatus?.enabled ? 'Enabled' : 'Disabled'}</span>
+                Status: <span className="font-medium">Enabled</span>
               </p>
               <p>
                 Route: <span className="font-mono break-all">{mobileRemoteRoute}</span>
@@ -1979,7 +1929,9 @@ export function Settings() {
                   {remoteLinks?.preferredUrl || mobileRemoteUrl}
                 </span>
               </p>
-              <p className="text-xs text-gray-600 break-words">{mobileRemoteStatus?.detail}</p>
+              <p className="text-xs text-gray-600 break-words">
+                {mobileRemoteStatus?.detail || 'Mobile remote interface is always enabled for local network session access.'}
+              </p>
             </div>
 
             <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2 text-sm text-gray-700">
@@ -2011,9 +1963,6 @@ export function Settings() {
                 Copy Preferred URL
               </button>
             </div>
-            {mobileRemoteMessage && (
-              <p className="mt-3 text-sm text-gray-700">{mobileRemoteMessage}</p>
-            )}
           </div>
         </div>
       </div>

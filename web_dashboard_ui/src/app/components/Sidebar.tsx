@@ -16,7 +16,7 @@ import { fetchLiveEvents, fetchLiveNodes } from '../data/liveApi';
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Live Monitoring', href: '/live', icon: Video },
-  { name: 'Events & Alerts', href: '/events', icon: Bell },
+  { name: 'Alerts & Snapshots', href: '/events', icon: Bell },
   { name: 'Sensors & Nodes', href: '/sensors', icon: Radio },
   { name: 'Statistics', href: '/statistics', icon: BarChart3 },
   { name: 'Settings', href: '/settings', icon: Settings },
@@ -32,7 +32,7 @@ interface SidebarProps {
 export function Sidebar({ isOpen = true, onClose, desktopHidden = false, onDesktopToggle }: SidebarProps) {
   const { user, logout } = useAuth();
   const [loggingOut, setLoggingOut] = useState(false);
-  const [reviewQueueCount, setReviewQueueCount] = useState(0);
+  const [activeAlertCount, setActiveAlertCount] = useState(0);
   const [offlineNodeCount, setOfflineNodeCount] = useState(0);
 
   useEffect(() => {
@@ -50,18 +50,16 @@ export function Sidebar({ isOpen = true, onClose, desktopHidden = false, onDeskt
         if (cancelled) {
           return;
         }
-        const pendingAlerts = eventsPayload.alerts.filter((alert) => alert.reviewStatus === 'needs_review').length;
-        const pendingEvents = eventsPayload.events.filter((event) => event.reviewStatus === 'needs_review').length;
-        const queueCount = pendingAlerts + pendingEvents;
+        const alertCount = eventsPayload.alerts.filter((alert) => !alert.acknowledged).length;
         const offlineCount = nodesPayload.sensorStatuses.filter((sensor) => sensor.status === 'offline').length;
-        setReviewQueueCount(queueCount);
+        setActiveAlertCount(alertCount);
         setOfflineNodeCount(offlineCount);
       } catch {
         if (cancelled) {
           return;
         }
         if (!cancelled) {
-          setReviewQueueCount(0);
+          setActiveAlertCount(0);
           setOfflineNodeCount(0);
         }
       } finally {
@@ -134,7 +132,7 @@ export function Sidebar({ isOpen = true, onClose, desktopHidden = false, onDeskt
                 <Radio className="w-6 h-6" />
               </div>
               <div>
-                <h2 className="font-semibold">Thesis Monitor</h2>
+                <h2 className="font-semibold">Intruflare</h2>
                 <p className="text-xs text-gray-400">Intruder + Fire</p>
               </div>
             </div>
@@ -178,9 +176,9 @@ export function Sidebar({ isOpen = true, onClose, desktopHidden = false, onDeskt
                 >
                   <item.icon className="w-5 h-5" />
                   <span className="font-medium">{item.name}</span>
-                  {item.href === '/events' && reviewQueueCount > 0 ? (
+                  {item.href === '/events' && activeAlertCount > 0 ? (
                     <span className="ml-auto rounded-full bg-rose-500/20 px-2 py-0.5 text-[11px] font-semibold text-rose-200">
-                      {reviewQueueCount}
+                      {activeAlertCount}
                     </span>
                   ) : null}
                   {item.href === '/sensors' && offlineNodeCount > 0 ? (

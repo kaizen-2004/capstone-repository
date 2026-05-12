@@ -6,6 +6,7 @@ export type NodeId = string;
 
 export interface FaceOverlay {
   bbox: [number, number, number, number];
+  kind?: 'face' | 'fire' | string;
   classification: string;
   confidence?: number;
   label: string;

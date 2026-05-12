@@ -1,13 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Search, Filter, Calendar, X, Image as ImageIcon } from 'lucide-react';
-import { fetchAlertReviewHistory, fetchLiveEvents, updateAlertReview, type AlertReviewHistoryEntry } from '../data/liveApi';
+import { Calendar, Camera, CheckCircle2, Download, Filter, Search, X, Image as ImageIcon } from 'lucide-react';
+import { fetchLiveEvents } from '../data/liveApi';
 import type { Alert, SeverityLevel, EventType } from '../data/types';
 import { StatusBadge } from '../components/StatusBadge';
 
 type TimeRange = '24h' | '7d' | '30d' | 'all';
-type ReviewView = 'queue' | 'history' | 'snapshots';
-type ReviewStatus = 'needs_review' | 'confirmed' | 'false_positive' | 'resolved' | 'archived';
 
 const DEFAULT_TIME_RANGE: TimeRange = '7d';
 const TIME_RANGE_DAYS: Record<Exclude<TimeRange, 'all'>, number> = {
@@ -18,12 +16,6 @@ const TIME_RANGE_DAYS: Record<Exclude<TimeRange, 'all'>, number> = {
 
 const displayEventCode = (eventCode: string) =>
   eventCode === 'UNKNOWN' ? 'NON-AUTHORIZED' : eventCode;
-
-const formatReviewStatusLabel = (value: string) =>
-  value
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase())
-    .trim();
 
 const getSnapshotCardId = (snapshotPath: string) => {
   let hash = 0;
@@ -52,6 +44,124 @@ function downloadCsv(fileName: string, rows: Array<Array<unknown>>): void {
   anchor.click();
   document.body.removeChild(anchor);
   URL.revokeObjectURL(url);
+}
+
+function overlayColor(overlay: NonNullable<Alert['faceOverlays']>[number]) {
+  const kind = String(overlay.kind || '').toLowerCase();
+  const classification = overlay.classification.toUpperCase();
+  if (kind === 'fire' || classification.includes('FIRE')) {
+    return '#ef4444';
+  }
+  if (classification.includes('SMOKE')) {
+    return '#f97316';
+  }
+  if (classification === 'AUTHORIZED') {
+    return '#22c55e';
+  }
+  return '#f59e0b';
+}
+
+function overlayLabel(overlay: NonNullable<Alert['faceOverlays']>[number]) {
+  const kind = String(overlay.kind || '').toLowerCase();
+  const classification = overlay.classification.toUpperCase();
+  if (kind === 'fire' || classification.includes('FIRE')) {
+    return 'FIRE';
+  }
+  if (classification.includes('SMOKE')) {
+    return 'SMOKE';
+  }
+  if (classification === 'AUTHORIZED') {
+    return 'AUTH';
+  }
+  if (classification === 'NON-AUTHORIZED' || classification === 'UNKNOWN_FACE' || classification === 'UNKNOWN') {
+    return 'NON-AUTH';
+  }
+  return classification || 'FACE';
+}
+
+function SnapshotImageWithOverlay({
+  event,
+  alt,
+  imageClassName = '',
+  onError,
+}: {
+  event: Alert;
+  alt: string;
+  imageClassName?: string;
+  onError?: () => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
+  const [containerSize, setContainerSize] = useState<{ width: number; height: number } | null>(null);
+  const overlays = event.faceOverlays || [];
+
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node) {
+      return;
+    }
+
+    const updateSize = () => {
+      const rect = node.getBoundingClientRect();
+      setContainerSize({ width: rect.width, height: rect.height });
+    };
+    updateSize();
+
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  const overlayStyle = (bbox: [number, number, number, number]) => {
+    if (!imageSize || !containerSize || imageSize.width <= 0 || imageSize.height <= 0) {
+      return { display: 'none' };
+    }
+    const scale = Math.min(containerSize.width / imageSize.width, containerSize.height / imageSize.height);
+    const renderedWidth = imageSize.width * scale;
+    const renderedHeight = imageSize.height * scale;
+    const offsetX = (containerSize.width - renderedWidth) / 2;
+    const offsetY = (containerSize.height - renderedHeight) / 2;
+    const [x, y, width, height] = bbox;
+    return {
+      left: `${offsetX + x * scale}px`,
+      top: `${offsetY + y * scale}px`,
+      width: `${width * scale}px`,
+      height: `${height * scale}px`,
+    };
+  };
+
+  return (
+    <div ref={containerRef} className="relative h-full w-full overflow-hidden bg-black">
+      <img
+        src={event.snapshotPath}
+        alt={alt}
+        loading="lazy"
+        className={`h-full w-full object-contain ${imageClassName}`}
+        onLoad={(event) => {
+          const image = event.currentTarget;
+          setImageSize({ width: image.naturalWidth, height: image.naturalHeight });
+        }}
+        onError={onError}
+      />
+      {overlays.map((overlay, index) => {
+        const color = overlayColor(overlay);
+        return (
+          <div
+            key={`${overlay.classification}-${index}-${overlay.bbox.join('-')}`}
+            className="pointer-events-none absolute rounded-sm border-2"
+            style={{ ...overlayStyle(overlay.bbox), borderColor: color }}
+          >
+            <span
+              className="absolute -top-6 left-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-bold text-white shadow"
+              style={{ backgroundColor: color }}
+            >
+              {overlayLabel(overlay)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function SnapshotGalleryCard({
@@ -86,11 +196,10 @@ function SnapshotGalleryCard({
     >
       <div className="relative aspect-video bg-gray-900">
         {snapshotPath && !imageFailed ? (
-          <img
-            src={snapshotPath}
+          <SnapshotImageWithOverlay
+            event={event}
             alt={`${recordLabel} snapshot`}
-            loading="lazy"
-            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+            imageClassName="transition-transform duration-300 group-hover:scale-[1.02]"
             onError={() => setImageFailed(true)}
           />
         ) : (
@@ -126,19 +235,96 @@ function SnapshotGalleryCard({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {isAlert ? (
-            <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs font-medium text-gray-700">
-              {formatReviewStatusLabel(event.reviewStatus || 'needs_review')}
-            </span>
-          ) : (
-            <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs font-medium text-gray-700">
-              Event Log
-            </span>
-          )}
+          <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs font-medium text-gray-700">
+            {isAlert ? 'Acknowledged Alert' : 'Event Snapshot'}
+          </span>
           <span className="text-xs text-gray-500">Click to open details</span>
         </div>
       </div>
     </button>
+  );
+}
+
+function ActiveAlertSnapshotCard({
+  alert,
+  ackPending,
+  onAcknowledge,
+  onOpen,
+}: {
+  alert: Alert;
+  ackPending: boolean;
+  onAcknowledge: (alert: Alert) => void;
+  onOpen: (alert: Alert) => void;
+}) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const snapshotPath = alert.snapshotPath || '';
+  const formattedTime = new Date(alert.timestamp).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
+  return (
+    <article className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+      <button
+        type="button"
+        onClick={() => onOpen(alert)}
+        className="relative block aspect-video w-full bg-gray-900 text-left focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+      >
+        {snapshotPath && !imageFailed ? (
+          <SnapshotImageWithOverlay
+            event={alert}
+            alt={`${alert.title} snapshot`}
+            imageClassName="transition-transform duration-300 hover:scale-[1.02]"
+            onError={() => setImageFailed(true)}
+          />
+        ) : (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-gray-500">
+            <ImageIcon className="h-12 w-12" />
+            <span className="text-sm">Snapshot unavailable</span>
+          </div>
+        )}
+        <div className="absolute left-3 top-3 flex flex-wrap items-center gap-2">
+          <StatusBadge severity={alert.severity} label={alert.severity.toUpperCase()} size="sm" />
+          <span className="rounded-full bg-black/70 px-2.5 py-1 text-xs font-semibold text-white">
+            {displayEventCode(alert.eventCode)}
+          </span>
+        </div>
+      </button>
+
+      <div className="space-y-4 p-4">
+        <div>
+          <h3 className="text-base font-semibold text-gray-900 break-words">{alert.title}</h3>
+          <p className="mt-1 text-sm text-gray-600 break-words">{alert.description}</p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-1 text-xs text-gray-600 sm:grid-cols-2">
+          <span>{alert.location || 'No location recorded'}</span>
+          <span className="font-mono break-all sm:text-right">{alert.sourceNode}</span>
+          <span className="sm:col-span-2">{formattedTime}</span>
+        </div>
+
+        {alert.fusionEvidence && alert.fusionEvidence.length > 0 ? (
+          <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">
+            Evidence: {alert.fusionEvidence.join(', ')}
+          </p>
+        ) : null}
+
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <span className="text-xs text-gray-500">Open the snapshot for details if needed.</span>
+          <button
+            type="button"
+            onClick={() => onAcknowledge(alert)}
+            disabled={ackPending}
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <CheckCircle2 className="h-4 w-4" />
+            {ackPending ? 'Acknowledging...' : 'Acknowledge'}
+          </button>
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -148,49 +334,37 @@ export function EventsAlerts() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSeverity, setSelectedSeverity] = useState<SeverityLevel | 'all'>('all');
   const [selectedType, setSelectedType] = useState<EventType | 'all'>('all');
-  const [reviewView, setReviewView] = useState<ReviewView>('queue');
-  const [selectedReviewStatus, setSelectedReviewStatus] = useState<ReviewStatus | 'all'>('all');
   const [selectedTimeRange, setSelectedTimeRange] = useState<TimeRange>(DEFAULT_TIME_RANGE);
+  const [historyFiltersOpen, setHistoryFiltersOpen] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<Alert | null>(null);
-  const [highlightedSnapshotPath, setHighlightedSnapshotPath] = useState<string | null>(null);
   const [snapshotLoadFailed, setSnapshotLoadFailed] = useState(false);
   const [ackPendingId, setAckPendingId] = useState<string | null>(null);
-  const [quickReviewPendingId, setQuickReviewPendingId] = useState<string | null>(null);
-  const [reviewStatusDraft, setReviewStatusDraft] = useState<'needs_review' | 'confirmed' | 'false_positive' | 'resolved' | 'archived'>('needs_review');
-  const [reviewNoteDraft, setReviewNoteDraft] = useState('');
-  const [reviewSaving, setReviewSaving] = useState(false);
-  const [reviewFeedback, setReviewFeedback] = useState('');
-  const [reviewError, setReviewError] = useState('');
-  const [reviewHistory, setReviewHistory] = useState<AlertReviewHistoryEntry[]>([]);
-  const [reviewHistoryLoading, setReviewHistoryLoading] = useState(false);
-  const [selectedAlertIds, setSelectedAlertIds] = useState<Set<string>>(new Set());
-  const [bulkReviewStatus, setBulkReviewStatus] = useState<ReviewStatus>('resolved');
-  const [bulkReviewNote, setBulkReviewNote] = useState('');
-  const [bulkSaving, setBulkSaving] = useState(false);
-  const [bulkResult, setBulkResult] = useState<{ updated: number; failed: number } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
 
   const handleAcknowledge = async (id: string) => {
     setAckPendingId(id);
-    setEvents((prev) => prev.map((event) => (event.id === id ? { ...event, acknowledged: true } : event)));
-    setSelectedEvent((prev) => (prev && prev.id === id ? { ...prev, acknowledged: true } : prev));
 
     const numericId = Number.parseInt(id.replace(/^alert-/, ''), 10);
     if (!Number.isFinite(numericId) || numericId <= 0) {
+      setLoadError('Unable to acknowledge alert: invalid alert ID.');
       setAckPendingId(null);
       return;
     }
 
     try {
-      const body = new URLSearchParams({ status: 'ACK' });
-      await fetch(`/ack/${numericId}`, {
+      const response = await fetch(`/api/alerts/${numericId}/ack`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString(),
       });
-    } catch {
-      // Keep optimistic UI state; backend will refresh from live API on next poll.
+      if (!response.ok) {
+        throw new Error(`Acknowledge failed (${response.status}).`);
+      }
+      setEvents((prev) => prev.map((event) => (event.id === id ? { ...event, acknowledged: true } : event)));
+      setSelectedEvent((prev) => (prev && prev.id === id ? { ...prev, acknowledged: true } : prev));
+      setLoadError('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to acknowledge alert right now.';
+      setLoadError(message);
     } finally {
       setAckPendingId(null);
     }
@@ -227,7 +401,7 @@ export function EventsAlerts() {
           setIsLoading(false);
           timer = window.setTimeout(() => {
             void load();
-          }, 12000);
+          }, 2000);
         }
         controller = null;
       }
@@ -248,188 +422,35 @@ export function EventsAlerts() {
     setSnapshotLoadFailed(false);
   }, [selectedEvent?.id, selectedEvent?.snapshotPath]);
 
-  useEffect(() => {
-    if (!selectedEvent) {
-      return;
-    }
-    setReviewStatusDraft(selectedEvent.reviewStatus || 'needs_review');
-    setReviewNoteDraft(selectedEvent.reviewNote || '');
-    setReviewFeedback('');
-    setReviewError('');
-
-    if (!selectedEvent.id.startsWith('alert-')) {
-      setReviewHistory([]);
-      return;
-    }
-
-    const alertId = Number.parseInt(selectedEvent.id.replace(/^alert-/, ''), 10);
-    if (!Number.isFinite(alertId) || alertId <= 0) {
-      setReviewHistory([]);
-      return;
-    }
-
-    let cancelled = false;
-    setReviewHistoryLoading(true);
-    void fetchAlertReviewHistory(alertId)
-      .then((entries) => {
-        if (!cancelled) {
-          setReviewHistory(entries);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setReviewHistory([]);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setReviewHistoryLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedEvent]);
-
-  const handleSaveReview = async () => {
-    if (!selectedEvent || !selectedEvent.id.startsWith('alert-')) {
-      setReviewError('This record cannot be reviewed as an alert.');
-      return;
-    }
-    const alertId = Number.parseInt(selectedEvent.id.replace(/^alert-/, ''), 10);
-    if (!Number.isFinite(alertId) || alertId <= 0) {
-      setReviewError('Invalid alert ID. Refresh the page and try again.');
-      return;
-    }
-
-    setReviewSaving(true);
-    setReviewFeedback('');
-    setReviewError('');
-    try {
-      const result = await updateAlertReview(alertId, reviewStatusDraft, reviewNoteDraft);
-      setEvents((prev) =>
-        prev.map((item) => (item.id === selectedEvent.id ? { ...item, ...result.alert } : item)),
-      );
-      setSelectedEvent((prev) =>
-        prev && prev.id === selectedEvent.id ? { ...prev, ...result.alert } : prev,
-      );
-      if (Number.isFinite(alertId) && alertId > 0) {
-        const entries = await fetchAlertReviewHistory(alertId);
-        setReviewHistory(entries);
-      }
-      setReviewFeedback('Review saved.');
-      setSelectedAlertIds((prev) => {
-        if (!prev.has(selectedEvent.id)) {
-          return prev;
-        }
-        const next = new Set(prev);
-        next.delete(selectedEvent.id);
-        return next;
-      });
-      if (reviewView === 'queue' && (result.alert.reviewStatus || reviewStatusDraft) !== 'needs_review') {
-        setSelectedEvent(null);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to save review right now.';
-      setReviewError(message);
-    } finally {
-      setReviewSaving(false);
-    }
-  };
-
-  const handleQuickResolve = async (event: Alert) => {
-    if (!event.id.startsWith('alert-')) {
-      return;
-    }
-    const alertId = Number.parseInt(event.id.replace(/^alert-/, ''), 10);
-    if (!Number.isFinite(alertId) || alertId <= 0) {
-      return;
-    }
-
-    setQuickReviewPendingId(event.id);
-    try {
-      const result = await updateAlertReview(alertId, 'resolved', event.reviewNote || 'Resolved from review queue.');
-      setEvents((prev) => prev.map((item) => (item.id === event.id ? { ...item, ...result.alert } : item)));
-      setSelectedEvent((prev) => (prev && prev.id === event.id ? { ...prev, ...result.alert } : prev));
-      setSelectedAlertIds((prev) => {
-        if (!prev.has(event.id)) {
-          return prev;
-        }
-        const next = new Set(prev);
-        next.delete(event.id);
-        return next;
-      });
-    } finally {
-      setQuickReviewPendingId(null);
-    }
-  };
-
-  const toggleAlertSelection = (alertId: string, selected: boolean) => {
-    setSelectedAlertIds((prev) => {
-      const next = new Set(prev);
-      if (selected) {
-        next.add(alertId);
-      } else {
-        next.delete(alertId);
-      }
-      return next;
-    });
-  };
-
-  const toggleSelectAllVisible = (selected: boolean) => {
-    setSelectedAlertIds((prev) => {
-      const next = new Set(prev);
-      for (const event of queueAlerts) {
-        if (selected) {
-          next.add(event.id);
-        } else {
-          next.delete(event.id);
-        }
-      }
-      return next;
-    });
-  };
-
-  const handleBulkApplyReview = async () => {
-    const ids = Array.from(selectedAlertIds).filter((id) => id.startsWith('alert-'));
-    if (ids.length === 0) {
-      return;
-    }
-    setBulkSaving(true);
-    setBulkResult(null);
-    try {
-      const updates = await Promise.allSettled(
-        ids.map(async (id) => {
-          const numericId = Number.parseInt(id.replace(/^alert-/, ''), 10);
-          if (!Number.isFinite(numericId) || numericId <= 0) {
-            return null;
+  const activeAlerts = useMemo(
+    () =>
+      events
+        .filter((event) => event.id.startsWith('alert-') && !event.acknowledged)
+        .sort((a, b) => {
+          const severityRank: Record<SeverityLevel, number> = {
+            critical: 0,
+            warning: 1,
+            normal: 2,
+            info: 3,
+          };
+          const severityDiff = severityRank[a.severity] - severityRank[b.severity];
+          if (severityDiff !== 0) {
+            return severityDiff;
           }
-          return updateAlertReview(numericId, bulkReviewStatus, bulkReviewNote);
+          return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
         }),
-      );
+    [events],
+  );
 
-      const byId = new Map<string, Alert>();
-      let failedCount = 0;
-      for (const update of updates) {
-        if (update.status !== 'fulfilled' || !update.value) {
-          failedCount += 1;
-          continue;
-        }
-        byId.set(update.value.alert.id, update.value.alert);
-      }
-      const updatedCount = byId.size;
-      if (byId.size > 0) {
-        setEvents((prev) => prev.map((item) => byId.get(item.id) || item));
-        setSelectedEvent((prev) => (prev ? byId.get(prev.id) || prev : prev));
-      }
-      setSelectedAlertIds(new Set());
-      setBulkReviewNote('');
-      setBulkResult({ updated: updatedCount, failed: failedCount });
-    } finally {
-      setBulkSaving(false);
-    }
-  };
+  const activeAlertIds = useMemo(
+    () => new Set(activeAlerts.map((alert) => alert.id)),
+    [activeAlerts],
+  );
+
+  const activeSnapshotPaths = useMemo(
+    () => new Set(activeAlerts.map((alert) => alert.snapshotPath).filter(Boolean)),
+    [activeAlerts],
+  );
 
   const filteredEvents = useMemo(
     () => {
@@ -438,16 +459,7 @@ export function EventsAlerts() {
       const cutoffMs = days == null ? Number.NEGATIVE_INFINITY : Date.now() - days * 24 * 60 * 60 * 1000;
 
       return events.filter((event) => {
-        const isAlert = event.id.startsWith('alert-');
-        const reviewStatus = event.reviewStatus || 'needs_review';
-        const inQueue = isAlert && reviewStatus === 'needs_review';
-        if (reviewView === 'queue' && !inQueue) {
-          return false;
-        }
-        if (reviewView === 'history' && inQueue) {
-          return false;
-        }
-        if (reviewView === 'snapshots' && !event.snapshotPath) {
+        if (activeAlertIds.has(event.id) || !event.snapshotPath || activeSnapshotPaths.has(event.snapshotPath)) {
           return false;
         }
 
@@ -458,32 +470,18 @@ export function EventsAlerts() {
           event.sourceNode.toLowerCase().includes(keyword);
         const matchesSeverity = selectedSeverity === 'all' || event.severity === selectedSeverity;
         const matchesType = selectedType === 'all' || event.type === selectedType;
-        const matchesReviewStatus =
-          selectedReviewStatus === 'all' ||
-          (isAlert && reviewStatus === selectedReviewStatus);
         const eventTimeMs = new Date(event.timestamp).getTime();
         const matchesTime = days == null || (Number.isFinite(eventTimeMs) && eventTimeMs >= cutoffMs);
-        return matchesSearch && matchesSeverity && matchesType && matchesReviewStatus && matchesTime;
+        return matchesSearch && matchesSeverity && matchesType && matchesTime;
       });
     },
-    [events, searchQuery, selectedSeverity, selectedType, selectedReviewStatus, selectedTimeRange, reviewView],
+    [events, searchQuery, selectedSeverity, selectedType, selectedTimeRange, activeAlertIds, activeSnapshotPaths],
   );
   const hasActiveFilters =
     searchQuery.trim().length > 0 ||
     selectedSeverity !== 'all' ||
     selectedType !== 'all' ||
-    selectedReviewStatus !== 'all' ||
     selectedTimeRange !== DEFAULT_TIME_RANGE;
-
-  const queueAlerts = useMemo(
-    () => filteredEvents.filter((event) => event.id.startsWith('alert-')),
-    [filteredEvents],
-  );
-
-  const selectedQueueCount = useMemo(
-    () => queueAlerts.filter((event) => selectedAlertIds.has(event.id)).length,
-    [queueAlerts, selectedAlertIds],
-  );
 
   const snapshotGalleryEvents = useMemo(() => {
     const bySnapshotPath = new Map<string, Alert>();
@@ -508,82 +506,7 @@ export function EventsAlerts() {
     return Array.from(bySnapshotPath.values());
   }, [filteredEvents]);
 
-  const visibleItemCount = reviewView === 'snapshots' ? snapshotGalleryEvents.length : filteredEvents.length;
-
-  useEffect(() => {
-    if (reviewView !== 'queue') {
-      setSelectedAlertIds(new Set());
-      return;
-    }
-    const allowedIds = new Set(queueAlerts.map((event) => event.id));
-    setSelectedAlertIds((prev) => {
-      const next = new Set<string>();
-      for (const id of prev) {
-        if (allowedIds.has(id)) {
-          next.add(id);
-        }
-      }
-      return next.size === prev.size ? prev : next;
-    });
-  }, [reviewView, queueAlerts]);
-
-  useEffect(() => {
-    if (reviewView !== 'snapshots' || !highlightedSnapshotPath) {
-      return;
-    }
-
-    const scrollTimer = window.setTimeout(() => {
-      document
-        .getElementById(getSnapshotCardId(highlightedSnapshotPath))
-        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }, 100);
-    const clearTimer = window.setTimeout(() => {
-      setHighlightedSnapshotPath(null);
-    }, 2400);
-
-    return () => {
-      window.clearTimeout(scrollTimer);
-      window.clearTimeout(clearTimer);
-    };
-  }, [highlightedSnapshotPath, reviewView, snapshotGalleryEvents.length]);
-
-  const handleViewSnapshotInGallery = (event: Alert) => {
-    if (!event.snapshotPath) {
-      return;
-    }
-    setSelectedEvent(null);
-    setHighlightedSnapshotPath(event.snapshotPath);
-    setReviewView('snapshots');
-  };
-
-  const renderReviewStatus = (event: Alert) => {
-    const status = (event.reviewStatus || 'needs_review') as ReviewStatus;
-    if (!event.id.startsWith('alert-')) {
-      return <span className="text-sm text-gray-600">Event Log</span>;
-    }
-    const label = formatReviewStatusLabel(status);
-    const classes =
-      status === 'needs_review'
-        ? 'bg-amber-50 border-amber-200 text-amber-700'
-        : status === 'confirmed'
-          ? 'bg-red-50 border-red-200 text-red-700'
-          : status === 'false_positive'
-            ? 'bg-blue-50 border-blue-200 text-blue-700'
-            : status === 'resolved'
-              ? 'bg-green-50 border-green-200 text-green-700'
-              : 'bg-gray-50 border-gray-200 text-gray-700';
-    return <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${classes}`}>{label}</span>;
-  };
-
-  const formatDateTime = (timestamp: string) => {
-    const date = new Date(timestamp);
-    return date.toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
+  const visibleItemCount = snapshotGalleryEvents.length;
 
   const handleExportSelectedEvent = (event: Alert) => {
     const rows: Array<Array<unknown>> = [
@@ -618,36 +541,23 @@ export function EventsAlerts() {
     setSearchQuery('');
     setSelectedSeverity('all');
     setSelectedType('all');
-    setSelectedReviewStatus('all');
     setSelectedTimeRange(DEFAULT_TIME_RANGE);
   };
 
   return (
     <div className="p-3 sm:p-4 md:p-8 space-y-4 md:space-y-6 overflow-x-hidden">
       <div>
-        <h2 className="text-xl md:text-2xl font-semibold text-gray-900">Events & Alerts</h2>
+        <h2 className="text-xl md:text-2xl font-semibold text-gray-900">Alerts & Snapshots</h2>
         <p className="text-gray-600 mt-1">
-          Search event history by fusion result, event code, severity, and source node.
+          Review active alerts by their snapshot first, then browse captured evidence history.
         </p>
-        <div className="mt-3 inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1">
-          <button
-            onClick={() => setReviewView('queue')}
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${reviewView === 'queue' ? 'bg-white border border-gray-200 text-blue-700' : 'text-gray-600 hover:text-gray-900'}`}
-          >
-            Review Queue
-          </button>
-          <button
-            onClick={() => setReviewView('history')}
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${reviewView === 'history' ? 'bg-white border border-gray-200 text-blue-700' : 'text-gray-600 hover:text-gray-900'}`}
-          >
-            History
-          </button>
-          <button
-            onClick={() => setReviewView('snapshots')}
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${reviewView === 'snapshots' ? 'bg-white border border-gray-200 text-blue-700' : 'text-gray-600 hover:text-gray-900'}`}
-          >
-            Snapshots
-          </button>
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+          <span className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2.5 py-1 font-medium text-red-700">
+            Active alerts: {activeAlerts.length}
+          </span>
+          <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-medium text-blue-700">
+            Snapshot history: {snapshotGalleryEvents.length}
+          </span>
         </div>
       </div>
 
@@ -662,351 +572,154 @@ export function EventsAlerts() {
         </div>
       )}
 
-      <div className="bg-white rounded-lg border border-gray-200 p-3 md:p-4">
-        <div className="flex flex-col xl:flex-row gap-3">
-          <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Search event code, title, source node..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
+      <section className="space-y-3">
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h3 className="text-base md:text-lg font-semibold text-gray-900">Active Alerts</h3>
+            <p className="text-sm text-gray-600">Acknowledge an alert after it has been checked or handled.</p>
           </div>
-
-          <div className="flex items-center gap-2 w-full sm:w-auto">
-            <Filter className="w-4 h-4 text-gray-500" />
-            <select
-              value={selectedSeverity}
-              onChange={(e) => setSelectedSeverity(e.target.value as SeverityLevel | 'all')}
-              className="w-full sm:w-auto px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="all">All Severities</option>
-              <option value="critical">Critical</option>
-              <option value="warning">Warning</option>
-              <option value="normal">Normal</option>
-              <option value="info">Info</option>
-            </select>
-          </div>
-
-          <div className="flex items-center gap-2 w-full sm:w-auto">
-            <Filter className="w-4 h-4 text-gray-500" />
-            <select
-              value={selectedType}
-              onChange={(e) => setSelectedType(e.target.value as EventType | 'all')}
-              className="w-full sm:w-auto px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="all">All Types</option>
-              <option value="intruder">Intruder</option>
-              <option value="fire">Fire</option>
-              <option value="sensor">Sensor</option>
-              <option value="authorized">Authorized</option>
-              <option value="system">System</option>
-            </select>
-          </div>
-
-          <div className="flex items-center gap-2 w-full sm:w-auto">
-            <Calendar className="w-4 h-4" />
-            <select
-              value={selectedTimeRange}
-              onChange={(e) => setSelectedTimeRange(e.target.value as TimeRange)}
-              className="w-full sm:w-auto px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="24h">Last 24 Hours</option>
-              <option value="7d">Last 7 Days</option>
-              <option value="30d">Last 30 Days</option>
-              <option value="all">All Time</option>
-            </select>
-          </div>
-
-          <div className="flex items-center gap-2 w-full sm:w-auto">
-            <Filter className="w-4 h-4 text-gray-500" />
-            <select
-              value={selectedReviewStatus}
-              onChange={(e) => setSelectedReviewStatus(e.target.value as ReviewStatus | 'all')}
-              className="w-full sm:w-auto px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="all">All Review Status</option>
-              <option value="needs_review">Needs Review</option>
-              <option value="confirmed">Confirmed</option>
-              <option value="false_positive">False Positive</option>
-              <option value="resolved">Resolved</option>
-              <option value="archived">Archived</option>
-            </select>
-          </div>
+          <span className="text-xs text-gray-500">
+            {activeAlerts.length} alert{activeAlerts.length === 1 ? '' : 's'} need action
+          </span>
         </div>
-        {reviewView === 'queue' && (
-          <div className="mt-3 pt-3 border-t border-gray-100 space-y-3">
-            <div className="flex items-center gap-3">
-              <label className="inline-flex items-center gap-2 text-xs text-gray-700">
-                <input
-                  type="checkbox"
-                  checked={queueAlerts.length > 0 && queueAlerts.every((event) => selectedAlertIds.has(event.id))}
-                  onChange={(e) => toggleSelectAllVisible(e.target.checked)}
-                />
-                Select all visible alerts
-              </label>
-              <span className="text-xs text-gray-600">Selected: {selectedQueueCount}</span>
-              <span className="text-xs text-gray-600">Critical: {queueAlerts.filter((event) => event.severity === 'critical').length}</span>
-            </div>
-            {bulkResult && (
-              <p
-                className={`text-xs ${bulkResult.failed > 0 ? 'text-amber-700' : 'text-green-700'}`}
-                role="status"
-                aria-live="polite"
-              >
-                Bulk review updated {bulkResult.updated} alert{bulkResult.updated === 1 ? '' : 's'}
-                {bulkResult.failed > 0
-                  ? `; ${bulkResult.failed} failed. Retry to process remaining alerts.`
-                  : ' successfully.'}
-              </p>
-            )}
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-2">
-              <select
-                value={bulkReviewStatus}
-                onChange={(e) => setBulkReviewStatus(e.target.value as ReviewStatus)}
-                className="px-3 py-2 border border-gray-200 rounded-lg text-sm"
-              >
-                <option value="confirmed">Confirmed</option>
-                <option value="false_positive">False Positive</option>
-                <option value="resolved">Resolved</option>
-                <option value="archived">Archived</option>
-                <option value="needs_review">Needs Review</option>
-              </select>
-              <input
-                value={bulkReviewNote}
-                onChange={(e) => setBulkReviewNote(e.target.value)}
-                placeholder="Bulk note (optional)"
-                className="lg:col-span-2 px-3 py-2 border border-gray-200 rounded-lg text-sm"
+
+        {activeAlerts.length > 0 ? (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3">
+            {activeAlerts.map((alert) => (
+              <ActiveAlertSnapshotCard
+                key={alert.id}
+                alert={alert}
+                ackPending={ackPendingId === alert.id}
+                onAcknowledge={(selectedAlert) => void handleAcknowledge(selectedAlert.id)}
+                onOpen={(selectedAlert) => setSelectedEvent(selectedAlert)}
               />
-              <button
-                onClick={() => {
-                  void handleBulkApplyReview();
-                }}
-                disabled={bulkSaving || selectedQueueCount === 0}
-                className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
-              >
-                {bulkSaving ? 'Applying...' : 'Apply to Selected'}
-              </button>
-            </div>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800">
+            No active alerts need acknowledgement right now.
           </div>
         )}
-        <div className="mt-3 pt-3 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs md:text-sm text-gray-600">
-            {reviewView === 'queue' ? 'Queue items' : reviewView === 'snapshots' ? 'Snapshots' : 'History items'}:{' '}
-            <span className="font-semibold text-gray-900">{visibleItemCount}</span>
-          </p>
-          {hasActiveFilters && (
+      </section>
+
+      <div className="space-y-3">
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h3 className="text-base md:text-lg font-semibold text-gray-900">Snapshot History</h3>
+            <p className="text-sm text-gray-600">Browse recent acknowledged alerts and logged events with captured evidence.</p>
+          </div>
+          <span className="text-xs text-gray-500">
+            {visibleItemCount} snapshot{visibleItemCount === 1 ? '' : 's'} shown
+          </span>
+        </div>
+
+        <div className="bg-white rounded-lg border border-gray-200 p-3 md:p-4">
+          <div className="flex flex-col lg:flex-row gap-3">
+            <div className="flex-1 relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search code, title, or source node..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <Calendar className="w-4 h-4 text-gray-500" />
+              <select
+                value={selectedTimeRange}
+                onChange={(e) => setSelectedTimeRange(e.target.value as TimeRange)}
+                className="w-full sm:w-auto px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="24h">Last 24 Hours</option>
+                <option value="7d">Last 7 Days</option>
+                <option value="30d">Last 30 Days</option>
+                <option value="all">All Time</option>
+              </select>
+            </div>
+
             <button
-              onClick={clearFilters}
-              className="text-xs md:text-sm px-3 py-1.5 rounded-md border border-gray-200 text-gray-700 hover:bg-gray-50 transition-colors"
+              type="button"
+              onClick={() => setHistoryFiltersOpen((open) => !open)}
+              className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+              aria-expanded={historyFiltersOpen}
             >
-              Clear filters
+              <Filter className="w-4 h-4" />
+              {historyFiltersOpen ? 'Hide filters' : 'More filters'}
             </button>
+          </div>
+
+          {historyFiltersOpen && (
+            <div className="mt-3 grid grid-cols-1 gap-3 border-t border-gray-100 pt-3 sm:grid-cols-2">
+              <label className="flex flex-col gap-1 text-xs font-medium text-gray-600">
+                Severity
+                <select
+                  value={selectedSeverity}
+                  onChange={(e) => setSelectedSeverity(e.target.value as SeverityLevel | 'all')}
+                  className="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="all">All Severities</option>
+                  <option value="critical">Critical</option>
+                  <option value="warning">Warning</option>
+                  <option value="normal">Normal</option>
+                  <option value="info">Info</option>
+                </select>
+              </label>
+
+              <label className="flex flex-col gap-1 text-xs font-medium text-gray-600">
+                Type
+                <select
+                  value={selectedType}
+                  onChange={(e) => setSelectedType(e.target.value as EventType | 'all')}
+                  className="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="all">All Types</option>
+                  <option value="intruder">Intruder</option>
+                  <option value="fire">Fire</option>
+                  <option value="sensor">Sensor</option>
+                  <option value="authorized">Authorized</option>
+                  <option value="system">System</option>
+                </select>
+              </label>
+            </div>
           )}
+
+          <div className="mt-3 pt-3 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs md:text-sm text-gray-600">
+              Snapshot history: <span className="font-semibold text-gray-900">{visibleItemCount}</span>
+            </p>
+            {hasActiveFilters && (
+              <button
+                onClick={clearFilters}
+                className="text-xs md:text-sm px-3 py-1.5 rounded-md border border-gray-200 text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                Clear filters
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
-      {reviewView === 'snapshots' ? (
-        <div>
-          {snapshotGalleryEvents.length > 0 ? (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {snapshotGalleryEvents.map((event) => (
-                <SnapshotGalleryCard
-                  key={event.snapshotPath}
-                  event={event}
-                  highlighted={highlightedSnapshotPath === event.snapshotPath}
-                  onOpen={(selected) => setSelectedEvent(selected)}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="rounded-lg border border-gray-200 bg-white py-12 text-center">
-              <p className="text-gray-600">No snapshots found matching your filters.</p>
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-          <div className="lg:hidden divide-y divide-gray-200">
-            {filteredEvents.map((event) => (
-              <div
-                key={event.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => setSelectedEvent(event)}
-                onKeyDown={(keyEvent) => {
-                  if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
-                    keyEvent.preventDefault();
-                    setSelectedEvent(event);
-                  }
-                }}
-                className="w-full text-left p-4 space-y-2 hover:bg-gray-50 transition-colors"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs text-gray-500">{formatDateTime(event.timestamp)}</p>
-                  <StatusBadge severity={event.severity} label={event.severity.toUpperCase()} size="sm" />
-                </div>
-
-                {reviewView === 'queue' && event.id.startsWith('alert-') && (
-                  <label
-                    className="inline-flex items-center gap-2 text-xs text-gray-700"
-                    onClick={(clickEvent) => clickEvent.stopPropagation()}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedAlertIds.has(event.id)}
-                      onChange={(e) => {
-                        e.stopPropagation();
-                        toggleAlertSelection(event.id, e.target.checked);
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    Select
-                  </label>
-                )}
-
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-gray-900 break-words">
-                      {displayEventCode(event.eventCode)}
-                    </p>
-                    <p className="text-sm font-medium text-gray-900 mt-1 break-words">{event.title}</p>
-                    <p className="text-sm text-gray-600 mt-1 break-words">{event.description}</p>
-                  </div>
-                </div>
-
-                <div className="text-xs text-gray-600 flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span>{event.location}</span>
-                  <span className="text-gray-400">|</span>
-                  <span className="font-mono break-all">{event.sourceNode}</span>
-                </div>
-
-                <div>
-                  {renderReviewStatus(event)}
-                </div>
-
-                {reviewView === 'queue' && event.id.startsWith('alert-') && (
-                  <button
-                    type="button"
-                    onClick={(clickEvent) => {
-                      clickEvent.stopPropagation();
-                      void handleQuickResolve(event);
-                    }}
-                    disabled={quickReviewPendingId === event.id}
-                    className="w-full rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs font-medium text-green-700 hover:bg-green-100 disabled:opacity-60"
-                  >
-                    {quickReviewPendingId === event.id ? 'Resolving...' : 'Resolve without opening'}
-                  </button>
-                )}
-              </div>
+      <div>
+        {snapshotGalleryEvents.length > 0 ? (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {snapshotGalleryEvents.map((event) => (
+              <SnapshotGalleryCard
+                key={event.snapshotPath}
+                event={event}
+                highlighted={false}
+                onOpen={(selected) => setSelectedEvent(selected)}
+              />
             ))}
           </div>
-
-          <div className="hidden lg:block overflow-x-auto">
-            <table className="w-full min-w-[860px]">
-              <thead className="bg-gray-50 border-b border-gray-200">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Pick
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Time
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Code
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Event
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Location
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Source Node
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Severity
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Action
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200">
-                {filteredEvents.map((event) => (
-                  <tr key={event.id} className="hover:bg-gray-50 transition-colors">
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
-                      {reviewView === 'queue' && event.id.startsWith('alert-') ? (
-                        <input
-                          type="checkbox"
-                          checked={selectedAlertIds.has(event.id)}
-                          onChange={(e) => toggleAlertSelection(event.id, e.target.checked)}
-                        />
-                      ) : (
-                        '—'
-                      )}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {formatDateTime(event.timestamp)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                      {displayEventCode(event.eventCode)}
-                    </td>
-                    <td className="px-6 py-4">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">{event.title}</p>
-                        <p className="text-sm text-gray-600">{event.description}</p>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{event.location}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-700">
-                      {event.sourceNode}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <StatusBadge severity={event.severity} label={event.severity.toUpperCase()} size="sm" />
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {renderReviewStatus(event)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center gap-3">
-                        {reviewView === 'queue' && event.id.startsWith('alert-') ? (
-                          <button
-                            onClick={() => {
-                              void handleQuickResolve(event);
-                            }}
-                            disabled={quickReviewPendingId === event.id}
-                            className="text-sm font-medium text-green-700 hover:text-green-800 disabled:opacity-60"
-                          >
-                            {quickReviewPendingId === event.id ? 'Resolving...' : 'Resolve'}
-                          </button>
-                        ) : null}
-                      <button
-                        onClick={() => setSelectedEvent(event)}
-                        className="text-sm text-blue-600 hover:text-blue-700 font-medium"
-                      >
-                        View Details
-                      </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        ) : (
+          <div className="rounded-lg border border-gray-200 bg-white py-12 text-center">
+            <p className="text-gray-600">No snapshots found matching your filters.</p>
           </div>
-
-          {filteredEvents.length === 0 && (
-            <div className="text-center py-12">
-              <p className="text-gray-600">No events found matching your filters.</p>
-            </div>
-          )}
-        </div>
-      )}
+        )}
+      </div>
 
       {selectedEvent && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
@@ -1076,21 +789,12 @@ export function EventsAlerts() {
               <div>
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                   <p className="text-sm font-medium text-gray-900">Camera Snapshot</p>
-                  {selectedEvent.snapshotPath ? (
-                    <button
-                      onClick={() => handleViewSnapshotInGallery(selectedEvent)}
-                      className="rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100 transition-colors"
-                    >
-                      View in Snapshot Gallery
-                    </button>
-                  ) : null}
                 </div>
                 <div className="bg-gray-900 aspect-video rounded-lg flex items-center justify-center">
                   {selectedEvent.snapshotPath && !snapshotLoadFailed ? (
-                    <img
-                      src={selectedEvent.snapshotPath}
+                    <SnapshotImageWithOverlay
+                      event={selectedEvent}
                       alt="Event snapshot"
-                      className="w-full h-full object-cover rounded-lg"
                       onError={() => {
                         setSnapshotLoadFailed(true);
                       }}
@@ -1122,102 +826,21 @@ export function EventsAlerts() {
               </div>
 
               <div className="flex flex-wrap gap-3 pt-4 border-t border-gray-200">
-                {!selectedEvent.acknowledged && (
-                  <button
-                    onClick={() => void handleAcknowledge(selectedEvent.id)}
-                    disabled={ackPendingId === selectedEvent.id}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
-                  >
-                    {ackPendingId === selectedEvent.id ? 'Acknowledging...' : 'Acknowledge Alert'}
-                  </button>
-                )}
                 <button
                   onClick={() => handleExportSelectedEvent(selectedEvent)}
-                  className="px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
                 >
+                  <Download className="w-4 h-4" />
                   Export Data
                 </button>
                 <button
                   onClick={handleOpenCameraFeed}
-                  className="px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
                 >
+                  <Camera className="w-4 h-4" />
                   Open Camera Feed
                 </button>
               </div>
-
-              {selectedEvent.id.startsWith('alert-') && (
-                <div className="pt-4 border-t border-gray-200 space-y-3">
-                  <p className="text-sm font-medium text-gray-900">Review Workflow</p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <select
-                      value={reviewStatusDraft}
-                      onChange={(event) =>
-                        setReviewStatusDraft(
-                          event.target.value as
-                            | 'needs_review'
-                            | 'confirmed'
-                            | 'false_positive'
-                            | 'resolved'
-                            | 'archived',
-                        )
-                      }
-                      className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
-                    >
-                      <option value="needs_review">Needs Review</option>
-                      <option value="confirmed">Confirmed</option>
-                      <option value="false_positive">False Positive</option>
-                      <option value="resolved">Resolved</option>
-                      <option value="archived">Archived</option>
-                    </select>
-                    <button
-                      onClick={() => {
-                        void handleSaveReview();
-                      }}
-                      disabled={reviewSaving}
-                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
-                    >
-                      {reviewSaving ? 'Saving...' : 'Save Review'}
-                    </button>
-                  </div>
-                  {reviewFeedback ? <p className="text-xs text-green-700">{reviewFeedback}</p> : null}
-                  {reviewError ? <p className="text-xs text-red-600">{reviewError}</p> : null}
-                  <textarea
-                    value={reviewNoteDraft}
-                    onChange={(event) => setReviewNoteDraft(event.target.value)}
-                    placeholder="Review notes (optional)"
-                    className="w-full min-h-24 rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                  />
-                  <p className="text-xs text-gray-600">
-                    Last reviewed by {selectedEvent.reviewedBy || '—'}{' '}
-                    {selectedEvent.reviewedTs
-                      ? `at ${new Date(selectedEvent.reviewedTs).toLocaleString()}`
-                      : ''}
-                  </p>
-
-                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-                    <p className="text-xs font-semibold text-gray-800">Review History</p>
-                    {reviewHistoryLoading ? (
-                      <p className="mt-2 text-xs text-gray-600">Loading review history...</p>
-                    ) : reviewHistory.length === 0 ? (
-                      <p className="mt-2 text-xs text-gray-600">No review history yet.</p>
-                    ) : (
-                      <div className="mt-2 space-y-2 max-h-36 overflow-y-auto">
-                        {reviewHistory.map((entry) => (
-                          <div key={entry.id} className="rounded-md border border-gray-200 bg-white px-2 py-1.5">
-                            <p className="text-xs text-gray-800">
-                              {formatReviewStatusLabel(entry.previousStatus)} {'->'} {formatReviewStatusLabel(entry.nextStatus)}
-                            </p>
-                            <p className="text-[11px] text-gray-600">
-                              {entry.reviewedBy || 'admin'} at {new Date(entry.reviewedTs).toLocaleString()}
-                            </p>
-                            {entry.note ? <p className="text-[11px] text-gray-700 mt-1">{entry.note}</p> : null}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
             </div>
           </div>
         </div>

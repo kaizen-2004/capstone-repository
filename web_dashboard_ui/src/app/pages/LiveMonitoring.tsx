@@ -29,6 +29,10 @@ function isFreshEvent(timestamp: string, maxAgeSeconds = 90) {
   return ageMs <= maxAgeSeconds * 1000;
 }
 
+function isMobileViewport() {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches;
+}
+
 function buildCameraSrc(path: string | undefined, retryTick: number, faceDebugOverlay: boolean, frameRefreshTick: number) {
   if (!path) {
     return '';
@@ -36,11 +40,11 @@ function buildCameraSrc(path: string | undefined, retryTick: number, faceDebugOv
   const separator = path.includes('?') ? '&' : '?';
   const isStream = path.includes('/camera/stream/');
   if (isStream) {
-    const debugPart = faceDebugOverlay ? '&face_debug=1' : '';
+    const debugPart = faceDebugOverlay ? '&face_debug=1&face_debug_manual=1' : '';
     const fps = faceDebugOverlay ? 8 : 20;
     return `${path}${separator}fps=${fps}${debugPart}&retry_tick=${retryTick}`;
   }
-  const debugPart = faceDebugOverlay ? '&face_debug=1' : '';
+  const debugPart = faceDebugOverlay ? '&face_debug=1&face_debug_manual=1' : '';
   return `${path}${separator}frame_tick=${frameRefreshTick}${debugPart}`;
 }
 
@@ -102,7 +106,6 @@ function CameraPanel({
       }
       if (imageRef.current) {
         imageRef.current.removeAttribute('src');
-        imageRef.current.load();
       }
     };
   }, []);
@@ -229,7 +232,7 @@ export function LiveMonitoring() {
   const [cameraFeeds, setCameraFeeds] = useState<CameraFeed[]>([]);
   const [detectionPipelines, setDetectionPipelines] = useState<DetectionPipeline[]>([]);
   const [frameRefreshTick, setFrameRefreshTick] = useState(() => Date.now());
-  const [faceDebugOverlay, setFaceDebugOverlay] = useState(true);
+  const [faceDebugOverlay, setFaceDebugOverlay] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [expandedFeed, setExpandedFeed] = useState<
@@ -243,6 +246,20 @@ export function LiveMonitoring() {
     }
     return cameraFeeds.some((feed) => (feed.streamPath || '').includes('/camera/frame/'));
   }, [cameraFeeds, expandedFeed]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(max-width: 767px)');
+    const disableOverlayOnMobile = () => {
+      if (mediaQuery.matches) {
+        setFaceDebugOverlay(false);
+      }
+    };
+    disableOverlayOnMobile();
+    mediaQuery.addEventListener('change', disableOverlayOnMobile);
+    return () => {
+      mediaQuery.removeEventListener('change', disableOverlayOnMobile);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -279,7 +296,7 @@ export function LiveMonitoring() {
           setIsLoading(false);
           timer = window.setTimeout(() => {
             void load();
-          }, 12000);
+          }, 2000);
         }
         controller = null;
       }
@@ -336,6 +353,11 @@ export function LiveMonitoring() {
   const expandedFrameSrc = expandedCanLoadStream
     ? buildCameraSrc(expandedFeed?.streamPath, expandedRetryTick, faceDebugOverlay, frameRefreshTick)
     : '';
+  const mobileViewport = isMobileViewport();
+
+  useEffect(() => {
+    setFaceDebugOverlay(false);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -345,7 +367,6 @@ export function LiveMonitoring() {
       }
       if (expandedImageRef.current) {
         expandedImageRef.current.removeAttribute('src');
-        expandedImageRef.current.load();
       }
     };
   }, []);
@@ -357,10 +378,6 @@ export function LiveMonitoring() {
     if (expandedRetryTimerRef.current !== null) {
       window.clearTimeout(expandedRetryTimerRef.current);
       expandedRetryTimerRef.current = null;
-    }
-    if (expandedImageRef.current) {
-      expandedImageRef.current.removeAttribute('src');
-      expandedImageRef.current.load();
     }
   }, [expandedFeed?.nodeId, expandedFeed?.streamPath]);
 
@@ -383,15 +400,20 @@ export function LiveMonitoring() {
           </span>
           <button
             onClick={() => {
+              if (mobileViewport) {
+                setFaceDebugOverlay(false);
+                return;
+              }
               setFaceDebugOverlay((prev) => !prev);
             }}
             className={`inline-flex items-center rounded-full border px-2.5 py-1 font-medium transition-colors ${
-              faceDebugOverlay
+              faceDebugOverlay && !mobileViewport
                 ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
                 : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
             }`}
           >
-            Face Overlay: {faceDebugOverlay ? 'ON' : 'OFF'}
+            Face Overlay: {faceDebugOverlay && !mobileViewport ? 'ON' : 'OFF'}
+            {mobileViewport ? ' (mobile)' : ''}
           </button>
         </div>
       </div>

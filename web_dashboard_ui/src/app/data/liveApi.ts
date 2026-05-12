@@ -163,7 +163,6 @@ export interface MobileBootstrapPayload {
   route: string;
   lanBaseUrl: string;
   tailscaleBaseUrl: string;
-  mdnsBaseUrl: string;
   preferredBaseUrl: string;
   networkModes: MobileNetworkMode[];
   pushAvailable: boolean;
@@ -176,24 +175,10 @@ export interface RemoteAccessLinksPayload {
   preferredUrl: string;
   tailscaleUrl: string;
   lanUrl: string;
-  mdnsUrl: string;
   route: string;
   hostLabel: string;
   port: number;
   fingerprint: string;
-}
-
-export interface MdnsStatusPayload {
-  ok: boolean;
-  enabled: boolean;
-  available: boolean;
-  published: boolean;
-  serviceName: string;
-  hostname: string;
-  port: number;
-  boundIp: string;
-  mdnsBaseUrl: string;
-  detail: string;
 }
 
 export interface MobileDeviceRegistrationPayload {
@@ -294,6 +279,7 @@ function mapFaceOverlay(raw: Json): FaceOverlay | null {
 
   return {
     bbox: [bboxNumbers[0], bboxNumbers[1], bboxNumbers[2], bboxNumbers[3]],
+    kind: raw.kind == null ? undefined : String(raw.kind),
     classification: String(raw.classification ?? ''),
     confidence: raw.confidence == null ? undefined : toFloat(raw.confidence),
     label: String(raw.label ?? ''),
@@ -312,7 +298,9 @@ function mapAlert(raw: Json, kind: 'alert' | 'event' = 'event'): Alert {
   const snapshotPath = snapshotPathRaw
     ? (snapshotPathRaw.startsWith('/') ? snapshotPathRaw : `/${snapshotPathRaw}`)
     : undefined;
-  const faceOverlaysRaw = Array.isArray(raw.face_overlays) ? raw.face_overlays : [];
+  const faceOverlaysRaw = Array.isArray(raw.snapshot_overlays)
+    ? raw.snapshot_overlays
+    : (Array.isArray(raw.face_overlays) ? raw.face_overlays : []);
   const faceOverlays = faceOverlaysRaw
     .map((item) => mapFaceOverlay((item as Json) || {}))
     .filter((item): item is FaceOverlay => item !== null);
@@ -653,6 +641,36 @@ export async function fetchDailyStats(days = 7, signal?: AbortSignal): Promise<D
   return statsRaw.map((row) => mapDailyStat(row as Json));
 }
 
+export async function fetchDailySummaryReport(reportDate: string): Promise<Blob> {
+  const params = new URLSearchParams();
+  const normalizedDate = reportDate.trim();
+  if (normalizedDate) {
+    params.set('date', normalizedDate);
+  }
+  const url = `/api/reports/daily-summary${params.toString() ? `?${params.toString()}` : ''}`;
+  const response = await fetch(url, { credentials: 'include' });
+  if (!response.ok) {
+    let message = `Report export failed (${response.status}).`;
+    try {
+      const payload = (await response.json()) as Json;
+      message = String(payload.detail ?? payload.error ?? message);
+    } catch {
+      // Keep the generic message when the server did not return JSON.
+    }
+    if (response.status === 401 && shouldEmitAuthExpired(url)) {
+      const authError = new AuthExpiredError(message || 'Session expired. Please sign in again.');
+      window.dispatchEvent(
+        new CustomEvent(AUTH_EXPIRED_EVENT, {
+          detail: { message: authError.message },
+        }),
+      );
+      throw authError;
+    }
+    throw new Error(message);
+  }
+  return response.blob();
+}
+
 export async function fetchSettingsLive(): Promise<LiveSettingsPayload> {
   const payload = await fetchJson<Json>('/api/ui/settings/live');
   const profilesRaw = Array.isArray(payload.authorized_profiles) ? payload.authorized_profiles : [];
@@ -892,7 +910,6 @@ export async function fetchMobileBootstrap(): Promise<MobileBootstrapPayload> {
     route: String(payload.route ?? '/dashboard/remote/mobile'),
     lanBaseUrl: String(payload.lan_base_url ?? payload.lanBaseUrl ?? ''),
     tailscaleBaseUrl: String(payload.tailscale_base_url ?? payload.tailscaleBaseUrl ?? ''),
-    mdnsBaseUrl: String(payload.mdns_base_url ?? payload.mdnsBaseUrl ?? ''),
     preferredBaseUrl: String(payload.preferred_base_url ?? payload.preferredBaseUrl ?? ''),
     networkModes: modes.length > 0 ? modes : ['auto', 'lan', 'tailscale'],
     pushAvailable: Boolean(payload.push_available ?? payload.pushAvailable),
@@ -965,26 +982,9 @@ export async function fetchRemoteAccessLinks(): Promise<RemoteAccessLinksPayload
     preferredUrl: String(payload.preferred_url ?? payload.preferredUrl ?? ''),
     tailscaleUrl: String(payload.tailscale_url ?? payload.tailscaleUrl ?? ''),
     lanUrl: String(payload.lan_url ?? payload.lanUrl ?? ''),
-    mdnsUrl: String(payload.mdns_url ?? payload.mdnsUrl ?? ''),
     route: String(payload.route ?? '/dashboard/remote/mobile'),
     hostLabel: String(payload.host_label ?? payload.hostLabel ?? ''),
     port: toInt(payload.port, 0),
     fingerprint: String(payload.fingerprint ?? ''),
-  };
-}
-
-export async function fetchMdnsStatus(): Promise<MdnsStatusPayload> {
-  const payload = await fetchJson<Json>('/api/integrations/mdns/status');
-  return {
-    ok: Boolean(payload.ok),
-    enabled: Boolean(payload.enabled),
-    available: Boolean(payload.available),
-    published: Boolean(payload.published),
-    serviceName: String(payload.service_name ?? payload.serviceName ?? ''),
-    hostname: String(payload.hostname ?? ''),
-    port: toInt(payload.port, 0),
-    boundIp: String(payload.bound_ip ?? payload.boundIp ?? ''),
-    mdnsBaseUrl: String(payload.mdns_base_url ?? payload.mdnsBaseUrl ?? ''),
-    detail: String(payload.detail ?? ''),
   };
 }
