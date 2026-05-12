@@ -62,12 +62,17 @@ static const uint32_t PROVISIONING_SUCCESS_HOLD_MS = 30000;
 static const uint32_t PROVISIONING_CONNECT_DELAY_MS = 1500;
 
 static const int MQ2_ADC_PIN = 0;
+static const int PHOTO_ALARM_PIN = 1;
 static const int BUZZER_PIN = 10;
 static const int ADC_RESOLUTION = 4095;
 static const float ESP32_ADC_MAX_VOLTAGE = 3.3f;
 static const float DIVIDER_MULTIPLIER = 1.5f;
 static const int MQ2_ADC_SAMPLES = 10;
 static const uint32_t MQ2_ADC_SAMPLE_DELAY_MS = 2;
+static const uint8_t PHOTO_ALARM_PULSES = 3;
+static const uint32_t PHOTO_ALARM_PULSE_WINDOW_MS = 10000;
+static const uint32_t PHOTO_ALARM_HOLD_LOW_MS = 1200;
+static const uint32_t PHOTO_ALARM_CLEAR_MS = 30000;
 static const int SMOKE_WARNING_THRESHOLD = 80;
 static const int SMOKE_HIGH_THRESHOLD = 120;
 static const uint8_t MQ2_CLEAR_CONFIRM_SAMPLES = 5;
@@ -89,6 +94,13 @@ struct Mq2Reading {
   int maxRaw;
   float espVoltage;
   float mq2A0Voltage;
+};
+
+struct PhotoAlarmReading {
+  bool activeLow;
+  bool pulse;
+  uint8_t pulseCount;
+  bool alarmActive;
 };
 
 static const char* PROVISIONING_AP_PREFIX = "Thesis-Setup";
@@ -151,10 +163,16 @@ bool hasPreferredWiFiBssid = false;
 bool smokeLatched = false;
 bool buzzerOutputHigh = false;
 uint8_t smokeClearConfirmCount = 0;
+bool photoAlarmWasLow = false;
+bool photoAlarmActive = false;
 uint8_t preferredWiFiBssid[6] = {0, 0, 0, 0, 0, 0};
 int32_t preferredWiFiChannel = 0;
 uint32_t sensorWarmupUntilMs = 0;
 uint32_t lastBuzzerToggleMs = 0;
+uint32_t photoAlarmWindowStartedMs = 0;
+uint32_t photoAlarmLowStartedMs = 0;
+uint32_t lastPhotoAlarmActivityMs = 0;
+uint8_t photoAlarmPulseCount = 0;
 String setupApSsid;
 SmokeStatus currentSmokeStatus = SMOKE_STATUS_NORMAL;
 SmokeStatus buzzerPatternStatus = SMOKE_STATUS_NORMAL;
@@ -1233,6 +1251,63 @@ SmokeStatus classifyMq2Reading(int raw) {
   return SMOKE_STATUS_NORMAL;
 }
 
+PhotoAlarmReading updatePhotoAlarm(uint32_t now) {
+  bool activeLow = digitalRead(PHOTO_ALARM_PIN) == LOW;
+  bool pulse = activeLow && !photoAlarmWasLow;
+
+  if (activeLow) {
+    if (photoAlarmLowStartedMs == 0) {
+      photoAlarmLowStartedMs = now;
+    }
+    lastPhotoAlarmActivityMs = now;
+  } else {
+    photoAlarmLowStartedMs = 0;
+  }
+
+  if (pulse) {
+    if (!photoAlarmActive &&
+        (photoAlarmWindowStartedMs == 0 ||
+         (uint32_t)(now - photoAlarmWindowStartedMs) > PHOTO_ALARM_PULSE_WINDOW_MS)) {
+      photoAlarmWindowStartedMs = now;
+      photoAlarmPulseCount = 0;
+    }
+    if (photoAlarmPulseCount < 255) {
+      photoAlarmPulseCount++;
+    }
+    if (photoAlarmPulseCount >= PHOTO_ALARM_PULSES) {
+      photoAlarmActive = true;
+    }
+  }
+
+  bool heldLow = activeLow && photoAlarmLowStartedMs != 0 &&
+                 (uint32_t)(now - photoAlarmLowStartedMs) >= PHOTO_ALARM_HOLD_LOW_MS;
+  if (heldLow) {
+    photoAlarmActive = true;
+  }
+
+  if (!photoAlarmActive && photoAlarmWindowStartedMs != 0 &&
+      (uint32_t)(now - photoAlarmWindowStartedMs) > PHOTO_ALARM_PULSE_WINDOW_MS) {
+    photoAlarmWindowStartedMs = 0;
+    photoAlarmPulseCount = 0;
+  }
+
+  if (photoAlarmActive && lastPhotoAlarmActivityMs != 0 &&
+      (uint32_t)(now - lastPhotoAlarmActivityMs) >= PHOTO_ALARM_CLEAR_MS) {
+    photoAlarmActive = false;
+    photoAlarmWindowStartedMs = 0;
+    photoAlarmPulseCount = 0;
+  }
+
+  photoAlarmWasLow = activeLow;
+
+  PhotoAlarmReading result;
+  result.activeLow = activeLow;
+  result.pulse = pulse;
+  result.pulseCount = photoAlarmPulseCount;
+  result.alarmActive = photoAlarmActive;
+  return result;
+}
+
 const char* smokeStatusText(SmokeStatus status) {
   switch (status) {
     case SMOKE_STATUS_HIGH:
@@ -1311,11 +1386,13 @@ void setup() {
 
   analogReadResolution(12);
   analogSetPinAttenuation(MQ2_ADC_PIN, ADC_11db);
+  pinMode(PHOTO_ALARM_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
   sensorWarmupUntilMs = millis() + MQ2_WARMUP_MS;
-  Serial.printf("[SENSOR] mq2 pin=%d buzzer_pin=%d warning=%d high=%d warmup_ms=%lu\n",
+  Serial.printf("[SENSOR] mq2_pin=%d photo_alarm_pin=%d buzzer_pin=%d warning=%d high=%d warmup_ms=%lu\n",
                 MQ2_ADC_PIN,
+                PHOTO_ALARM_PIN,
                 BUZZER_PIN,
                 SMOKE_WARNING_THRESHOLD,
                 SMOKE_HIGH_THRESHOLD,
@@ -1332,6 +1409,9 @@ void setup() {
 }
 
 void loop() {
+  uint32_t now = millis();
+  PhotoAlarmReading photoReading = updatePhotoAlarm(now);
+
   updateBuzzer();
 
   if (!setupApActive && !hasRuntimeWiFiConfig()) {
@@ -1357,7 +1437,6 @@ void loop() {
   handleWiFiStateChange();
 
   if (WiFi.status() != WL_CONNECTED) {
-    uint32_t now = millis();
     if ((uint32_t)(now - lastWiFiStatusLogMs) >= 2000) {
       Serial.printf("[WiFi] waiting status=%s attempt=%u\n",
                     wifiStatusText(WiFi.status()),
@@ -1367,8 +1446,6 @@ void loop() {
     delay(20);
     return;
   }
-
-  uint32_t now = millis();
 
   if (backendEnabled() && !registrationOk &&
       (uint32_t)(now - lastRegisterAttemptMs) >= REGISTER_RETRY_INTERVAL_MS) {
@@ -1384,14 +1461,21 @@ void loop() {
     Mq2Reading reading = readMq2();
     int raw = reading.avgRaw;
     float normalized = normalizeMq2Raw(raw);
-    SmokeStatus status = classifyMq2Reading(raw);
+    SmokeStatus mq2Status = classifyMq2Reading(raw);
+    SmokeStatus status = photoReading.alarmActive ? SMOKE_STATUS_HIGH : mq2Status;
+    float eventValue = photoReading.alarmActive && mq2Status != SMOKE_STATUS_HIGH ? 1.0f : normalized;
 
-    Serial.printf("[SENSOR] raw_avg=%d min=%d max=%d esp_v=%.3f mq2_a0_v=%.3f status=%s%s\n",
+    Serial.printf("[SENSOR] raw_avg=%d min=%d max=%d esp_v=%.3f mq2_a0_v=%.3f mq2_status=%s photo_low=%d photo_pulse=%d photo_pulses=%u photo_alarm=%d status=%s%s\n",
                   reading.avgRaw,
                   reading.minRaw,
                   reading.maxRaw,
                   reading.espVoltage,
                   reading.mq2A0Voltage,
+                  smokeStatusText(mq2Status),
+                  photoReading.activeLow ? 1 : 0,
+                  photoReading.pulse ? 1 : 0,
+                  static_cast<unsigned>(photoReading.pulseCount),
+                  photoReading.alarmActive ? 1 : 0,
                   smokeStatusText(status),
                   (int32_t)(now - sensorWarmupUntilMs) < 0 ? " warmup" : "");
 
@@ -1421,7 +1505,7 @@ void loop() {
             (uint32_t)(now - lastSmokeEventAttemptMs) >= SMOKE_EVENT_RETRY_INTERVAL_MS) {
           const char* eventCode = status == SMOKE_STATUS_HIGH ? "SMOKE_HIGH" : "SMOKE_WARNING";
           lastSmokeEventAttemptMs = now;
-          if (sendSmokeEvent(normalized, eventCode)) {
+          if (sendSmokeEvent(eventValue, eventCode)) {
             smokeLatched = true;
             notifiedSmokeStatus = status;
             currentSmokeStatus = status;

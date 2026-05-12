@@ -64,9 +64,14 @@ static const uint32_t PROVISIONING_SUCCESS_HOLD_MS = 30000;
 static const uint32_t PROVISIONING_CONNECT_DELAY_MS = 1500;
 static const uint32_t MIN_FORCE_EVENT_GAP_MS = 10000;
 static const uint32_t IMU_REINIT_INTERVAL_MS = 5000;
+static const uint32_t DOOR_REED_DEBOUNCE_MS = 50;
+static const uint32_t DOOR_OPEN_FORCE_GRACE_MS = 500;
+static const uint32_t DOOR_STATE_REPORT_RETRY_MS = 5000;
 
 static const int I2C_SDA_PIN = 8;
 static const int I2C_SCL_PIN = 9;
+static const int DOOR_REED_PIN = 4;
+static const int DOOR_REED_CLOSED_LEVEL = LOW;
 
 static const uint16_t CALIBRATION_SAMPLES = 100;
 static const uint8_t FORCE_CONFIRM_SAMPLES = 2;
@@ -147,6 +152,11 @@ bool provisioningServerStarted = false;
 bool hasPreferredWiFiBssid = false;
 bool imuReady = false;
 bool calibrated = false;
+bool doorStateInitialized = false;
+bool doorRawClosed = false;
+bool doorStableClosed = false;
+bool doorStateReportPending = false;
+bool doorStateEverReported = false;
 uint8_t preferredWiFiBssid[6] = {0, 0, 0, 0, 0, 0};
 uint8_t imuAddress = 0;
 uint8_t forceConfirmCount = 0;
@@ -156,7 +166,11 @@ float baselineMagG = 1.0f;
 float calibrationSumMagG = 0.0f;
 uint32_t lastImuInitAttemptMs = 0;
 uint32_t lastForceEventMs = 0;
+uint32_t doorRawChangedMs = 0;
+uint32_t doorOpenedAtMs = 0;
+uint32_t lastDoorStateReportAttemptMs = 0;
 String setupApSsid;
+const char* doorStateReportReason = "initial";
 
 WebServer provisioningServer(80);
 DNSServer provisioningDnsServer;
@@ -1259,19 +1273,125 @@ void sendHeartbeat() {
   postJson(endpoint("/api/devices/heartbeat"), body);
 }
 
-void sendDoorEvent(float spike, const char* eventCode) {
+const char* doorStateText(bool closed) {
+  return closed ? "closed" : "open";
+}
+
+bool readDoorClosedRaw() {
+  return digitalRead(DOOR_REED_PIN) == DOOR_REED_CLOSED_LEVEL;
+}
+
+void queueDoorStateReport(const char* reason) {
+  doorStateReportPending = true;
+  lastDoorStateReportAttemptMs = 0;
+  doorStateReportReason = reason != nullptr ? reason : "state";
+}
+
+void initDoorReedSwitch() {
+  pinMode(DOOR_REED_PIN, INPUT_PULLUP);
+  uint32_t now = millis();
+  bool closed = readDoorClosedRaw();
+  doorRawClosed = closed;
+  doorStableClosed = closed;
+  doorRawChangedMs = now;
+  doorOpenedAtMs = closed ? 0 : now;
+  doorStateInitialized = true;
+  queueDoorStateReport("initial");
+  Serial.printf("[DOOR] reed pin=%d state=%s\n", DOOR_REED_PIN, doorStateText(closed));
+}
+
+bool sendDoorStateEvent(bool closed, const char* reason) {
   if (!backendEnabled()) {
-    return;
+    return false;
   }
+  const char* eventCode = closed ? "DOOR_CLOSED" : "DOOR_OPEN";
+  const char* state = doorStateText(closed);
   String body = String("{") +
-                "\"node_id\":\"" + runtimeNodeId + "\"," +
+                "\"node_id\":\"" + jsonEscape(runtimeNodeId) + "\"," +
                 "\"event\":\"" + eventCode + "\"," +
-                "\"location\":\"" + runtimeNodeLocation + "\"," +
-                "\"value\":" + String(spike, 3) + "}";
+                "\"location\":\"" + jsonEscape(runtimeNodeLocation) + "\"," +
+                "\"value\":" + String(closed ? 0.0f : 1.0f, 1) + "," +
+                "\"details\":{" +
+                "\"sensor\":\"magnetic_reed_switch\"," +
+                "\"door_state\":\"" + state + "\"," +
+                "\"reason\":\"" + jsonEscape(String(reason != nullptr ? reason : "state")) + "\"" +
+                "}}";
   bool ok = postJson(endpoint("/api/sensors/event"), body);
   if (ok) {
-    Serial.printf("[HTTP] event=%s value=%.3f\n", eventCode, spike);
+    Serial.printf("[HTTP] event=%s door_state=%s\n", eventCode, state);
   }
+  return ok;
+}
+
+void updateDoorState(uint32_t now) {
+  if (!doorStateInitialized) {
+    return;
+  }
+
+  bool rawClosed = readDoorClosedRaw();
+  if (rawClosed != doorRawClosed) {
+    doorRawClosed = rawClosed;
+    doorRawChangedMs = now;
+  }
+
+  if (rawClosed != doorStableClosed &&
+      (uint32_t)(now - doorRawChangedMs) >= DOOR_REED_DEBOUNCE_MS) {
+    doorStableClosed = rawClosed;
+    if (!doorStableClosed) {
+      doorOpenedAtMs = now;
+    }
+    forceConfirmCount = 0;
+    queueDoorStateReport("change");
+    Serial.printf("[DOOR] state=%s\n", doorStateText(doorStableClosed));
+  }
+
+  if (WiFi.status() != WL_CONNECTED || !doorStateReportPending) {
+    return;
+  }
+  if (lastDoorStateReportAttemptMs != 0 &&
+      (uint32_t)(now - lastDoorStateReportAttemptMs) < DOOR_STATE_REPORT_RETRY_MS) {
+    return;
+  }
+
+  lastDoorStateReportAttemptMs = now;
+  if (sendDoorStateEvent(doorStableClosed, doorStateReportReason)) {
+    doorStateReportPending = false;
+    doorStateEverReported = true;
+  }
+}
+
+bool doorAllowsForceEvent(uint32_t now) {
+  if (doorStableClosed) {
+    return true;
+  }
+  return doorOpenedAtMs != 0 &&
+         (uint32_t)(now - doorOpenedAtMs) <= DOOR_OPEN_FORCE_GRACE_MS;
+}
+
+bool sendDoorForceEvent(float score, float delta, float gyro, float mag) {
+  if (!backendEnabled()) {
+    return false;
+  }
+  const char* eventCode = "DOOR_FORCE";
+  const char* state = doorStateText(doorStableClosed);
+  String body = String("{") +
+                "\"node_id\":\"" + jsonEscape(runtimeNodeId) + "\"," +
+                "\"event\":\"" + eventCode + "\"," +
+                "\"location\":\"" + jsonEscape(runtimeNodeLocation) + "\"," +
+                "\"value\":" + String(score, 3) + "," +
+                "\"details\":{" +
+                "\"sensor\":\"lsm6ds3\"," +
+                "\"door_state\":\"" + state + "\"," +
+                "\"score\":" + String(score, 3) + "," +
+                "\"delta_g\":" + String(delta, 3) + "," +
+                "\"gyro_max_dps\":" + String(gyro, 1) + "," +
+                "\"accel_mag_g\":" + String(mag, 3) +
+                "}}";
+  bool ok = postJson(endpoint("/api/sensors/event"), body);
+  if (ok) {
+    Serial.printf("[HTTP] event=%s value=%.3f door_state=%s\n", eventCode, score, state);
+  }
+  return ok;
 }
 
 void handleWiFiStateChange() {
@@ -1286,6 +1406,7 @@ void handleWiFiStateChange() {
     Serial.printf("[WiFi] got ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(),
                   WiFi.RSSI());
     sendRegister();
+    queueDoorStateReport(doorStateEverReported ? "reconnect" : "initial");
   } else if (!connected && wasWiFiConnected) {
     Serial.println("[WiFi] disconnected");
     registrationOk = false;
@@ -1304,12 +1425,14 @@ void setup() {
 
   WiFi.onEvent(onWiFiEvent);
   loadRuntimeConfigFromStorage();
+  initDoorReedSwitch();
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, 400000);
-  Serial.printf("[BOOT] node=%s room=%s sda=%d scl=%d\n",
+  Serial.printf("[BOOT] node=%s room=%s sda=%d scl=%d reed=%d\n",
                 runtimeNodeId.c_str(),
                 runtimeNodeLocation.c_str(),
                 I2C_SDA_PIN,
-                I2C_SCL_PIN);
+                I2C_SCL_PIN,
+                DOOR_REED_PIN);
 
   if (hasRuntimeWiFiConfig()) {
     connectWiFiBlocking();
@@ -1346,8 +1469,10 @@ void loop() {
 
   initImuIfNeeded();
 
+  uint32_t now = millis();
+  updateDoorState(now);
+
   if (WiFi.status() != WL_CONNECTED) {
-    uint32_t now = millis();
     if ((uint32_t)(now - lastWiFiStatusLogMs) >= 2000) {
       Serial.printf("[WiFi] waiting status=%s attempt=%u\n",
                     wifiStatusText(WiFi.status()),
@@ -1357,8 +1482,6 @@ void loop() {
     delay(20);
     return;
   }
-
-  uint32_t now = millis();
 
   if (backendEnabled() && !registrationOk &&
       (uint32_t)(now - lastRegisterAttemptMs) >= REGISTER_RETRY_INTERVAL_MS) {
@@ -1388,7 +1511,9 @@ void loop() {
         }
       } else {
         float delta = fabsf(mag - baselineMagG);
-        bool triggered = (delta >= ACCEL_DELTA_THRESHOLD_G) || (gyro >= GYRO_THRESHOLD_DPS);
+        bool triggered = doorAllowsForceEvent(now) &&
+                         ((delta >= ACCEL_DELTA_THRESHOLD_G) ||
+                          (gyro >= GYRO_THRESHOLD_DPS));
 
         if (triggered) {
           if (forceConfirmCount < 255) {
@@ -1406,10 +1531,14 @@ void loop() {
             (uint32_t)(now - lastForceEventMs) >= MIN_FORCE_EVENT_GAP_MS) {
           float score = max(delta / max(ACCEL_DELTA_THRESHOLD_G, 0.01f),
                             gyro / max(GYRO_THRESHOLD_DPS, 1.0f));
-          sendDoorEvent(score, "DOOR_FORCE");
+          sendDoorForceEvent(score, delta, gyro, mag);
           lastForceEventMs = now;
           forceConfirmCount = 0;
-          Serial.printf("[FORCE] score=%.3f delta=%.3f gyro=%.1f\n", score, delta, gyro);
+          Serial.printf("[FORCE] score=%.3f delta=%.3f gyro=%.1f door_state=%s\n",
+                        score,
+                        delta,
+                        gyro,
+                        doorStateText(doorStableClosed));
         }
       }
     }
