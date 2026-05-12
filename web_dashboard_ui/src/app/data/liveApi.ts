@@ -371,7 +371,12 @@ function mapCameraFeed(raw: Json): CameraFeed {
     fps: toInt(raw.fps),
     latencyMs: toInt(raw.latency_ms ?? raw.latencyMs),
     streamPath: String(raw.stream_path ?? raw.streamPath ?? ''),
+    framePath: String(raw.frame_path ?? raw.framePath ?? ''),
+    previewMode: String(raw.preview_mode ?? raw.previewMode ?? ''),
     streamAvailable: Boolean(raw.stream_available ?? raw.streamAvailable),
+    frameWidth: toInt(raw.frame_width ?? raw.frameWidth),
+    frameHeight: toInt(raw.frame_height ?? raw.frameHeight),
+    frameAgeMs: raw.frame_age_ms == null && raw.frameAgeMs == null ? null : toInt(raw.frame_age_ms ?? raw.frameAgeMs),
   };
 }
 

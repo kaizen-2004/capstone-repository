@@ -8,6 +8,7 @@ type ExpandedCameraFeed = {
   location: Room;
   nodeId: string;
   streamPath?: string;
+  framePath?: string;
   status: CameraFeed['status'];
   streamAvailable?: boolean;
 };
@@ -33,6 +34,10 @@ function isMobileViewport() {
   return typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches;
 }
 
+function isFirefoxBrowser() {
+  return typeof navigator !== 'undefined' && /firefox/i.test(navigator.userAgent);
+}
+
 function buildCameraSrc(path: string | undefined, retryTick: number, faceDebugOverlay: boolean, frameRefreshTick: number) {
   if (!path) {
     return '';
@@ -42,33 +47,37 @@ function buildCameraSrc(path: string | undefined, retryTick: number, faceDebugOv
   if (isStream) {
     const debugPart = faceDebugOverlay ? '&face_debug=1&face_debug_manual=1' : '';
     const fps = faceDebugOverlay ? 8 : 20;
-    return `${path}${separator}fps=${fps}${debugPart}&retry_tick=${retryTick}`;
+    return `${path}${separator}fps=${fps}&max_width=1280&quality=75${debugPart}&retry_tick=${retryTick}`;
   }
   const debugPart = faceDebugOverlay ? '&face_debug=1&face_debug_manual=1' : '';
-  return `${path}${separator}frame_tick=${frameRefreshTick}${debugPart}`;
+  return `${path}${separator}max_width=1280&quality=75&frame_tick=${frameRefreshTick}${debugPart}`;
 }
 
 function CameraPanel({
   location,
   nodeId,
   streamPath,
+  framePath,
   status,
   streamAvailable,
   roomEvents,
   nodeEvents,
   faceDebugOverlay,
   frameRefreshTick,
+  useFramePollingFallback,
   onExpand,
 }: {
   location: Room;
   nodeId: string;
   streamPath?: string;
+  framePath?: string;
   status: CameraFeed['status'];
   streamAvailable?: boolean;
   roomEvents: Alert[];
   nodeEvents: Alert[];
   faceDebugOverlay: boolean;
   frameRefreshTick: number;
+  useFramePollingFallback: boolean;
   onExpand: (feed: ExpandedCameraFeed) => void;
 }) {
   const [streamRetryTick, setStreamRetryTick] = useState(0);
@@ -77,7 +86,8 @@ function CameraPanel({
   const retryTimerRef = useRef<number | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const isOnline = status === 'online';
-  const canLoadStream = isOnline && Boolean(streamPath) && streamAvailable !== false;
+  const activePreviewPath = useFramePollingFallback && framePath ? framePath : streamPath;
+  const canLoadStream = isOnline && Boolean(activePreviewPath) && streamAvailable !== false;
   const latestFaceEvent = nodeEvents.find(
     (event) => event.eventCode === 'UNKNOWN' || event.eventCode === 'AUTHORIZED',
   );
@@ -95,7 +105,7 @@ function CameraPanel({
   const flameLabel = hasFreshFlame ? 'Flame: DETECTED' : 'Flame: IDLE';
   const flameSeverity: 'warning' | 'info' = hasFreshFlame ? 'warning' : 'info';
   const frameSrc = canLoadStream
-    ? buildCameraSrc(streamPath, streamRetryTick, faceDebugOverlay, frameRefreshTick)
+    ? buildCameraSrc(activePreviewPath, streamRetryTick, faceDebugOverlay, frameRefreshTick)
     : '';
 
   useEffect(() => {
@@ -165,7 +175,7 @@ function CameraPanel({
 
         <button
           onClick={() => {
-            onExpand({ location, nodeId, streamPath, status, streamAvailable });
+            onExpand({ location, nodeId, streamPath, framePath, status, streamAvailable });
           }}
           className="action-cta absolute bottom-3 right-3 p-2 rounded-lg"
           title="Expand Preview"
@@ -235,17 +245,22 @@ export function LiveMonitoring() {
   const [faceDebugOverlay, setFaceDebugOverlay] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
-  const [expandedFeed, setExpandedFeed] = useState<
-    { location: Room; nodeId: string; streamPath?: string; status: CameraFeed['status']; streamAvailable?: boolean } | null
-  >(null);
+  const [expandedFeed, setExpandedFeed] = useState<ExpandedCameraFeed | null>(null);
+  const useFramePollingFallback = isFirefoxBrowser();
   const onlineFeedCount = cameraFeeds.filter((feed) => feed.status === 'online').length;
   const offlineFeedCount = cameraFeeds.filter((feed) => feed.status !== 'online').length;
   const needsFramePolling = useMemo(() => {
-    if ((expandedFeed?.streamPath || '').includes('/camera/frame/')) {
+    const expandedPath = useFramePollingFallback && expandedFeed?.framePath
+      ? expandedFeed.framePath
+      : expandedFeed?.streamPath;
+    if ((expandedPath || '').includes('/camera/frame/')) {
       return true;
     }
-    return cameraFeeds.some((feed) => (feed.streamPath || '').includes('/camera/frame/'));
-  }, [cameraFeeds, expandedFeed]);
+    return cameraFeeds.some((feed) => {
+      const previewPath = useFramePollingFallback && feed.framePath ? feed.framePath : feed.streamPath;
+      return (previewPath || '').includes('/camera/frame/');
+    });
+  }, [cameraFeeds, expandedFeed, useFramePollingFallback]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 767px)');
@@ -319,7 +334,7 @@ export function LiveMonitoring() {
     }
     const timer = window.setInterval(() => {
       setFrameRefreshTick(Date.now());
-    }, 800);
+    }, 250);
     return () => {
       window.clearInterval(timer);
     };
@@ -350,8 +365,11 @@ export function LiveMonitoring() {
   const expandedCanLoadStream = Boolean(
     expandedFeed && expandedFeed.status === 'online' && expandedFeed.streamAvailable !== false,
   );
+  const expandedPreviewPath = useFramePollingFallback && expandedFeed?.framePath
+    ? expandedFeed.framePath
+    : expandedFeed?.streamPath;
   const expandedFrameSrc = expandedCanLoadStream
-    ? buildCameraSrc(expandedFeed?.streamPath, expandedRetryTick, faceDebugOverlay, frameRefreshTick)
+    ? buildCameraSrc(expandedPreviewPath, expandedRetryTick, faceDebugOverlay, frameRefreshTick)
     : '';
   const mobileViewport = isMobileViewport();
 
@@ -379,7 +397,7 @@ export function LiveMonitoring() {
       window.clearTimeout(expandedRetryTimerRef.current);
       expandedRetryTimerRef.current = null;
     }
-  }, [expandedFeed?.nodeId, expandedFeed?.streamPath]);
+  }, [expandedFeed?.nodeId, expandedFeed?.streamPath, expandedFeed?.framePath]);
 
   return (
     <div className="p-3 md:p-8 space-y-5 md:space-y-7">
@@ -437,12 +455,14 @@ export function LiveMonitoring() {
               location={feed.location}
               nodeId={feed.nodeId}
               streamPath={feed.streamPath || ''}
+              framePath={feed.framePath || ''}
               streamAvailable={feed.streamAvailable}
               status={feed.status}
               roomEvents={(eventsByRoom[String(feed.location)] || []).slice(0, 5)}
               nodeEvents={events.filter((event) => event.sourceNode === feed.nodeId)}
               faceDebugOverlay={faceDebugOverlay}
               frameRefreshTick={frameRefreshTick}
+              useFramePollingFallback={useFramePollingFallback}
               onExpand={setExpandedFeed}
             />
           ))

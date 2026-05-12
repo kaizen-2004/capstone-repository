@@ -320,9 +320,6 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("camera stream override unavailable in webcam mode")
 
         clean_url = stream_url.strip()
-        if not clean_url:
-            raise ValueError("stream_url is required")
-
         setting_key = _camera_stream_setting_key(normalized_node)
         if not setting_key:
             raise ValueError("unsupported camera node")
@@ -621,7 +618,7 @@ if __name__ == "__main__":
     load_env_file()
     uvicorn.run(
         "backend.app.main:app",
-        host=os.environ.get("BACKEND_HOST", "127.0.0.1"),
+        host=os.environ.get("BACKEND_HOST", "0.0.0.0"),
         port=int(os.environ.get("BACKEND_PORT", "8765")),
         reload=False,
     )

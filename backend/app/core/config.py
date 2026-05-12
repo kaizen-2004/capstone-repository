@@ -202,7 +202,7 @@ def load_settings() -> Settings:
         camera_door_rtsp=os.environ.get("CAMERA_DOOR_RTSP", "").strip(),
         camera_indoor_webcam_index=_env_int("CAMERA_INDOOR_WEBCAM_INDEX", 0, 0, 20),
         camera_door_webcam_index=_env_int("CAMERA_DOOR_WEBCAM_INDEX", 1, 0, 20),
-        camera_processing_fps=_env_int("CAMERA_PROCESSING_FPS", 12, 5, 20),
+        camera_processing_fps=_env_int("CAMERA_PROCESSING_FPS", 20, 5, 20),
         face_cosine_threshold=_env_float("FACE_COSINE_THRESHOLD", 0.60, 0.30, 0.95),
         face_uncertain_threshold=_env_float("FACE_UNCERTAIN_THRESHOLD", 0.45, 0.01, 0.95),
         face_insightface_model_root=Path(
@@ -253,7 +253,7 @@ def load_settings() -> Settings:
         webpush_vapid_subject=_env_str(
             "WEBPUSH_VAPID_SUBJECT", "mailto:admin@localhost"
         ),
-        backend_host=_env_str("BACKEND_HOST", "127.0.0.1"),
+        backend_host=_env_str("BACKEND_HOST", "0.0.0.0"),
         backend_port=_env_int("BACKEND_PORT", 8765, 1, 65535),
         telegram_bot_token=_env_str("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=_env_str("TELEGRAM_CHAT_ID", ""),

@@ -42,8 +42,8 @@ from ..services.daily_report_service import build_daily_summary_pdf
 
 router = APIRouter(tags=["ui"])
 
-FACE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.5
-FIRE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 0.5
+FACE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 1.5
+FIRE_DEBUG_CLASSIFY_INTERVAL_SECONDS = 2.0
 DEBUG_OVERLAY_FAILURE_COOLDOWN_SECONDS = 10.0
 DEBUG_OVERLAY_MAX_CONSECUTIVE_FAILURES = 3
 DEBUG_OVERLAY_LOG_INTERVAL_SECONDS = 8.0
@@ -123,6 +123,51 @@ def _direct_http_stream_url(node_id: str) -> str:
             return source_url
         return ""
     return ""
+
+
+def _preview_int(value: int, low: int, high: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = low
+    return max(low, min(high, parsed))
+
+
+def _prepare_preview_frame(frame: Any, max_width: int) -> Any:
+    width_limit = _preview_int(max_width, 320, 3840)
+    if frame is None or not hasattr(frame, "shape"):
+        return frame
+    height, width = frame.shape[:2]
+    if width <= 0 or height <= 0 or width <= width_limit:
+        return frame
+    target_height = max(
+        1,
+        int(round(float(height) * (float(width_limit) / float(width)))),
+    )
+    return cv2.resize(frame, (width_limit, target_height), interpolation=cv2.INTER_AREA)
+
+
+def _encode_preview_jpeg(frame: Any, quality: int) -> bytes | None:
+    jpeg_quality = _preview_int(quality, 40, 95)
+    ok, encoded = cv2.imencode(
+        ".jpg",
+        frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality],
+    )
+    if not ok:
+        return None
+    return encoded.tobytes()
+
+
+def _resolve_backend_base_url(request: Request | None) -> str:
+    if request is not None:
+        resolver = getattr(request.app.state, "link_resolver", None)
+        if resolver is not None:
+            return resolver.resolve_lan_base_url(request=request)
+        host = request.headers.get("host", "").strip()
+        if host:
+            return f"{request.url.scheme}://{host}"
+    return "http://127.0.0.1:8765"
 
 
 def _safe_json(value: str | None) -> dict[str, Any]:
@@ -645,7 +690,9 @@ def _parse_bool(value: str) -> bool:
     raise ValueError("value must be true or false")
 
 
-def _runtime_default_value(key: str, settings: Settings) -> str:
+def _runtime_default_value(
+    key: str, settings: Settings, request: Request | None = None
+) -> str:
     if key == "FACE_COSINE_THRESHOLD":
         return str(settings.face_cosine_threshold)
     if key == "FACE_UNCERTAIN_THRESHOLD":
@@ -695,7 +742,7 @@ def _runtime_default_value(key: str, settings: Settings) -> str:
     if key == "WEBPUSH_VAPID_SUBJECT":
         return settings.webpush_vapid_subject
     if key == "SENSOR_EVENT_URL":
-        return "http://127.0.0.1:8765/api/sensors/event"
+        return f"{_resolve_backend_base_url(request)}/api/sensors/event"
     if key == "TRANSPORT_MODE":
         return "HTTP"
     return ""
@@ -752,25 +799,29 @@ def _normalize_runtime_setting_value(key: str, value: str, settings: Settings) -
     return raw
 
 
-def _runtime_effective_value(key: str, settings: Settings) -> str:
+def _runtime_effective_value(
+    key: str, settings: Settings, request: Request | None = None
+) -> str:
     stored = store.get_setting(key)
     if stored is not None:
         candidate = str(stored).strip()
     else:
-        candidate = _runtime_default_value(key, settings).strip()
+        candidate = _runtime_default_value(key, settings, request=request).strip()
 
     try:
         return _normalize_runtime_setting_value(key, candidate, settings)
     except Exception:
         return _normalize_runtime_setting_value(
-            key, _runtime_default_value(key, settings), settings
+            key, _runtime_default_value(key, settings, request=request), settings
         )
 
 
-def _runtime_settings(settings: Settings) -> list[dict[str, Any]]:
+def _runtime_settings(
+    settings: Settings, request: Request | None = None
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for key, spec in RUNTIME_SETTING_SPECS.items():
-        effective_value = _runtime_effective_value(key, settings)
+        effective_value = _runtime_effective_value(key, settings, request=request)
         is_secret = bool(spec.get("secret", False))
 
         item: dict[str, Any] = {
@@ -1242,6 +1293,7 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
 def ui_nodes_live(request: Request) -> dict:
     get_current_user(request)
     settings: Settings = request.app.state.settings
+    backend_base_url = _resolve_backend_base_url(request)
     devices = store.list_devices()
     cameras = store.list_cameras()
 
@@ -1327,7 +1379,7 @@ def ui_nodes_live(request: Request) -> dict:
             "id": "desktop_backend",
             "name": "FastAPI Local Backend",
             "status": "online",
-            "endpoint": "http://127.0.0.1:8765",
+            "endpoint": backend_base_url,
             "last_update": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "detail": "Local backend process active",
         },
@@ -1353,10 +1405,16 @@ def ui_nodes_live(request: Request) -> dict:
         },
     ]
 
+    runtime_camera_statuses = {
+        str(row.get("node_id") or "").strip().lower(): row
+        for row in request.app.state.camera_manager.live_status()
+    }
+
     camera_feeds = []
     for cam in cameras:
         node_id = str(cam.get("node_id") or "").strip().lower()
         display_status = camera_status_by_node.get(node_id, "offline")
+        runtime_status = runtime_camera_statuses.get(node_id, {})
         camera_feeds.append(
             {
                 "location": str(cam.get("location") or ""),
@@ -1366,7 +1424,12 @@ def ui_nodes_live(request: Request) -> dict:
                 "fps": int(cam.get("fps_target") or settings.camera_processing_fps),
                 "latency_ms": 120,
                 "stream_path": f"/camera/stream/{node_id}",
+                "frame_path": f"/camera/frame/{node_id}",
+                "preview_mode": "mjpeg",
                 "stream_available": display_status == "online",
+                "frame_width": int(runtime_status.get("frame_width") or 0),
+                "frame_height": int(runtime_status.get("frame_height") or 0),
+                "frame_age_ms": runtime_status.get("frame_age_ms"),
             }
         )
 
@@ -1456,7 +1519,7 @@ def ui_settings_live(request: Request) -> dict:
             }
             for row in faces
         ],
-        "runtime_settings": _runtime_settings(settings),
+        "runtime_settings": _runtime_settings(settings, request=request),
     }
 
 
@@ -1745,6 +1808,8 @@ def camera_frame(
     request: Request,
     face_debug: bool = False,
     face_debug_manual: bool = False,
+    max_width: int = 1280,
+    quality: int = 75,
 ) -> Response:
     get_current_user(request)
     frame = request.app.state.camera_manager.snapshot_frame(node_id)
@@ -1756,11 +1821,12 @@ def camera_frame(
     ):
         _draw_face_debug_overlay(request, node_id, frame)
 
-    ok, encoded = cv2.imencode(".jpg", frame)
-    if not ok:
+    preview_frame = _prepare_preview_frame(frame, max_width)
+    encoded = _encode_preview_jpeg(preview_frame, quality)
+    if encoded is None:
         raise HTTPException(status_code=500, detail="failed to encode frame")
     return Response(
-        content=encoded.tobytes(),
+        content=encoded,
         media_type="image/jpeg",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -1837,7 +1903,11 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
                 should_refresh_face = False
 
         face_ok = True
-        if should_refresh_face:
+        face_model_status = request.app.state.face_service.model_status()
+        face_model_ready = bool(face_model_status.get("loaded"))
+        if not face_model_ready:
+            verdicts = []
+        if should_refresh_face and face_model_ready:
             try:
                 latest = request.app.state.face_service.classify_faces_with_bbox(
                     frame, max_faces=5
@@ -1879,9 +1949,12 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
             drawn += 1
 
         if drawn == 0:
+            face_text = (
+                "Face model unavailable" if not face_model_ready else "No face detected"
+            )
             cv2.putText(
                 frame,
-                "No face detected",
+                face_text,
                 (12, 26),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.65,
@@ -1912,7 +1985,9 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
                 should_refresh_fire = False
 
         fire_ok = True
-        if should_refresh_fire:
+        fire_model_status = request.app.state.fire_service.model_status()
+        fire_model_ready = bool(fire_model_status.get("loaded"))
+        if should_refresh_fire and fire_model_ready:
             try:
                 frame_for_fire = frame.copy()
                 latest_fire = request.app.state.fire_service.detect_flame(frame_for_fire)
@@ -1921,6 +1996,11 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
             except Exception as exc:
                 fire_ok = False
                 _mark_failure(f"fire inference failed: {exc}")
+        elif not fire_model_ready:
+            fire_result = {
+                "error": str(fire_model_status.get("error") or "fire_model_unavailable"),
+                "model_loaded": False,
+            }
 
         fire_score = float(fire_result.get("confidence") or 0.0)
         fire_detected = bool(fire_result.get("flame"))
@@ -1929,7 +2009,11 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
             detected_class.upper() if detected_class and detected_class != "none" else "NONE"
         )
         fire_color = (0, 0, 255) if fire_detected else (60, 180, 255)
-        fire_text = f"FIRE {'YES' if fire_detected else 'NO'} [{class_label}] {fire_score:.1f}%"
+        fire_text = (
+            f"FIRE {'YES' if fire_detected else 'NO'} [{class_label}] {fire_score:.1f}%"
+            if fire_model_ready
+            else "Fire model unavailable"
+        )
         cv2.putText(
             frame,
             fire_text,
@@ -1979,6 +2063,8 @@ async def camera_stream(
     face_debug: bool = False,
     face_debug_manual: bool = False,
     fps: int = 20,
+    max_width: int = 1280,
+    quality: int = 75,
 ) -> Response:
     get_current_user(request)
     normalized_node = node_id.strip().lower()
@@ -2005,14 +2091,17 @@ async def camera_stream(
                 continue
 
             if face_debug_enabled:
-                _draw_face_debug_overlay(request, node_id, frame)
+                await asyncio.to_thread(_draw_face_debug_overlay, request, node_id, frame)
 
-            ok, encoded = cv2.imencode(".jpg", frame)
-            if not ok:
+            preview_frame = _prepare_preview_frame(frame, max_width)
+            encoded = await asyncio.to_thread(
+                _encode_preview_jpeg, preview_frame, quality
+            )
+            if encoded is None:
                 await asyncio.sleep(frame_wait)
                 continue
 
-            payload = encoded.tobytes()
+            payload = encoded
             header = (
                 b"--frame\r\n"
                 b"Content-Type: image/jpeg\r\n"

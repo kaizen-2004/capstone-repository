@@ -29,7 +29,7 @@ if __name__ == "__main__":
     load_env_file()
     uvicorn.run(
         "backend.app.main:app",
-        host=os.environ.get("BACKEND_HOST", "127.0.0.1"),
+        host=os.environ.get("BACKEND_HOST", "0.0.0.0"),
         port=int(os.environ.get("BACKEND_PORT", "8765")),
         reload=False,
         access_log=_env_bool("BACKEND_ACCESS_LOG", False),

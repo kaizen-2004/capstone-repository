@@ -82,7 +82,12 @@ export interface CameraFeed {
   fps: number;
   latencyMs: number;
   streamPath?: string;
+  framePath?: string;
+  previewMode?: string;
   streamAvailable?: boolean;
+  frameWidth?: number;
+  frameHeight?: number;
+  frameAgeMs?: number | null;
 }
 
 export interface DetectionPipeline {

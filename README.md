@@ -74,7 +74,7 @@ Camera source env vars:
 - `CAMERA_INDOOR_RTSP` / `CAMERA_DOOR_RTSP` (used when `CAMERA_SOURCE_MODE=rtsp`)
 - `CAMERA_INDOOR_WEBCAM_INDEX` (default `0` when `CAMERA_SOURCE_MODE=webcam`)
 - `CAMERA_DOOR_WEBCAM_INDEX` (default `1`, auto-fallback to index `0` if unavailable)
-- `CAMERA_PROCESSING_FPS` (default `12`)
+- `CAMERA_PROCESSING_FPS` (default `20`)
 - `FACE_COSINE_THRESHOLD` (default `0.60`; ArcFace authorized threshold, higher is stricter)
 - `FACE_UNCERTAIN_THRESHOLD` (default `0.45`; below authorized but review-worthy)
 - `FACE_INSIGHTFACE_MODEL_ROOT` (default `backend/storage/models/insightface`; preseed `models/buffalo_l` here for offline Windows deployment)

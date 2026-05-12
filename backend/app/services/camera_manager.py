@@ -303,6 +303,15 @@ class CameraWorker:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            frame_height = 0
+            frame_width = 0
+            if self._last_frame is not None and hasattr(self._last_frame, "shape"):
+                frame_height, frame_width = [int(value) for value in self._last_frame.shape[:2]]
+            frame_age_ms = (
+                int(max(0.0, time.time() - self._last_seen) * 1000.0)
+                if self._last_seen > 0.0
+                else None
+            )
             return {
                 "node_id": self.config.node_id,
                 "label": self.config.label,
@@ -310,6 +319,10 @@ class CameraWorker:
                 "status": self._status,
                 "last_seen": self._last_seen,
                 "last_error": self._last_error,
+                "fps_target": int(self.config.fps_target),
+                "frame_width": frame_width,
+                "frame_height": frame_height,
+                "frame_age_ms": frame_age_ms,
             }
 
 
