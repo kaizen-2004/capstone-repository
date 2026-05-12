@@ -240,9 +240,14 @@ class FireService:
                     self._runtime_input_size = candidate_size
                     return None
 
-                boxes: list[list[int]] = []
-                scores: list[float] = []
-                class_ids: list[int] = []
+                boxes_by_class: dict[int, list[list[int]]] = {
+                    self.fire_class_index: [],
+                    self.smoke_class_index: [],
+                }
+                scores_by_class: dict[int, list[float]] = {
+                    self.fire_class_index: [],
+                    self.smoke_class_index: [],
+                }
                 for row in rows:
                     cols = int(row.shape[0])
                     if cols < 6:
@@ -260,10 +265,18 @@ class FireService:
                         class_id = int(np.argmax(class_scores))
                         confidence = float(class_scores[class_id])
 
-                    if class_id != self.fire_class_index:
+                    if class_id not in {self.fire_class_index, self.smoke_class_index}:
                         continue
 
-                    if confidence < float(self.threshold):
+                    confidence_floor = (
+                        float(self.threshold)
+                        if class_id == self.fire_class_index
+                        else max(
+                            float(self.threshold),
+                            float(self._smoke_confidence_floor),
+                        )
+                    )
+                    if confidence < confidence_floor:
                         continue
 
                     x1 = (cx - (bw / 2.0) - pad_left) / scale
@@ -284,53 +297,84 @@ class FireService:
                         continue
 
                     frame_area = float(frame_h * frame_w)
+                    box_area = float(w * h)
                     if class_id == self.fire_class_index:
-                        frame_area = float(frame_h * frame_w)
                         min_fire_area = max(
                             float(self._fire_min_box_area_pixels),
                             frame_area * float(self._fire_min_box_area_ratio),
                         )
-                        if float(w * h) < min_fire_area:
+                        if box_area < min_fire_area:
+                            continue
+                    else:
+                        min_smoke_area = max(
+                            float(self._smoke_min_box_area_pixels),
+                            frame_area * float(self._smoke_min_box_area_ratio),
+                        )
+                        max_smoke_area = max(
+                            min_smoke_area,
+                            frame_area * float(self._smoke_max_box_area_ratio),
+                        )
+                        if box_area < min_smoke_area or box_area > max_smoke_area:
                             continue
 
-                    boxes.append([x, y, w, h])
-                    scores.append(confidence)
-                    class_ids.append(class_id)
-                if not boxes:
+                    boxes_by_class[class_id].append([x, y, w, h])
+                    scores_by_class[class_id].append(confidence)
+
+                if not any(boxes_by_class.values()):
                     self._runtime_input_size = candidate_size
                     return None
 
-                nms_indices = cv2.dnn.NMSBoxes(
-                    bboxes=boxes,
-                    scores=scores,
-                    score_threshold=float(self.threshold),
-                    nms_threshold=0.45,
-                )
-                if len(nms_indices) == 0:
-                    self._runtime_input_size = candidate_size
-                    return None
+                def best_detection_for_class(
+                    target_class_id: int,
+                ) -> dict[str, Any] | None:
+                    class_boxes = boxes_by_class.get(target_class_id) or []
+                    class_scores = scores_by_class.get(target_class_id) or []
+                    if not class_boxes:
+                        return None
 
-                best_index = -1
-                best_score = -1.0
-                for idx_value in np.array(nms_indices).reshape(-1):
-                    idx = int(idx_value)
-                    score = float(scores[idx])
-                    if score > best_score:
-                        best_score = score
-                        best_index = idx
+                    score_threshold = (
+                        float(self.threshold)
+                        if target_class_id == self.fire_class_index
+                        else max(
+                            float(self.threshold),
+                            float(self._smoke_confidence_floor),
+                        )
+                    )
+                    nms_indices = cv2.dnn.NMSBoxes(
+                        bboxes=class_boxes,
+                        scores=class_scores,
+                        score_threshold=score_threshold,
+                        nms_threshold=0.45,
+                    )
+                    if len(nms_indices) == 0:
+                        return None
 
-                if best_index < 0:
-                    self._runtime_input_size = candidate_size
-                    return None
+                    best_index = -1
+                    best_score = -1.0
+                    for idx_value in np.array(nms_indices).reshape(-1):
+                        idx = int(idx_value)
+                        score = float(class_scores[idx])
+                        if score > best_score:
+                            best_score = score
+                            best_index = idx
 
-                top_class_id = int(class_ids[best_index])
+                    if best_index < 0:
+                        return None
+
+                    return {
+                        "score": float(class_scores[best_index]),
+                        "bbox": class_boxes[best_index],
+                        "class_index": int(target_class_id),
+                        "class_name": "fire"
+                        if target_class_id == self.fire_class_index
+                        else "smoke",
+                    }
+
                 self._runtime_input_size = candidate_size
-                return {
-                    "score": float(scores[best_index]),
-                    "bbox": boxes[best_index],
-                    "class_index": top_class_id,
-                    "class_name": "fire",
-                }
+                top_detection = best_detection_for_class(self.fire_class_index)
+                if top_detection is not None:
+                    return top_detection
+                return best_detection_for_class(self.smoke_class_index)
             except Exception as exc:
                 last_exc = exc
                 continue
@@ -385,6 +429,63 @@ class FireService:
         x, y, w, h = cv2.boundingRect(best)
         return int(x), int(y), int(w), int(h)
 
+    @staticmethod
+    def _is_flat_bright_fire_color_region(
+        frame_bgr: np.ndarray,
+        bbox: list[int] | tuple[int, int, int, int],
+    ) -> bool:
+        try:
+            frame_h, frame_w = frame_bgr.shape[:2]
+            x, y, w, h = [int(round(float(value))) for value in bbox]
+        except Exception:
+            return False
+
+        if frame_h <= 0 or frame_w <= 0 or w <= 1 or h <= 1:
+            return False
+
+        x1 = max(0, min(frame_w - 1, x))
+        y1 = max(0, min(frame_h - 1, y))
+        x2 = max(x1 + 1, min(frame_w, x + w))
+        y2 = max(y1 + 1, min(frame_h, y + h))
+        roi = frame_bgr[y1:y2, x1:x2]
+        if roi.size == 0:
+            return False
+
+        try:
+            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            return False
+
+        area = float(gray.size)
+        if area <= 0.0:
+            return False
+
+        hue = hsv[:, :, 0]
+        saturation = hsv[:, :, 1]
+        value = hsv[:, :, 2]
+        warm_mask = (
+            ((hue <= 35) | (hue >= 160))
+            & (saturation >= 60)
+            & (value >= 100)
+        )
+        bright_mask = gray >= 190
+        color_dominance = float(np.count_nonzero(warm_mask | bright_mask)) / area
+        if color_dominance < 0.75:
+            return False
+
+        gray_p5, gray_p95 = [float(value) for value in np.percentile(gray, [5, 95])]
+        gray_spread = gray_p95 - gray_p5
+        channel_std = float(
+            np.mean(np.std(roi.reshape(-1, 3).astype(np.float32), axis=0))
+        )
+        edge_density = 0.0
+        if gray.shape[0] >= 8 and gray.shape[1] >= 8:
+            edges = cv2.Canny(gray, 60, 140)
+            edge_density = float(np.count_nonzero(edges)) / area
+
+        return gray_spread < 35.0 and channel_std < 25.0 and edge_density < 0.035
+
     def detect_flame(self, frame_bgr: np.ndarray) -> dict[str, Any]:
         base_result: dict[str, Any] = {
             "flame": False,
@@ -425,7 +526,7 @@ class FireService:
                     if isinstance(class_index_raw, (int, float, np.integer, np.floating))
                     else -1
                 )
-                if detected_class != "fire":
+                if detected_class not in {"fire", "smoke"}:
                     return {
                         **base_result,
                         "bbox": [],
@@ -438,6 +539,31 @@ class FireService:
                     if isinstance(bbox, list) and len(bbox) == 4
                     else []
                 )
+                if detected_class == "fire" and bbox_value:
+                    if self._is_flat_bright_fire_color_region(frame_bgr, bbox_value):
+                        return {
+                            **base_result,
+                            "confidence": round(score * 100.0, 2),
+                            "score": round(score, 5),
+                            "bbox": [],
+                            "model_loaded": self._net is not None,
+                            "error": "",
+                            "rejected_class": "fire",
+                            "rejection_reason": "flat_bright_color_region",
+                        }
+                if detected_class == "smoke":
+                    return {
+                        **base_result,
+                        "smoke_detected": True,
+                        "confidence": round(score * 100.0, 2),
+                        "score": round(score, 5),
+                        "bbox": bbox_value,
+                        "detected_class": detected_class,
+                        "detected_class_index": detected_class_index,
+                        "model_loaded": self._net is not None,
+                        "error": "",
+                    }
+
                 flame = detected_class == "fire" and score >= self.threshold
                 return {
                     **base_result,
@@ -455,12 +581,25 @@ class FireService:
             score = self._infer_fire_probability(frame_bgr)
             flame = score >= self.threshold
             bbox_candidate = self._localize_flame_bbox(frame_bgr)
+            bbox_value = list(bbox_candidate) if bbox_candidate is not None else []
+            if flame and bbox_candidate is not None:
+                if self._is_flat_bright_fire_color_region(frame_bgr, bbox_value):
+                    return {
+                        **base_result,
+                        "confidence": round(score * 100.0, 2),
+                        "score": round(score, 5),
+                        "bbox": [],
+                        "model_loaded": self._net is not None,
+                        "error": "",
+                        "rejected_class": "fire",
+                        "rejection_reason": "flat_bright_color_region",
+                    }
             return {
                 **base_result,
                 "flame": bool(flame),
                 "confidence": round(score * 100.0, 2),
                 "score": round(score, 5),
-                "bbox": list(bbox_candidate) if (flame and bbox_candidate is not None) else [],
+                "bbox": bbox_value if flame else [],
                 "detected_class": "fire" if flame else "none",
                 "detected_class_index": int(self.fire_class_index) if flame else -1,
                 "model_loaded": self._net is not None,

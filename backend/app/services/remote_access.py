@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-import re
 import socket
 from dataclasses import dataclass
 from typing import Any
@@ -13,16 +12,7 @@ from fastapi import Request
 from ..core.config import Settings
 from ..db import store
 
-try:
-    from zeroconf import IPVersion, ServiceInfo, Zeroconf  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    IPVersion = None  # type: ignore
-    ServiceInfo = None  # type: ignore
-    Zeroconf = None  # type: ignore
-
-
 MOBILE_ROUTE = "/dashboard/remote/mobile"
-MDNS_SERVICE_TYPE = "_http._tcp.local."
 
 
 @dataclass(frozen=True)
@@ -30,7 +20,6 @@ class RemoteAccessLinks:
     preferred_url: str
     tailscale_url: str
     lan_url: str
-    mdns_url: str
     route: str
     host_label: str
     port: int
@@ -41,7 +30,6 @@ class RemoteAccessLinks:
             "preferred_url": self.preferred_url,
             "tailscale_url": self.tailscale_url,
             "lan_url": self.lan_url,
-            "mdns_url": self.mdns_url,
             "route": self.route,
             "host_label": self.host_label,
             "port": self.port,
@@ -146,44 +134,17 @@ class LinkResolver:
             return f"http://{detected_ip}:{self.backend_port}"
         return f"http://127.0.0.1:{self.backend_port}"
 
-    @staticmethod
-    def sanitize_mdns_hostname(raw: str) -> str:
-        text = raw.strip().lower()
-        if not text:
-            text = "thesis-monitor"
-        text = re.sub(r"[^a-z0-9-]", "-", text)
-        text = re.sub(r"-+", "-", text).strip("-")
-        return text or "thesis-monitor"
-
-    def mdns_hostname(self) -> str:
-        configured = self.settings.mdns_hostname.strip()
-        if configured:
-            return self.sanitize_mdns_hostname(configured)
-        return self.sanitize_mdns_hostname(socket.gethostname())
-
-    def resolve_mdns_base_url(self) -> str:
-        if not self.settings.mdns_enabled:
-            return ""
-        if not (Zeroconf and ServiceInfo and IPVersion):
-            return ""
-        if not self.detect_lan_ip():
-            return ""
-        hostname = self.mdns_hostname()
-        return f"http://{hostname}.local:{self.backend_port}"
-
     def resolve_links(self, request: Request | None = None) -> RemoteAccessLinks:
         tailscale_base = self.resolve_tailscale_base_url()
         lan_base = self.resolve_lan_base_url(request=request)
-        mdns_base = self.resolve_mdns_base_url()
 
         tailscale_url = self._join(tailscale_base, self.mobile_route)
         lan_url = self._join(lan_base, self.mobile_route)
-        mdns_url = self._join(mdns_base, self.mobile_route)
 
-        preferred_url = tailscale_url or mdns_url or lan_url
+        preferred_url = lan_url or tailscale_url
 
         fingerprint_input = "|".join(
-            [preferred_url, tailscale_url, mdns_url, lan_url, str(self.backend_port)]
+            [preferred_url, lan_url, tailscale_url, str(self.backend_port)]
         )
         fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()[:16]
 
@@ -191,103 +152,8 @@ class LinkResolver:
             preferred_url=preferred_url,
             tailscale_url=tailscale_url,
             lan_url=lan_url,
-            mdns_url=mdns_url,
             route=self.mobile_route,
             host_label=socket.gethostname(),
             port=self.backend_port,
             fingerprint=fingerprint,
         )
-
-
-class MdnsPublisher:
-    def __init__(self, settings: Settings, resolver: LinkResolver) -> None:
-        self.settings = settings
-        self.resolver = resolver
-
-        self._zc: Zeroconf | None = None
-        self._service_info: ServiceInfo | None = None
-        self._published = False
-        self._detail = "mDNS publisher has not started."
-        self._bound_ip = ""
-
-    @property
-    def available(self) -> bool:
-        return bool(Zeroconf and ServiceInfo and IPVersion)
-
-    def start(self) -> None:
-        if not self.settings.mdns_enabled:
-            self._published = False
-            self._detail = "mDNS is disabled by configuration."
-            return
-
-        if not self.available:
-            self._published = False
-            self._detail = "zeroconf dependency is unavailable; mDNS publish skipped."
-            return
-
-        address = self.resolver.detect_lan_ip()
-        if not address:
-            self._published = False
-            self._detail = "Unable to resolve LAN IPv4 address for mDNS publishing."
-            return
-
-        hostname = self.resolver.mdns_hostname()
-        service_name = self.settings.mdns_service_name.strip() or "thesis-monitor"
-        full_service_name = f"{service_name}.{MDNS_SERVICE_TYPE}"
-
-        try:
-            zc = Zeroconf(ip_version=IPVersion.V4Only)
-            info = ServiceInfo(
-                type_=MDNS_SERVICE_TYPE,
-                name=full_service_name,
-                addresses=[socket.inet_aton(address)],
-                port=self.settings.backend_port,
-                properties={
-                    b"path": MOBILE_ROUTE.encode("utf-8"),
-                    b"service": b"thesis-monitor",
-                },
-                server=f"{hostname}.local.",
-            )
-            zc.register_service(info, allow_name_change=True)
-            self._zc = zc
-            self._service_info = info
-            self._published = True
-            self._bound_ip = address
-            self._detail = f"Published {service_name}.local on {address}:{self.settings.backend_port}."
-        except Exception as exc:
-            self._published = False
-            self._detail = f"mDNS publish failed: {exc}"
-            self.stop()
-
-    def stop(self) -> None:
-        if self._zc and self._service_info:
-            try:
-                self._zc.unregister_service(self._service_info)
-            except Exception:
-                pass
-        if self._zc:
-            try:
-                self._zc.close()
-            except Exception:
-                pass
-
-        self._zc = None
-        self._service_info = None
-        self._published = False
-        self._bound_ip = ""
-
-    def status(self) -> dict[str, Any]:
-        hostname = self.resolver.mdns_hostname()
-        mdns_url = self.resolver.resolve_mdns_base_url()
-        return {
-            "ok": True,
-            "enabled": self.settings.mdns_enabled,
-            "available": self.available,
-            "published": self._published,
-            "service_name": self.settings.mdns_service_name,
-            "hostname": f"{hostname}.local",
-            "port": self.settings.backend_port,
-            "bound_ip": self._bound_ip,
-            "mdns_base_url": mdns_url,
-            "detail": self._detail,
-        }

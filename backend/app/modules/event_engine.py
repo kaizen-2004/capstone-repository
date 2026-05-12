@@ -57,6 +57,16 @@ EVENT_META: dict[str, dict[str, str]] = {
         "severity": "warning",
         "title": "Strong door impact detected",
     },
+    "DOOR_OPEN": {
+        "type": "sensor",
+        "severity": "info",
+        "title": "Door opened",
+    },
+    "DOOR_CLOSED": {
+        "type": "sensor",
+        "severity": "info",
+        "title": "Door closed",
+    },
     "ENTRY_MOTION": {
         "type": "intruder",
         "severity": "warning",
@@ -345,7 +355,18 @@ class EventEngine:
                 unknown_faces = [
                     verdict
                     for verdict in face_results
-                    if str(verdict.get("result") or "").lower() == "unknown"
+                    if str(verdict.get("face_status") or "").upper() == "UNKNOWN_FACE"
+                    or (
+                        str(verdict.get("result") or "").lower() == "unknown"
+                        and bool(verdict.get("face_present"))
+                        and str(verdict.get("face_status") or "").upper()
+                        not in {"FACE_UNCLEAR", "NO_FACE"}
+                    )
+                ]
+                unclear_faces = [
+                    verdict
+                    for verdict in face_results
+                    if str(verdict.get("face_status") or "").upper() == "FACE_UNCLEAR"
                     and bool(verdict.get("face_present"))
                 ]
                 authorized_faces = [
@@ -356,10 +377,14 @@ class EventEngine:
 
                 if unknown_faces:
                     face_result = unknown_faces[0]
+                elif unclear_faces:
+                    face_result = unclear_faces[0]
                 elif authorized_faces:
                     face_result = authorized_faces[0]
                 else:
                     face_result = face_results[0]
+            else:
+                face_result = self.face_service.classify_frame_with_bbox(frame)
 
             prefix = (
                 "authorized" if face_result.get("result") == "authorized" else "unknown"
@@ -396,11 +421,27 @@ class EventEngine:
                 dispatch_notification=True,
             )
 
+        face_status = str(face_result.get("face_status") or "").upper()
+
+        if face_status == "FACE_UNCLEAR":
+            return self._create_alert(
+                event_id,
+                alert_type="INTRUDER",
+                severity="warning",
+                title="Entry face needs review",
+                description="Door activity was detected, but the captured face was unclear.",
+                source_node=node_id,
+                location=location or ROOM_DOOR,
+                snapshot_path=snapshot_path,
+                details={"face": face_result, "faces": face_results, **details},
+                requires_ack=True,
+            )
+
         if not bool(face_result.get("face_present")):
             return self._create_alert(
                 event_id,
                 alert_type="INTRUDER",
-                severity="critical",
+                severity="warning",
                 title="Entry activity needs review",
                 description="Door activity was detected, but no face was captured.",
                 source_node=node_id,

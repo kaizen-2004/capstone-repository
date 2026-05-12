@@ -234,8 +234,13 @@ def enroll_complete(payload: EnrollCompleteRequest, request: Request) -> dict:
 @router.get("/api/faces")
 def list_faces(request: Request) -> dict:
     get_current_user(request)
+    face_service = request.app.state.face_service
     faces = store.list_faces()
-    return {"ok": True, "faces": [_face_to_profile(row) for row in faces]}
+    profiles = []
+    for row in faces:
+        status = face_service.training_status(str(row.get("name") or ""))
+        profiles.append(_face_to_profile({**row, "sample_count": int(status.get("count") or 0)}))
+    return {"ok": True, "faces": profiles}
 
 
 @router.post("/api/faces")

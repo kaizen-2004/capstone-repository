@@ -20,7 +20,7 @@ from .modules.fire_service import FireService
 from .services.camera_manager import CameraConfig, CameraManager
 from .services.camera_http_control import CameraHttpController
 from .services.notification_dispatcher import NotificationDispatcher
-from .services.remote_access import LinkResolver, MdnsPublisher
+from .services.remote_access import LinkResolver
 from .services.supervisor import Supervisor
 
 
@@ -334,11 +334,15 @@ async def lifespan(app: FastAPI):
         cosine_threshold=_setting_float(
             "FACE_COSINE_THRESHOLD", settings.face_cosine_threshold, 0.30, 0.95
         ),
-        detector_model_path=settings.face_detector_model_path,
-        recognizer_model_path=settings.face_recognizer_model_path,
+        uncertain_threshold=_setting_float(
+            "FACE_UNCERTAIN_THRESHOLD", settings.face_uncertain_threshold, 0.01, 0.95
+        ),
+        insightface_model_root=settings.face_insightface_model_root,
+        det_size=(settings.face_det_size, settings.face_det_size),
         detect_score_threshold=settings.face_detect_score_threshold,
-        detect_nms_threshold=settings.face_detect_nms_threshold,
-        detect_top_k=settings.face_detect_top_k,
+        min_face_width=settings.face_min_face_width,
+        min_face_height=settings.face_min_face_height,
+        blur_threshold=settings.face_blur_threshold,
     )
     fire_service = FireService(
         enabled=_setting_bool("FIRE_MODEL_ENABLED", settings.fire_model_enabled),
@@ -350,7 +354,6 @@ async def lifespan(app: FastAPI):
         fire_class_index=settings.fire_model_fire_class_index,
     )
     link_resolver = LinkResolver(settings=settings)
-    mdns_publisher = MdnsPublisher(settings=settings, resolver=link_resolver)
     notification_dispatcher = NotificationDispatcher(
         settings=settings,
         link_resolver=link_resolver,
@@ -405,7 +408,7 @@ async def lifespan(app: FastAPI):
             "FIRE_MODEL_ENABLED", settings.fire_model_enabled
         ),
         fire_scan_seconds=_setting_int("FIRE_SCAN_SECONDS", 2, 1, 60),
-        fire_alert_cooldown_seconds=45,
+        fire_alert_cooldown_seconds=15,
         authorized_presence_logging_enabled=_setting_bool(
             "AUTHORIZED_PRESENCE_LOGGING_ENABLED",
             settings.authorized_presence_logging_enabled,
@@ -451,9 +454,7 @@ async def lifespan(app: FastAPI):
     app.state.supervisor = supervisor
     app.state.notification_dispatcher = notification_dispatcher
     app.state.link_resolver = link_resolver
-    app.state.mdns_publisher = mdns_publisher
 
-    mdns_publisher.start()
     camera_manager.start()
     supervisor.start()
     face_model_status = face_service.model_status()
@@ -473,7 +474,6 @@ async def lifespan(app: FastAPI):
     finally:
         supervisor.stop()
         camera_manager.stop()
-        mdns_publisher.stop()
         store.log("INFO", "Backend shutdown complete")
 
 

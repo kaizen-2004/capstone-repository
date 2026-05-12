@@ -1,9 +1,13 @@
+import json
+import time
 import uuid
 
+import numpy as np
 from fastapi.testclient import TestClient
 
 from backend.app.db import store
 from backend.app.main import app
+from backend.app.services.supervisor import Supervisor
 
 
 def test_health_endpoint() -> None:
@@ -269,7 +273,7 @@ def test_mobile_remote_status_and_config() -> None:
 
         disable = client.post("/api/remote/mobile/config", json={"enabled": False})
         assert disable.status_code == 200
-        assert disable.json()["enabled"] is False
+        assert disable.json()["enabled"] is True
 
 
 def test_mobile_auth_timeout_clears_session_cookie() -> None:
@@ -303,7 +307,7 @@ def test_mobile_bootstrap_device_and_preferences() -> None:
         assert bootstrap.json()["ok"] is True
         assert "network_modes" in bootstrap.json()
         assert "preferred_base_url" in bootstrap.json()
-        assert "mdns_base_url" in bootstrap.json()
+        assert "mdns_base_url" not in bootstrap.json()
 
         register = client.post(
             "/api/mobile/device/register",
@@ -377,6 +381,48 @@ def test_intruder_event_cooldown_suppresses_repeats() -> None:
         assert second_payload["alert_id"] is None
 
 
+def test_door_state_events_do_not_create_alerts() -> None:
+    node_id = f"door_force_state_{uuid.uuid4().hex[:8]}"
+    with TestClient(app) as client:
+        opened = client.post(
+            "/api/sensors/event",
+            json={
+                "node_id": node_id,
+                "event": "DOOR_OPEN",
+                "location": "Door Entrance Area",
+                "value": 1.0,
+                "details": {"sensor": "magnetic_reed_switch", "door_state": "open"},
+            },
+        )
+        assert opened.status_code == 200
+        opened_payload = opened.json()
+        assert opened_payload["ok"] is True
+        assert opened_payload["event_code"] == "DOOR_OPEN"
+        assert opened_payload["classification"] == "sensor"
+        assert isinstance(opened_payload["event_id"], int)
+        assert opened_payload["alert_id"] is None
+        assert opened_payload["suppressed"] is False
+
+        closed = client.post(
+            "/api/sensors/event",
+            json={
+                "node_id": node_id,
+                "event": "DOOR_CLOSED",
+                "location": "Door Entrance Area",
+                "value": 0.0,
+                "details": {"sensor": "magnetic_reed_switch", "door_state": "closed"},
+            },
+        )
+        assert closed.status_code == 200
+        closed_payload = closed.json()
+        assert closed_payload["ok"] is True
+        assert closed_payload["event_code"] == "DOOR_CLOSED"
+        assert closed_payload["classification"] == "sensor"
+        assert isinstance(closed_payload["event_id"], int)
+        assert closed_payload["alert_id"] is None
+        assert closed_payload["suppressed"] is False
+
+
 def test_smoke_warning_event_creates_fire_alert() -> None:
     node_id = f"smoke_warning_{uuid.uuid4().hex[:8]}"
     with TestClient(app) as client:
@@ -399,6 +445,86 @@ def test_smoke_warning_event_creates_fire_alert() -> None:
         assert isinstance(payload["alert_id"], int)
 
 
+def test_fire_bbox_detection_creates_immediate_alert_snapshot() -> None:
+    node_id = f"cam_fire_bbox_{uuid.uuid4().hex[:8]}"
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+
+    class FakeCameraManager:
+        def __init__(self) -> None:
+            self.saved_snapshots: list[tuple[str, str]] = []
+
+        def live_status(self) -> list[dict[str, str]]:
+            return [{"node_id": node_id, "status": "online"}]
+
+        def snapshot_frame(self, requested_node: str):
+            assert requested_node == node_id
+            return frame.copy()
+
+        def save_snapshot(self, requested_node: str, snapshot_frame, prefix: str) -> str:
+            assert requested_node == node_id
+            assert prefix == "fire_confirmed_continuous"
+            assert snapshot_frame is not None
+            self.saved_snapshots.append((requested_node, prefix))
+            return f"snapshots/test/{prefix}_{requested_node}.jpg"
+
+    class FakeFireService:
+        def detect_flame(self, snapshot_frame) -> dict:
+            assert snapshot_frame is not None
+            return {
+                "flame": True,
+                "smoke_detected": False,
+                "confidence": 91.2,
+                "score": 0.912,
+                "threshold": 0.6,
+                "detector": "test",
+                "detected_class": "fire",
+                "detected_class_index": 0,
+                "bbox": [10, 12, 40, 36],
+            }
+
+    with TestClient(app):
+        fake_camera_manager = FakeCameraManager()
+        supervisor = Supervisor(
+            node_offline_seconds=120,
+            camera_offline_seconds=45,
+            event_retention_days=90,
+            log_retention_days=30,
+            snapshot_root=app.state.settings.snapshot_root,
+            regular_snapshot_retention_days=30,
+            critical_snapshot_retention_days=90,
+            camera_manager=fake_camera_manager,
+            fire_service=FakeFireService(),
+            fire_continuous_detection_enabled=True,
+            fire_scan_seconds=2,
+            fire_alert_cooldown_seconds=15,
+        )
+
+        supervisor.fire_confirmation_hits_required = 2
+        supervisor._scan_fire_presence(time.time())
+
+        events = [
+            row
+            for row in store.list_events(limit=100)
+            if row.get("source_node") == node_id and row.get("event_code") == "FLAME_SIGNAL"
+        ]
+        assert len(events) == 1
+
+        alerts = [
+            row
+            for row in store.list_alerts(limit=100)
+            if row.get("event_id") == events[0]["id"] and row.get("type") == "FIRE"
+        ]
+        assert len(alerts) == 1
+        assert str(alerts[0].get("snapshot_path") or "").endswith(
+            f"fire_confirmed_continuous_{node_id}.jpg"
+        )
+        details = json.loads(str(alerts[0].get("details_json") or "{}"))
+        assert details["flame_confirmation"]["bbox"] == [10, 12, 40, 36]
+        assert fake_camera_manager.saved_snapshots == [
+            (node_id, "fire_confirmed_continuous")
+        ]
+
+
 def test_remote_access_and_integration_status_routes() -> None:
     with TestClient(app) as client:
         login = client.post(
@@ -412,12 +538,7 @@ def test_remote_access_and_integration_status_routes() -> None:
         assert links_payload["ok"] is True
         assert "preferred_url" in links_payload
         assert "lan_url" in links_payload
-
-        mdns = client.get("/api/integrations/mdns/status")
-        assert mdns.status_code == 200
-        mdns_payload = mdns.json()
-        assert "enabled" in mdns_payload
-        assert "published" in mdns_payload
+        assert "mdns_url" not in links_payload
 
         telegram_status = client.get("/api/integrations/telegram/status")
         assert telegram_status.status_code == 404
@@ -823,12 +944,24 @@ def test_mobile_status_nodes_sensors_and_assistant_routes() -> None:
         nodes_payload = nodes.json()
         assert nodes_payload["ok"] is True
         assert isinstance(nodes_payload.get("nodes"), list)
+        assert [row.get("id") for row in nodes_payload["nodes"]] == [
+            "smoke_node1",
+            "smoke_node2",
+            "door_force",
+            "cam_indoor",
+            "cam_door",
+        ]
 
         sensors = client.get("/api/sensors")
         assert sensors.status_code == 200
         sensors_payload = sensors.json()
         assert sensors_payload["ok"] is True
         assert isinstance(sensors_payload.get("sensors"), list)
+        assert [row.get("id") for row in sensors_payload["sensors"]] == [
+            "smoke_node1",
+            "smoke_node2",
+            "door_force",
+        ]
 
         assistant = client.post(
             "/api/assistant/query",
@@ -839,3 +972,34 @@ def test_mobile_status_nodes_sensors_and_assistant_routes() -> None:
         assert assistant_payload["ok"] is True
         assert assistant_payload["question_id"] == "current_system_status"
         assert isinstance(assistant_payload.get("answer"), str)
+
+
+def test_daily_summary_report_pdf_contract() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        response = client.get("/api/reports/daily-summary?date=2026-05-11")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("application/pdf")
+        assert response.content.startswith(b"%PDF")
+        assert (
+            'filename="intruflare_daily_report_2026-05-11.pdf"'
+            in response.headers.get("content-disposition", "")
+        )
+
+
+def test_ui_live_events_route_returns_alerts_and_events() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        response = client.get("/api/ui/events/live?limit=500")
+        assert response.status_code == 200
+        payload = response.json()
+        assert isinstance(payload.get("alerts"), list)
+        assert isinstance(payload.get("events"), list)

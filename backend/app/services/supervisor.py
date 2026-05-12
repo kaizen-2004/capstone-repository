@@ -32,7 +32,7 @@ class Supervisor:
         fire_service: FireService | None = None,
         fire_continuous_detection_enabled: bool = True,
         fire_scan_seconds: int = 2,
-        fire_alert_cooldown_seconds: int = 45,
+        fire_alert_cooldown_seconds: int = 15,
         authorized_presence_logging_enabled: bool = False,
         authorized_presence_scan_seconds: int = 2,
         authorized_presence_cooldown_seconds: int = 20,
@@ -221,6 +221,12 @@ class Supervisor:
 
                 fire_result = self.fire_service.detect_flame(frame)
                 detected_class = str(fire_result.get("detected_class") or "").strip().lower()
+                fire_bbox = fire_result.get("bbox")
+                has_fire_bbox = (
+                    detected_class == "fire"
+                    and isinstance(fire_bbox, list)
+                    and len(fire_bbox) == 4
+                )
                 flame_detected = bool(fire_result.get("flame")) and detected_class in {
                     "",
                     "fire",
@@ -230,7 +236,7 @@ class Supervisor:
                     self._fire_miss_by_node[node_id] = 0
                     streak = self._fire_confirm_streak_by_node.get(node_id, 0) + 1
                     self._fire_confirm_streak_by_node[node_id] = streak
-                    confirmed = streak >= int(self.fire_confirmation_hits_required)
+                    confirmed = has_fire_bbox or streak >= int(self.fire_confirmation_hits_required)
                     if not confirmed:
                         continue
 
@@ -242,10 +248,9 @@ class Supervisor:
                     )
                     entered_view = not was_visible
 
-                    if entered_view and cooldown_ready:
+                    if entered_view or cooldown_ready:
                         try:
                             snapshot_frame = frame.copy()
-                            fire_bbox = fire_result.get("bbox")
                             if isinstance(fire_bbox, list) and len(fire_bbox) == 4:
                                 fx, fy, fw, fh = [int(value) for value in fire_bbox]
                                 confidence = float(fire_result.get("confidence") or 0.0)
@@ -293,10 +298,16 @@ class Supervisor:
                                             else (0, 165, 255)
                                         )
                                         face_state = (
-                                            "AUTHORIZED"
-                                            if is_authorized
-                                            else "NON-AUTHORIZED"
+                                            str(verdict.get("classification") or "")
+                                            .strip()
+                                            .upper()
                                         )
+                                        if not face_state:
+                                            face_state = (
+                                                "AUTHORIZED"
+                                                if is_authorized
+                                                else "NON-AUTHORIZED"
+                                            )
                                         face_confidence = float(
                                             verdict.get("confidence") or 0.0
                                         )
@@ -422,11 +433,22 @@ class Supervisor:
                 unknown_verdicts = [
                     verdict
                     for verdict in verdicts
-                    if str(verdict.get("result") or "").lower() == "unknown"
+                    if str(verdict.get("face_status") or "").upper() == "UNKNOWN_FACE"
+                    or (
+                        str(verdict.get("result") or "").lower() == "unknown"
+                        and bool(verdict.get("face_present"))
+                        and str(verdict.get("face_status") or "").upper()
+                        not in {"FACE_UNCLEAR", "NO_FACE"}
+                    )
+                ]
+                unclear_verdicts = [
+                    verdict
+                    for verdict in verdicts
+                    if str(verdict.get("face_status") or "").upper() == "FACE_UNCLEAR"
                     and bool(verdict.get("face_present"))
                 ]
 
-                if unknown_verdicts:
+                if unknown_verdicts or unclear_verdicts:
                     self._presence_miss_by_node[node_id] = 0
                     self._presence_visible_by_node[node_id] = False
                     self._presence_name_by_node[node_id] = ""
@@ -443,7 +465,9 @@ class Supervisor:
                     )
                     unknown_entered_view = not was_unknown_visible
 
-                    primary_unknown = unknown_verdicts[0]
+                    primary_unknown = (unknown_verdicts or unclear_verdicts)[0]
+                    primary_status = str(primary_unknown.get("face_status") or "").upper()
+                    is_unclear = primary_status == "FACE_UNCLEAR"
 
                     if self.unknown_presence_logging_enabled and (
                         unknown_entered_view or unknown_cooldown_ready
@@ -457,7 +481,7 @@ class Supervisor:
                         details = {
                             "face": primary_unknown,
                             "faces": verdicts,
-                            "detection_mode": "unknown_presence_scan",
+                            "detection_mode": "unclear_presence_scan" if is_unclear else "unknown_presence_scan",
                             "presence_transition": "entered_fov",
                             "snapshot_path": snapshot_path,
                         }
@@ -466,18 +490,30 @@ class Supervisor:
                             event_code="UNKNOWN",
                             source_node=node_id,
                             location=location,
-                            severity="critical",
-                            title="Unknown person detected",
-                            description="An unknown person was seen by the camera.",
+                            severity="warning" if is_unclear else "critical",
+                            title="Unclear face detected" if is_unclear else "Unknown person detected",
+                            description=(
+                                "A face was seen by the camera, but it needs review."
+                                if is_unclear
+                                else "An unknown person was seen by the camera."
+                            ),
                             details=details,
                         )
                         alert_id = store.create_alert(
                             alert_type="INTRUDER",
-                            severity="critical",
+                            severity="warning" if is_unclear else "critical",
                             status="ACTIVE",
                             requires_ack=True,
-                            title="Unknown person detected at the entry",
-                            description="An unknown person was seen near the entry. Please check now.",
+                            title=(
+                                "Entry face needs review"
+                                if is_unclear
+                                else "Unknown person detected at the entry"
+                            ),
+                            description=(
+                                "A face was captured near the entry, but it was unclear."
+                                if is_unclear
+                                else "An unknown person was seen near the entry. Please check now."
+                            ),
                             source_node=node_id,
                             location=location,
                             event_id=event_id,

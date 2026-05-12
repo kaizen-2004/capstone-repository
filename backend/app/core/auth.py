@@ -18,4 +18,5 @@ def get_current_user(request: Request) -> dict:
     user = store.get_session_user(token)
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
+    store.renew_session(token)
     return user

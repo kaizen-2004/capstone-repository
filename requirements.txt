@@ -1,8 +1,10 @@
 fastapi>=0.115,<1
 uvicorn[standard]>=0.32,<1
 python-multipart>=0.0.12
-opencv-contrib-python>=4.8
+insightface>=0.7
+onnxruntime>=1.17
+opencv-python-headless>=4.8
 numpy>=1.26
 httpx>=0.27
 pywebpush>=2.0,<3
-zeroconf>=0.147,<1
+reportlab>=4.2,<5

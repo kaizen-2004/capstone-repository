@@ -32,11 +32,13 @@ class Settings:
     camera_door_webcam_index: int
     camera_processing_fps: int
     face_cosine_threshold: float
-    face_detector_model_path: Path
-    face_recognizer_model_path: Path
+    face_uncertain_threshold: float
+    face_insightface_model_root: Path
+    face_det_size: int
     face_detect_score_threshold: float
-    face_detect_nms_threshold: float
-    face_detect_top_k: int
+    face_min_face_width: int
+    face_min_face_height: int
+    face_blur_threshold: float
     fire_model_enabled: bool
     fire_model_path: Path
     fire_model_threshold: float
@@ -59,9 +61,6 @@ class Settings:
     telegram_chat_id: str
     telegram_link_notifications_enabled: bool
     telegram_snapshot_cooldown_seconds: int
-    mdns_enabled: bool
-    mdns_service_name: str
-    mdns_hostname: str
 
 
 def load_env_file(project_root: Path | None = None, override: bool = False) -> None:
@@ -162,23 +161,9 @@ def load_settings() -> Settings:
     storage_root = backend_root / "storage"
     db_path = Path(os.environ.get("BACKEND_DB_PATH", storage_root / "system.db"))
 
-    default_face_detector_model = _first_existing_path(
-        [
-            storage_root / "models" / "face" / "face_detection.onnx",
-            storage_root / "models" / "face" / "face_detection_yunet_2023mar.onnx",
-        ]
-    )
-    default_face_recognizer_model = _first_existing_path(
-        [
-            storage_root / "models" / "face" / "face_recognition.onnx",
-            storage_root / "models" / "face" / "face_recognition_sface_2021dec.onnx",
-        ]
-    )
     default_fire_model = _first_existing_path(
         [
-            storage_root / "models" / "fire" / "fire_detection.onnx",
-            storage_root / "models" / "fire" / "yolov8n_fire_smoke.onnx",
-            storage_root / "models" / "fire" / "firenet.pb",
+            storage_root / "models" / "fire" / "yolov8s_fire_smoke_hardneg.onnx",
         ]
     )
 
@@ -218,26 +203,21 @@ def load_settings() -> Settings:
         camera_indoor_webcam_index=_env_int("CAMERA_INDOOR_WEBCAM_INDEX", 0, 0, 20),
         camera_door_webcam_index=_env_int("CAMERA_DOOR_WEBCAM_INDEX", 1, 0, 20),
         camera_processing_fps=_env_int("CAMERA_PROCESSING_FPS", 12, 5, 20),
-        face_cosine_threshold=_env_float("FACE_COSINE_THRESHOLD", 0.52, 0.30, 0.95),
-        face_detector_model_path=Path(
+        face_cosine_threshold=_env_float("FACE_COSINE_THRESHOLD", 0.60, 0.30, 0.95),
+        face_uncertain_threshold=_env_float("FACE_UNCERTAIN_THRESHOLD", 0.45, 0.01, 0.95),
+        face_insightface_model_root=Path(
             os.environ.get(
-                "FACE_DETECTOR_MODEL_PATH",
-                str(default_face_detector_model),
+                "FACE_INSIGHTFACE_MODEL_ROOT",
+                str(storage_root / "models" / "insightface"),
             )
         ),
-        face_recognizer_model_path=Path(
-            os.environ.get(
-                "FACE_RECOGNIZER_MODEL_PATH",
-                str(default_face_recognizer_model),
-            )
-        ),
+        face_det_size=_env_int("FACE_DET_SIZE", 640, 160, 1280),
         face_detect_score_threshold=_env_float(
-            "FACE_DETECT_SCORE_THRESHOLD", 0.90, 0.01, 1.0
+            "FACE_DETECT_SCORE_THRESHOLD", 0.60, 0.01, 1.0
         ),
-        face_detect_nms_threshold=_env_float(
-            "FACE_DETECT_NMS_THRESHOLD", 0.30, 0.01, 1.0
-        ),
-        face_detect_top_k=_env_int("FACE_DETECT_TOP_K", 5000, 1, 50000),
+        face_min_face_width=_env_int("FACE_MIN_FACE_WIDTH", 60, 1, 4096),
+        face_min_face_height=_env_int("FACE_MIN_FACE_HEIGHT", 60, 1, 4096),
+        face_blur_threshold=_env_float("FACE_BLUR_THRESHOLD", 20.0, 0.0, 10000.0),
         fire_model_enabled=_env_bool("FIRE_MODEL_ENABLED", True),
         fire_model_path=Path(
             os.environ.get(
@@ -246,7 +226,7 @@ def load_settings() -> Settings:
             )
         ),
         fire_model_threshold=_env_float("FIRE_MODEL_THRESHOLD", 0.60, 0.05, 0.99),
-        fire_model_input_size=_env_int("FIRE_MODEL_INPUT_SIZE", 224, 64, 640),
+        fire_model_input_size=_env_int("FIRE_MODEL_INPUT_SIZE", 640, 64, 640),
         fire_model_fire_class_index=_env_int("FIRE_MODEL_FIRE_CLASS_INDEX", 0, 0, 8),
         authorized_presence_logging_enabled=_env_bool(
             "AUTHORIZED_PRESENCE_LOGGING_ENABLED", True
@@ -283,9 +263,6 @@ def load_settings() -> Settings:
         telegram_snapshot_cooldown_seconds=_env_int(
             "TELEGRAM_SNAPSHOT_COOLDOWN_SECONDS", 60, 10, 3600
         ),
-        mdns_enabled=_env_bool("MDNS_ENABLED", True),
-        mdns_service_name=_env_str("MDNS_SERVICE_NAME", "thesis-monitor"),
-        mdns_hostname=_env_str("MDNS_HOSTNAME", ""),
     )
 
     for path in (
@@ -294,8 +271,7 @@ def load_settings() -> Settings:
         settings.logs_root,
         settings.face_samples_root,
         settings.models_root,
-        settings.face_detector_model_path.parent,
-        settings.face_recognizer_model_path.parent,
+        settings.face_insightface_model_root,
         settings.fire_model_path.parent,
         settings.db_path.parent,
     ):

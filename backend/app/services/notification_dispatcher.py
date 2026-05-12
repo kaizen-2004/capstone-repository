@@ -99,7 +99,6 @@ class NotificationDispatcher:
                 "preferred_url": "/dashboard/remote/mobile",
                 "tailscale_url": "",
                 "lan_url": "",
-                "mdns_url": "",
                 "route": "/dashboard/remote/mobile",
                 "host_label": "windows-host",
                 "port": self.settings.backend_port,

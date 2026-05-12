@@ -354,6 +354,20 @@ def create_session(user_id: int, token: str) -> None:
         conn.close()
 
 
+def renew_session(token: str) -> None:
+    if _DB_CONFIG is None:
+        raise RuntimeError("database not configured")
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE sessions SET expires_ts = ? WHERE token = ?",
+            (expiry_iso(_DB_CONFIG.session_ttl_seconds), token),
+        )
+        conn.commit()
+        conn.close()
+
+
 def delete_sessions_for_user(user_id: int) -> None:
     with _LOCK:
         conn = _conn()
@@ -923,7 +937,8 @@ def list_alerts(
         if clauses:
             query = f"{query} WHERE {' AND '.join(clauses)}"
 
-        query = f"{query} ORDER BY ts DESC LIMIT ?"
+        order_column = "ts" if clauses else "id"
+        query = f"{query} ORDER BY {order_column} DESC LIMIT ?"
         args.append(max(1, min(1000, int(limit))))
         cur.execute(query, tuple(args))
         rows = [dict(row) for row in cur.fetchall()]
@@ -1354,15 +1369,17 @@ def list_face_samples(face_id: int) -> list[dict[str, Any]]:
     return rows
 
 
-def daily_stats(days: int) -> list[dict[str, Any]]:
+def daily_stats(days: int, end_date: str | None = None) -> list[dict[str, Any]]:
     limit = max(1, min(31, int(days)))
+    seed_day = str(end_date or "now").strip() or "now"
+    seed_modifier = "+0 day" if end_date else "localtime"
     with _LOCK:
         conn = _conn()
         cur = conn.cursor()
         cur.execute(
             """
             WITH RECURSIVE d(day, n) AS (
-                SELECT date('now', 'localtime'), 1
+                SELECT date(?, ?), 1
                 UNION ALL
                 SELECT date(day, '-1 day'), n + 1 FROM d WHERE n < ?
             ),
@@ -1405,7 +1422,7 @@ def daily_stats(days: int) -> list[dict[str, Any]]:
             LEFT JOIN alert_daily ad ON ad.day = d.day
             ORDER BY d.day ASC
             """,
-            (limit,),
+            (seed_day, seed_modifier, limit),
         )
         rows = [dict(row) for row in cur.fetchall()]
         conn.close()

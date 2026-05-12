@@ -52,7 +52,6 @@ class TelegramNotifier:
 
         preferred = _safe_text(links.get("preferred_url"))
         tailscale = _safe_text(links.get("tailscale_url"))
-        mdns_url = _safe_text(links.get("mdns_url"))
         lan_url = _safe_text(links.get("lan_url"))
         host_label = _safe_text(links.get("host_label"), "Windows host")
 
@@ -71,13 +70,9 @@ class TelegramNotifier:
             lines.append(
                 f'Tailscale: <a href="{html.escape(tailscale)}">{html.escape(tailscale)}</a>'
             )
-        if mdns_url:
-            lines.append(
-                f'mDNS (LAN): <a href="{html.escape(mdns_url)}">{html.escape(mdns_url)}</a>'
-            )
         if lan_url:
             lines.append(
-                f'LAN fallback: <a href="{html.escape(lan_url)}">{html.escape(lan_url)}</a>'
+                f'LAN: <a href="{html.escape(lan_url)}">{html.escape(lan_url)}</a>'
             )
 
         lines.extend(

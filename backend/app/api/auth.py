@@ -65,6 +65,7 @@ def mobile_webview_session(
     user = store.get_session_user(token.strip())
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
+    store.renew_session(token.strip())
 
     target = next_path.strip() or "/dashboard/remote/mobile"
     if not target.startswith("/"):

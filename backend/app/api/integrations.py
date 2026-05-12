@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 from fastapi import APIRouter, Request
 
 from ..core.auth import get_current_user
@@ -27,17 +25,14 @@ def _parse_bool(value: str | None, default: bool = False) -> bool:
 
 
 def _mobile_remote_enabled() -> bool:
-    stored_value = store.get_setting(MOBILE_REMOTE_SETTING_KEY)
-    if stored_value is not None:
-        return _parse_bool(stored_value, default=False)
-    return _parse_bool(os.environ.get("ENABLE_MOBILE_REMOTE"), default=False)
+    return True
 
 
 def _mobile_push_enabled() -> bool:
     stored_value = store.get_setting(MOBILE_PUSH_SETTING_KEY)
     if stored_value is not None:
         return _parse_bool(stored_value, default=True)
-    return _parse_bool(os.environ.get("ENABLE_MOBILE_PUSH"), default=True)
+    return True
 
 
 def _resolve_lan_base_url(request: Request) -> str:
@@ -54,14 +49,24 @@ def _resolve_access_links_payload(request: Request) -> dict:
     resolver = getattr(request.app.state, "link_resolver", None)
     if resolver:
         return resolver.resolve_links(request=request).to_dict()
+    settings = request.app.state.settings
+    lan_base_url = _resolve_lan_base_url(request)
+    tailscale_base_url = str(
+        getattr(settings, "tailscale_base_url", "") or ""
+    ).strip()
+    lan_url = f"{lan_base_url.rstrip('/')}{MOBILE_REMOTE_ROUTE}" if lan_base_url else ""
+    tailscale_url = (
+        f"{tailscale_base_url.rstrip('/')}{MOBILE_REMOTE_ROUTE}"
+        if tailscale_base_url
+        else ""
+    )
     return {
-        "preferred_url": MOBILE_REMOTE_ROUTE,
-        "tailscale_url": "",
-        "lan_url": _resolve_lan_base_url(request),
-        "mdns_url": "",
+        "preferred_url": lan_url or tailscale_url,
+        "tailscale_url": tailscale_url,
+        "lan_url": lan_url,
         "route": MOBILE_REMOTE_ROUTE,
         "host_label": "windows-host",
-        "port": int(getattr(request.app.state.settings, "backend_port", 8765)),
+        "port": int(getattr(settings, "backend_port", 8765)),
         "fingerprint": "static-route-only",
     }
 
@@ -92,26 +97,6 @@ def tailscale_status(request: Request) -> dict:
     }
 
 
-@router.get("/api/integrations/mdns/status")
-def mdns_status(request: Request) -> dict:
-    get_current_user(request)
-    mdns = getattr(request.app.state, "mdns_publisher", None)
-    if mdns:
-        return mdns.status()
-    return {
-        "ok": False,
-        "enabled": bool(request.app.state.settings.mdns_enabled),
-        "available": False,
-        "published": False,
-        "service_name": request.app.state.settings.mdns_service_name,
-        "hostname": "",
-        "port": int(request.app.state.settings.backend_port),
-        "bound_ip": "",
-        "mdns_base_url": "",
-        "detail": "mDNS publisher is unavailable in app state.",
-    }
-
-
 @router.get("/api/remote/access/links")
 def remote_access_links(request: Request) -> dict:
     get_current_user(request)
@@ -125,33 +110,28 @@ def remote_access_links(request: Request) -> dict:
 @router.get("/api/remote/mobile/status")
 def mobile_remote_status(request: Request) -> dict:
     get_current_user(request)
-    enabled = _mobile_remote_enabled()
     dispatcher = getattr(request.app.state, "notification_dispatcher", None)
     return {
         "ok": True,
-        "enabled": enabled,
+        "enabled": True,
         "phase": "phase_2",
         "route": MOBILE_REMOTE_ROUTE,
         "local_only": True,
         "push_available": bool(dispatcher and dispatcher.push_available),
         "push_enabled": _mobile_push_enabled(),
-        "detail": (
-            "Mobile remote interface is enabled for local network session access."
-            if enabled
-            else "Mobile remote interface is scaffolded and disabled by default."
-        ),
+        "detail": "Mobile remote interface is always enabled for local network session access.",
     }
 
 
 @router.post("/api/remote/mobile/config")
 def mobile_remote_config(payload: MobileRemoteConfigRequest, request: Request) -> dict:
     user = get_current_user(request)
-    store.upsert_setting(MOBILE_REMOTE_SETTING_KEY, "true" if payload.enabled else "false")
+    store.upsert_setting(MOBILE_REMOTE_SETTING_KEY, "true")
     return {
         "ok": True,
-        "enabled": payload.enabled,
+        "enabled": True,
         "updated_by": user["username"],
-        "detail": "Mobile remote interface configuration updated.",
+        "detail": "Mobile remote interface is always enabled.",
     }
 
 
@@ -170,9 +150,10 @@ def mobile_bootstrap(request: Request) -> dict:
         "tailscale_base_url": _extract_base_url(
             str(access_links.get("tailscale_url", ""))
         ),
-        "mdns_base_url": _extract_base_url(str(access_links.get("mdns_url", ""))),
-        "preferred_base_url": _extract_base_url(str(access_links.get("preferred_url", ""))),
-        "network_modes": ["auto", "lan", "tailscale"],
+        "preferred_base_url": _extract_base_url(
+            str(access_links.get("preferred_url", ""))
+        ),
+        "network_modes": ["lan", "tailscale"],
         "push_available": bool(dispatcher and dispatcher.push_available),
         "push_enabled": _mobile_push_enabled(),
         "vapid_public_key": settings.webpush_vapid_public_key,

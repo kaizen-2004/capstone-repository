@@ -6,7 +6,13 @@ import re
 import shutil
 import time
 import zipfile
-from datetime import datetime, timezone
+from datetime import (
+    date as date_type,
+    datetime,
+    time as datetime_time,
+    timedelta,
+    timezone,
+)
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -32,6 +38,7 @@ from ..schemas.api import (
     CameraControlRequest,
     RuntimeSettingUpdateRequest,
 )
+from ..services.daily_report_service import build_daily_summary_pdf
 
 router = APIRouter(tags=["ui"])
 
@@ -50,9 +57,55 @@ ASSISTANT_NODE_LABELS: dict[str, str] = {
     "door_force": "Door Sensor",
 }
 
+DASHBOARD_SENSOR_DEFAULTS: dict[str, dict[str, str]] = {
+    "smoke_node1": {
+        "label": "Smoke Sensor Node 1",
+        "location": "Living Room",
+        "type": "smoke",
+    },
+    "smoke_node2": {
+        "label": "Smoke Sensor Node 2",
+        "location": "Door Entrance Area",
+        "type": "smoke",
+    },
+    "door_force": {
+        "label": "Door Force Node",
+        "location": "Door Entrance Area",
+        "type": "force",
+    },
+}
 
-def _face_debug_enabled_for_node(node_id: str, requested: bool) -> bool:
+DASHBOARD_CAMERA_DEFAULTS: dict[str, dict[str, str]] = {
+    "cam_indoor": {
+        "label": "Indoor RTSP Camera",
+        "location": "Living Room",
+    },
+    "cam_door": {
+        "label": "Door RTSP Camera",
+        "location": "Door Entrance Area",
+    },
+}
+
+
+def _is_mobile_request(request: Request) -> bool:
+    user_agent = str(request.headers.get("user-agent") or "").lower()
+    return any(
+        token in user_agent
+        for token in ("android", "iphone", "ipad", "ipod", "mobile", "wv")
+    )
+
+
+def _face_debug_enabled_for_node(
+    node_id: str,
+    requested: bool,
+    request: Request | None = None,
+    manual_toggle: bool = False,
+) -> bool:
     _ = node_id
+    if not manual_toggle:
+        return False
+    if request is not None and _is_mobile_request(request):
+        return False
     return bool(requested)
 
 
@@ -162,6 +215,63 @@ def _face_overlays_from_details(details: dict[str, Any]) -> list[dict[str, Any]]
     return overlays
 
 
+def _snapshot_overlays_from_details(details: dict[str, Any]) -> list[dict[str, Any]]:
+    overlays = [
+        {**overlay, "kind": "face"}
+        for overlay in _face_overlays_from_details(details)
+    ]
+
+    flame_confirmation = details.get("flame_confirmation")
+    fire_sources: list[dict[str, Any]] = []
+    if isinstance(flame_confirmation, dict):
+        fire_sources.append(flame_confirmation)
+    if isinstance(details.get("fire"), dict):
+        fire_sources.append(cast(dict[str, Any], details["fire"]))
+
+    seen_boxes = {
+        tuple(int(value) for value in overlay.get("bbox", []))
+        for overlay in overlays
+        if isinstance(overlay.get("bbox"), list) and len(overlay.get("bbox", [])) == 4
+    }
+    for fire in fire_sources:
+        bbox = fire.get("bbox")
+        if not (isinstance(bbox, list) and len(bbox) == 4):
+            continue
+        try:
+            x, y, w, h = [int(float(value)) for value in bbox]
+        except Exception:
+            continue
+        if w <= 0 or h <= 0:
+            continue
+
+        box_key = (x, y, w, h)
+        if box_key in seen_boxes:
+            continue
+        seen_boxes.add(box_key)
+
+        detected_class = str(fire.get("detected_class") or "fire").strip().upper()
+        if not detected_class or detected_class == "NONE":
+            detected_class = "FIRE"
+        try:
+            confidence = float(fire.get("confidence") or fire.get("score") or 0.0)
+        except Exception:
+            confidence = 0.0
+        if 0.0 < confidence <= 1.0:
+            confidence *= 100.0
+
+        overlays.append(
+            {
+                "kind": "fire",
+                "bbox": [x, y, w, h],
+                "classification": detected_class,
+                "confidence": round(confidence, 1),
+                "label": f"{detected_class} {confidence:.1f}%",
+            }
+        )
+
+    return overlays
+
+
 def _snapshot_url(snapshot_path: str) -> str:
     raw_path = str(snapshot_path or "").strip()
     if not raw_path:
@@ -210,6 +320,7 @@ def _alert_to_ui(row: dict[str, Any]) -> dict[str, Any]:
         "fusion_evidence": details.get("fusion_evidence") or [],
         "snapshot_path": snapshot_url,
         "face_overlays": _face_overlays_from_details(details),
+        "snapshot_overlays": _snapshot_overlays_from_details(details),
     }
 
 
@@ -240,6 +351,26 @@ def _normalize_query_timestamp(value: str | None) -> str | None:
     return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+def _parse_report_date(value: str | None) -> date_type:
+    raw = str(value or "").strip()
+    if not raw:
+        return datetime.now().astimezone().date()
+    try:
+        return date_type.fromisoformat(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+
+def _local_day_utc_bounds(day: date_type) -> tuple[str, str]:
+    local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+    start_local = datetime.combine(day, datetime_time.min, tzinfo=local_tz)
+    end_local = start_local + timedelta(days=1)
+    return (
+        start_local.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        end_local.astimezone(timezone.utc).isoformat(timespec="seconds"),
+    )
+
+
 def _event_to_ui(row: dict[str, Any]) -> dict[str, Any]:
     details = _safe_json(row.get("details_json"))
     snapshot_url = _snapshot_url(
@@ -267,16 +398,27 @@ def _event_to_ui(row: dict[str, Any]) -> dict[str, Any]:
         "fusion_evidence": details.get("fusion_evidence") or [],
         "snapshot_path": snapshot_url,
         "face_overlays": _face_overlays_from_details(details),
+        "snapshot_overlays": _snapshot_overlays_from_details(details),
     }
 
 
 RUNTIME_SETTING_SPECS: dict[str, dict[str, Any]] = {
     "FACE_COSINE_THRESHOLD": {
-        "description": "Higher is stricter; lower accepts more matches",
+        "description": "ArcFace authorized threshold; higher is stricter",
         "group": "Detection & Fusion",
         "value_type": "float",
         "input_type": "number",
         "min": 0.30,
+        "max": 0.95,
+        "step": 0.01,
+        "live_apply": True,
+    },
+    "FACE_UNCERTAIN_THRESHOLD": {
+        "description": "ArcFace uncertainty band threshold below authorized",
+        "group": "Detection & Fusion",
+        "value_type": "float",
+        "input_type": "number",
+        "min": 0.01,
         "max": 0.95,
         "step": 0.01,
         "live_apply": True,
@@ -412,13 +554,6 @@ RUNTIME_SETTING_SPECS: dict[str, dict[str, Any]] = {
         "step": 1,
         "live_apply": True,
     },
-    "mobile_remote_enabled": {
-        "description": "Enable mobile remote web interface",
-        "group": "Notifications",
-        "value_type": "bool",
-        "input_type": "switch",
-        "live_apply": True,
-    },
     "mobile_push_enabled": {
         "description": "Enable web push delivery for mobile devices",
         "group": "Notifications",
@@ -513,6 +648,8 @@ def _parse_bool(value: str) -> bool:
 def _runtime_default_value(key: str, settings: Settings) -> str:
     if key == "FACE_COSINE_THRESHOLD":
         return str(settings.face_cosine_threshold)
+    if key == "FACE_UNCERTAIN_THRESHOLD":
+        return str(settings.face_uncertain_threshold)
     if key == "FIRE_MODEL_ENABLED":
         return "true" if settings.fire_model_enabled else "false"
     if key == "FIRE_MODEL_THRESHOLD":
@@ -541,8 +678,6 @@ def _runtime_default_value(key: str, settings: Settings) -> str:
         return str(settings.regular_snapshot_retention_days)
     if key == "CRITICAL_SNAPSHOT_RETENTION_DAYS":
         return str(settings.critical_snapshot_retention_days)
-    if key == "mobile_remote_enabled":
-        return "false"
     if key == "mobile_push_enabled":
         return "true"
     if key == "LAN_BASE_URL":
@@ -777,6 +912,10 @@ def _apply_runtime_setting(key: str, value: str, request: Request) -> None:
         face_service.cosine_threshold = float(value)
         return
 
+    if normalized_key == "FACE_UNCERTAIN_THRESHOLD" and face_service is not None:
+        face_service.uncertain_threshold = float(value)
+        return
+
     if normalized_key == "FIRE_MODEL_ENABLED":
         enabled = _parse_bool(value)
         if fire_service is not None:
@@ -843,10 +982,6 @@ def _apply_runtime_setting(key: str, value: str, request: Request) -> None:
         return
 
     if normalized_key in {"LAN_BASE_URL", "TAILSCALE_BASE_URL"}:
-        mdns_publisher = getattr(request.app.state, "mdns_publisher", None)
-        if normalized_key == "LAN_BASE_URL" and mdns_publisher is not None:
-            mdns_publisher.stop()
-            mdns_publisher.start()
         return
 
     if normalized_key in {"CAMERA_INDOOR_STREAM_URL", "CAMERA_DOOR_STREAM_URL"}:
@@ -1111,17 +1246,6 @@ def ui_nodes_live(request: Request) -> dict:
     cameras = store.list_cameras()
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    camera_defaults = {
-        "cam_indoor": {
-            "label": "Indoor RTSP Camera",
-            "location": "Living Room",
-        },
-        "cam_door": {
-            "label": "Door RTSP Camera",
-            "location": "Door Entrance Area",
-        },
-    }
-
     device_by_node: dict[str, dict[str, Any]] = {
         str(row.get("node_id") or "").strip().lower(): row for row in devices
     }
@@ -1152,30 +1276,23 @@ def ui_nodes_live(request: Request) -> dict:
     }
 
     sensor_statuses = []
-    for row in devices:
-        node_id = str(row.get("node_id") or "").strip().lower()
-        if _is_dashboard_noise_node(node_id):
-            continue
-        if str(row.get("device_type") or "").strip().lower() == "camera":
-            continue
+    for node_id, defaults in DASHBOARD_SENSOR_DEFAULTS.items():
+        row = device_by_node.get(node_id, {})
         sensor_statuses.append(
             {
                 "id": node_id,
-                "name": str(row["label"]),
-                "location": str(row.get("location") or "System"),
-                "type": "force"
-                if str(row.get("device_type")) == "force"
-                else ("camera" if str(row.get("device_type")) == "camera" else "smoke"),
+                "name": str(row.get("label") or defaults["label"]),
+                "location": str(row.get("location") or defaults["location"]),
+                "type": defaults["type"],
                 "status": "online" if str(row.get("status")) == "online" else "offline",
                 "last_update": str(row.get("last_seen_ts") or now_iso),
-                "note": str(row.get("note") or ""),
+                "note": str(row.get("note") or "not seen"),
             }
         )
 
-    for camera_node in ("cam_indoor", "cam_door"):
+    for camera_node, defaults in DASHBOARD_CAMERA_DEFAULTS.items():
         cam_row = camera_by_node.get(camera_node, {})
         device_row = device_by_node.get(camera_node, {})
-        defaults = camera_defaults[camera_node]
         display_status = camera_status_by_node.get(camera_node, "offline")
 
         runtime_error = str(cam_row.get("last_error") or "").strip()
@@ -1293,6 +1410,31 @@ def ui_nodes_live(request: Request) -> dict:
 def ui_stats_daily(request: Request, days: int = 7) -> dict:
     get_current_user(request)
     return {"stats": store.daily_stats(days)}
+
+
+@router.get("/api/reports/daily-summary")
+def api_daily_summary_report(request: Request, date: str | None = None) -> Response:
+    get_current_user(request)
+    report_date = _parse_report_date(date)
+    from_ts, to_ts = _local_day_utc_bounds(report_date)
+
+    alerts = store.list_alerts(limit=1000, from_ts=from_ts, to_ts=to_ts)
+    events = store.list_events(limit=1000, from_ts=from_ts, to_ts=to_ts)
+    nodes_payload = ui_nodes_live(request)
+    pdf = build_daily_summary_pdf(
+        report_date=report_date,
+        generated_at=datetime.now(timezone.utc),
+        stats_rows=store.daily_stats(7, end_date=report_date.isoformat()),
+        alert_rows=[_alert_to_ui(row) for row in alerts],
+        event_rows=[_event_to_ui(row) for row in events],
+        node_rows=list(nodes_payload.get("sensor_statuses", [])),
+    )
+    file_name = f"intruflare_daily_report_{report_date.isoformat()}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+    )
 
 
 @router.get("/api/ui/settings/live")
@@ -1598,13 +1740,20 @@ def snapshot_file(snapshot_rel_path: str, request: Request) -> FileResponse:
 
 
 @router.get("/camera/frame/{node_id}")
-def camera_frame(node_id: str, request: Request, face_debug: bool = False) -> Response:
+def camera_frame(
+    node_id: str,
+    request: Request,
+    face_debug: bool = False,
+    face_debug_manual: bool = False,
+) -> Response:
     get_current_user(request)
     frame = request.app.state.camera_manager.snapshot_frame(node_id)
     if frame is None:
         raise HTTPException(status_code=404, detail="camera frame unavailable")
 
-    if _face_debug_enabled_for_node(node_id, face_debug):
+    if _face_debug_enabled_for_node(
+        node_id, face_debug, request, face_debug_manual
+    ):
         _draw_face_debug_overlay(request, node_id, frame)
 
     ok, encoded = cv2.imencode(".jpg", frame)
@@ -1708,7 +1857,9 @@ def _draw_face_debug_overlay(request: Request, node_id: str, frame: Any) -> None
             x, y, w, h = [int(value) for value in bbox]
             is_authorized = str(verdict.get("result") or "") == "authorized"
             color = (50, 205, 50) if is_authorized else (0, 165, 255)
-            label_state = "AUTHORIZED" if is_authorized else "NON-AUTHORIZED"
+            label_state = str(verdict.get("classification") or "").strip().upper()
+            if not label_state:
+                label_state = "AUTHORIZED" if is_authorized else "NON-AUTHORIZED"
             confidence = float(verdict.get("confidence") or 0.0)
             label = f"{label_state} {confidence:.1f}%"
 
@@ -1826,11 +1977,14 @@ async def camera_stream(
     node_id: str,
     request: Request,
     face_debug: bool = False,
+    face_debug_manual: bool = False,
     fps: int = 20,
 ) -> Response:
     get_current_user(request)
     normalized_node = node_id.strip().lower()
-    face_debug_enabled = _face_debug_enabled_for_node(normalized_node, face_debug)
+    face_debug_enabled = _face_debug_enabled_for_node(
+        normalized_node, face_debug, request, face_debug_manual
+    )
 
     if normalized_node == "cam_door" and not face_debug_enabled:
         direct_stream_url = _direct_http_stream_url(normalized_node)
