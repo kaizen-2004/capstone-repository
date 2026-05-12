@@ -22,7 +22,19 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
+def _configure_windows_event_loop() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import asyncio
+
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    _configure_windows_event_loop()
     _ensure_project_root_on_path()
     from backend.app.core.config import load_env_file
 

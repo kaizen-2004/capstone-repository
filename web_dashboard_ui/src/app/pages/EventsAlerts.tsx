@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Calendar, Camera, CheckCircle2, Download, Filter, Search, X, Image as ImageIcon } from 'lucide-react';
-import { fetchLiveEvents } from '../data/liveApi';
-import type { Alert, SeverityLevel, EventType } from '../data/types';
+import { fetchLiveEvents, fetchSettingsLive, submitSnapshotFeedback } from '../data/liveApi';
+import type { Alert, AuthorizedProfile, SeverityLevel, EventType } from '../data/types';
 import { StatusBadge } from '../components/StatusBadge';
 
 type TimeRange = '24h' | '7d' | '30d' | 'all';
@@ -16,6 +16,32 @@ const TIME_RANGE_DAYS: Record<Exclude<TimeRange, 'all'>, number> = {
 
 const displayEventCode = (eventCode: string) =>
   eventCode === 'UNKNOWN' ? 'NON-AUTHORIZED' : eventCode;
+
+const isIntruderFeedbackEvent = (event: Alert) => {
+  const eventCode = event.eventCode.toUpperCase();
+  return event.type === 'intruder' || ['INTRUDER', 'DOOR_TAMPER', 'AUTHORIZED_ENTRY'].includes(eventCode);
+};
+
+const isFireFeedbackEvent = (event: Alert) => {
+  const eventCode = event.eventCode.toUpperCase();
+  return event.type === 'fire' || ['FIRE', 'SMOKE_WARNING'].includes(eventCode);
+};
+
+const hasFeedbackReview = (event: Alert) =>
+  ['confirmed', 'false_positive', 'resolved', 'archived'].includes(String(event.reviewStatus || '').toLowerCase());
+
+const feedbackAlertId = (event: Alert) => {
+  if (event.id.startsWith('alert-')) {
+    const id = Number.parseInt(event.id.replace(/^alert-/, ''), 10);
+    return Number.isFinite(id) && id > 0 ? id : null;
+  }
+  return event.relatedAlertId && event.relatedAlertId > 0 ? event.relatedAlertId : null;
+};
+
+const canSubmitSnapshotFeedback = (event: Alert) =>
+  feedbackAlertId(event) !== null &&
+  !hasFeedbackReview(event) &&
+  (isIntruderFeedbackEvent(event) || isFireFeedbackEvent(event));
 
 const getSnapshotCardId = (snapshotPath: string) => {
   let hash = 0;
@@ -339,6 +365,10 @@ export function EventsAlerts() {
   const [selectedEvent, setSelectedEvent] = useState<Alert | null>(null);
   const [snapshotLoadFailed, setSnapshotLoadFailed] = useState(false);
   const [ackPendingId, setAckPendingId] = useState<string | null>(null);
+  const [feedbackPendingId, setFeedbackPendingId] = useState<string | null>(null);
+  const [feedbackProfiles, setFeedbackProfiles] = useState<AuthorizedProfile[]>([]);
+  const [feedbackProfileName, setFeedbackProfileName] = useState('');
+  const [feedbackMessage, setFeedbackMessage] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
 
@@ -420,7 +450,37 @@ export function EventsAlerts() {
 
   useEffect(() => {
     setSnapshotLoadFailed(false);
+    setFeedbackMessage('');
   }, [selectedEvent?.id, selectedEvent?.snapshotPath]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFeedbackProfiles([]);
+    setFeedbackProfileName('');
+    if (!selectedEvent || !canSubmitSnapshotFeedback(selectedEvent) || !isIntruderFeedbackEvent(selectedEvent)) {
+      return;
+    }
+
+    fetchSettingsLive()
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setFeedbackProfiles(payload.authorizedProfiles);
+        setFeedbackProfileName(payload.authorizedProfiles[0]?.label || '');
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : 'Unable to load authorized profiles.';
+        setFeedbackMessage(message);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEvent]);
 
   const activeAlerts = useMemo(
     () =>
@@ -530,6 +590,66 @@ export function EventsAlerts() {
     ];
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     downloadCsv(`event-${event.id}-${stamp}.csv`, rows);
+  };
+
+  const handleSnapshotFeedback = async (event: Alert, verdict: 'confirmed' | 'false_positive') => {
+    const alertId = feedbackAlertId(event);
+    if (alertId === null) {
+      setFeedbackMessage('Snapshot feedback requires a linked alert record.');
+      return;
+    }
+
+    const faceName = feedbackProfileName.trim();
+    if (verdict === 'false_positive' && isIntruderFeedbackEvent(event) && !faceName) {
+      setFeedbackMessage('Select the authorized person before marking this intruder snapshot as a false alarm.');
+      return;
+    }
+
+    if (verdict === 'false_positive' && isFireFeedbackEvent(event)) {
+      const confirmed = window.confirm(
+        'Mark this fire snapshot as a false alarm and save it as a hard-negative training sample?',
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    setFeedbackPendingId(event.id);
+    setFeedbackMessage('');
+    try {
+      const response = await submitSnapshotFeedback(alertId, {
+        verdict,
+        faceName: verdict === 'false_positive' ? faceName : '',
+      });
+      setEvents((prev) => prev.map((item) => (item.id === response.alert.id ? response.alert : item)));
+      setSelectedEvent((prev) => {
+        if (!prev) {
+          return prev;
+        }
+        if (prev.id === response.alert.id) {
+          return response.alert;
+        }
+        return {
+          ...prev,
+          reviewStatus: response.alert.reviewStatus,
+          reviewNote: response.alert.reviewNote,
+          reviewedBy: response.alert.reviewedBy,
+          reviewedTs: response.alert.reviewedTs,
+        };
+      });
+      if (verdict === 'confirmed') {
+        setFeedbackMessage('Snapshot confirmed.');
+      } else if (isIntruderFeedbackEvent(event)) {
+        setFeedbackMessage(`False alarm saved and face model retrained. ${response.trainMessage}`.trim());
+      } else {
+        setFeedbackMessage('False alarm saved as a fire hard-negative sample.');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to submit snapshot feedback.';
+      setFeedbackMessage(message);
+    } finally {
+      setFeedbackPendingId(null);
+    }
   };
 
   const handleOpenCameraFeed = () => {
@@ -806,6 +926,75 @@ export function EventsAlerts() {
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-gray-900">Continuous Improvement</p>
+                    <p className="text-sm text-gray-600">
+                      Confirm valid detections or mark false alarms to collect better training samples.
+                    </p>
+                    {selectedEvent.reviewStatus ? (
+                      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                        Review status: {selectedEvent.reviewStatus.replace(/_/g, ' ')}
+                      </p>
+                    ) : null}
+                  </div>
+
+                  {canSubmitSnapshotFeedback(selectedEvent) ? (
+                    <div className="flex flex-col gap-2 sm:min-w-64">
+                      {isIntruderFeedbackEvent(selectedEvent) ? (
+                        <label className="flex flex-col gap-1 text-xs font-medium text-gray-600">
+                          Authorized person for false alarm
+                          <select
+                            value={feedbackProfileName}
+                            onChange={(event) => setFeedbackProfileName(event.target.value)}
+                            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          >
+                            {feedbackProfiles.length === 0 ? (
+                              <option value="">No profiles loaded</option>
+                            ) : (
+                              feedbackProfiles.map((profile) => (
+                                <option key={profile.id || profile.label} value={profile.label}>
+                                  {profile.label} ({profile.sampleCount ?? 0} samples)
+                                </option>
+                              ))
+                            )}
+                          </select>
+                        </label>
+                      ) : null}
+
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleSnapshotFeedback(selectedEvent, 'confirmed')}
+                          disabled={feedbackPendingId === selectedEvent.id}
+                          className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Confirm
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleSnapshotFeedback(selectedEvent, 'false_positive')}
+                          disabled={feedbackPendingId === selectedEvent.id}
+                          className="inline-flex items-center justify-center rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          False Alarm
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-gray-500">
+                      Feedback is complete or unavailable for this snapshot type.
+                    </p>
+                  )}
+                </div>
+                {feedbackMessage ? (
+                  <p className="mt-3 rounded-md border border-blue-100 bg-white px-3 py-2 text-sm text-blue-800">
+                    {feedbackMessage}
+                  </p>
+                ) : null}
               </div>
 
               <div>

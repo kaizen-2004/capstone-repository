@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import shutil
@@ -37,6 +38,7 @@ from ..schemas.api import (
     BackupRestoreRequest,
     CameraControlRequest,
     RuntimeSettingUpdateRequest,
+    SnapshotFeedbackRequest,
 )
 from ..services.daily_report_service import build_daily_summary_pdf
 
@@ -384,6 +386,30 @@ def _snapshot_target_path(snapshot_path: str, snapshot_root: Path) -> Path | Non
     if target != snapshot_root and snapshot_root not in target.parents:
         return None
     return target
+
+
+def _snapshot_training_file_name(alert_id: int, source_path: Path) -> str:
+    suffix = source_path.suffix.lower() if source_path.suffix else ".jpg"
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+        suffix = ".jpg"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return f"alert_{int(alert_id)}_{stamp}{suffix}"
+
+
+def _alert_feedback_category(alert_type: str) -> str:
+    normalized = str(alert_type or "").strip().upper()
+    if normalized in {"INTRUDER", "DOOR_TAMPER", "AUTHORIZED_ENTRY"}:
+        return "intruder"
+    if normalized in {"FIRE", "SMOKE_WARNING"}:
+        return "fire"
+    return "unsupported"
+
+
+def _snapshot_file_data_url(path: Path) -> str:
+    suffix = path.suffix.lower()
+    mime = "image/png" if suffix == ".png" else "image/jpeg"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 def _normalize_query_timestamp(value: str | None) -> str | None:
@@ -1764,6 +1790,100 @@ def alert_review_history(alert_id: int, request: Request, limit: int = 50) -> di
     return {"ok": True, "history": history}
 
 
+@router.post("/api/alerts/{alert_id}/snapshot/feedback")
+def submit_snapshot_feedback(
+    alert_id: int,
+    payload: SnapshotFeedbackRequest,
+    request: Request,
+) -> dict:
+    user = get_current_user(request)
+    row = store.get_alert(alert_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="alert not found")
+
+    verdict = payload.verdict.strip().lower()
+    if verdict not in {"confirmed", "false_positive"}:
+        raise HTTPException(status_code=400, detail="unsupported snapshot feedback")
+
+    note = payload.note.strip()
+    copied_path = ""
+    train_ok: bool | None = None
+    train_message = ""
+
+    if verdict == "false_positive":
+        settings: Settings = request.app.state.settings
+        snapshot_root = Path(settings.snapshot_root).resolve()
+        snapshot_path = str(row.get("snapshot_path") or "")
+        source_path = _snapshot_target_path(snapshot_path, snapshot_root)
+        if source_path is None or not source_path.exists() or not source_path.is_file():
+            raise HTTPException(status_code=404, detail="snapshot file not found")
+
+        category = _alert_feedback_category(str(row.get("type") or ""))
+        if category == "intruder":
+            face_name = payload.face_name.strip()
+            if not face_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail="face_name is required for intruder false alarms",
+                )
+            face = store.get_face_by_name(face_name)
+            if face is None:
+                raise HTTPException(status_code=404, detail="authorized face not found")
+            try:
+                request.app.state.face_service.capture_sample(
+                    str(face["name"]),
+                    _snapshot_file_data_url(source_path),
+                    source=f"snapshot_false_positive:alert_{int(alert_id)}",
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            train_ok, train_message = request.app.state.face_service.train()
+            if not note:
+                note = f"False alarm. Imported snapshot into face profile: {face['name']}."
+        elif category == "fire":
+            target_dir = (
+                Path(settings.storage_root)
+                / "training"
+                / "fire"
+                / "negative_false_alarms"
+            )
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path = target_dir / _snapshot_training_file_name(alert_id, source_path)
+            shutil.copy2(source_path, target_path)
+            copied_path = target_path.relative_to(settings.storage_root).as_posix()
+            if not note:
+                note = "False alarm. Saved as fire hard-negative training sample."
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="snapshot feedback is only supported for intruder and fire alerts",
+            )
+
+    if verdict == "confirmed" and not note:
+        note = "Snapshot confirmed by reviewer."
+
+    updated = store.update_alert_review(
+        alert_id=alert_id,
+        review_status=verdict,
+        review_note=note,
+        reviewed_by=str(user.get("username") or "admin"),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="alert not found")
+
+    updated_row = store.get_alert(alert_id)
+    if updated_row is None:
+        raise HTTPException(status_code=404, detail="alert not found")
+    return {
+        "ok": True,
+        "verdict": verdict,
+        "copied_path": copied_path,
+        "train_ok": train_ok,
+        "train_message": train_message,
+        "alert": _alert_to_ui(updated_row),
+    }
+
+
 @router.post("/api/alerts/{alert_id}/snapshot/delete")
 def delete_alert_snapshot(alert_id: int, request: Request) -> dict:
     get_current_user(request)
@@ -1808,8 +1928,8 @@ def camera_frame(
     request: Request,
     face_debug: bool = False,
     face_debug_manual: bool = False,
-    max_width: int = 1280,
-    quality: int = 75,
+    max_width: int = 960,
+    quality: int = 70,
 ) -> Response:
     get_current_user(request)
     frame = request.app.state.camera_manager.snapshot_frame(node_id)
@@ -2062,9 +2182,9 @@ async def camera_stream(
     request: Request,
     face_debug: bool = False,
     face_debug_manual: bool = False,
-    fps: int = 20,
-    max_width: int = 1280,
-    quality: int = 75,
+    fps: int = 25,
+    max_width: int = 960,
+    quality: int = 70,
 ) -> Response:
     get_current_user(request)
     normalized_node = node_id.strip().lower()

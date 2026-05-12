@@ -613,6 +613,14 @@ def dashboard(path: str = ""):
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        try:
+            import asyncio
+
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        except Exception:
+            pass
+
     import uvicorn
 
     load_env_file()

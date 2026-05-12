@@ -135,6 +135,41 @@ class SnapshotItem {
     }
   }
 
+  bool get hasFeedbackReview {
+    switch (reviewStatus.toLowerCase()) {
+      case 'confirmed':
+      case 'false_positive':
+      case 'resolved':
+      case 'archived':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool get supportsIntruderFeedback {
+    switch (eventCode.toUpperCase()) {
+      case 'INTRUDER':
+      case 'DOOR_TAMPER':
+      case 'AUTHORIZED_ENTRY':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool get supportsFireFeedback {
+    switch (eventCode.toUpperCase()) {
+      case 'FIRE':
+      case 'SMOKE_WARNING':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool get supportsSnapshotFeedback => supportsIntruderFeedback || supportsFireFeedback;
+
   bool get isPersonSnapshot {
     final normalizedEventCode = eventCode.toUpperCase();
     if (faceOverlays.isNotEmpty || normalizedEventCode == 'AUTHORIZED_ENTRY') {

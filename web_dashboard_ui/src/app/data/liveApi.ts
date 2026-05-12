@@ -107,6 +107,15 @@ export interface AlertReviewUpdatePayload {
   alert: Alert;
 }
 
+export interface SnapshotFeedbackPayload {
+  ok: boolean;
+  verdict: 'confirmed' | 'false_positive' | string;
+  copiedPath: string;
+  trainOk?: boolean | null;
+  trainMessage: string;
+  alert: Alert;
+}
+
 export interface AlertReviewHistoryEntry {
   id: number;
   alertId: number;
@@ -533,6 +542,29 @@ export async function updateAlertReview(
   });
   return {
     ok: Boolean(payload.ok),
+    alert: mapAlert((payload.alert as Json) || {}, 'alert'),
+  };
+}
+
+export async function submitSnapshotFeedback(
+  alertId: number,
+  input: { verdict: 'confirmed' | 'false_positive'; faceName?: string; note?: string },
+): Promise<SnapshotFeedbackPayload> {
+  const payload = await fetchJson<Json>(`/api/alerts/${alertId}/snapshot/feedback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      verdict: input.verdict,
+      face_name: input.faceName ?? '',
+      note: input.note ?? '',
+    }),
+  });
+  return {
+    ok: Boolean(payload.ok),
+    verdict: String(payload.verdict ?? ''),
+    copiedPath: String(payload.copied_path ?? payload.copiedPath ?? ''),
+    trainOk: payload.train_ok == null ? null : Boolean(payload.train_ok),
+    trainMessage: String(payload.train_message ?? payload.trainMessage ?? ''),
     alert: mapAlert((payload.alert as Json) || {}, 'alert'),
   };
 }

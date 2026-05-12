@@ -267,6 +267,173 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
     }
   }
 
+  Future<FaceProfile?> _selectFalseAlarmFaceProfile() async {
+    List<FaceProfile> profiles;
+    try {
+      profiles = await widget.backendService.fetchFaceProfiles();
+    } catch (error) {
+      if (!mounted) {
+        return null;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load face profiles: $error')),
+      );
+      return null;
+    }
+
+    if (!mounted) {
+      return null;
+    }
+    if (profiles.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No authorized face profiles available.')),
+      );
+      return null;
+    }
+
+    var selected = profiles.first;
+    return showDialog<FaceProfile>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Who is this person?'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Select the authorized profile before importing this false alarm for retraining.',
+                ),
+                const SizedBox(height: 12),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 320),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      children: profiles
+                          .map(
+                            (profile) => RadioListTile<FaceProfile>(
+                              value: profile,
+                              groupValue: selected,
+                              onChanged: (value) {
+                                if (value != null) {
+                                  setDialogState(() => selected = value);
+                                }
+                              },
+                              title: Text(profile.name),
+                              subtitle: Text('${profile.sampleCount} samples'),
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(selected),
+              child: const Text('Use Profile'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _submitSnapshotFeedback(
+    SnapshotItem snapshot,
+    String verdict,
+  ) async {
+    final alertId = snapshot.actionableAlertId;
+    if (alertId == null) {
+      return;
+    }
+
+    FaceProfile? profile;
+    if (verdict == 'false_positive' && snapshot.supportsIntruderFeedback) {
+      profile = await _selectFalseAlarmFaceProfile();
+      if (profile == null) {
+        return;
+      }
+    } else if (verdict == 'false_positive' && !snapshot.supportsFireFeedback) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('False-alarm learning is only available for intruder and fire snapshots.'),
+        ),
+      );
+      return;
+    }
+
+    if (verdict == 'false_positive' && snapshot.supportsFireFeedback) {
+      final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Mark fire false alarm?'),
+              content: const Text(
+                'This will copy the snapshot into the fire hard-negative dataset for future model training.',
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: const Text('Mark False Alarm'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    setState(() => _busySnapshotId = snapshot.id);
+    try {
+      final result = await widget.backendService.submitSnapshotFeedback(
+        '$alertId',
+        verdict: verdict,
+        faceName: profile?.name ?? '',
+      );
+      await _loadSnapshots();
+      widget.onAlertResolved?.call();
+      if (!mounted) {
+        return;
+      }
+      final message = verdict == 'confirmed'
+          ? 'Snapshot confirmed.'
+          : snapshot.supportsIntruderFeedback
+              ? 'False alarm saved and face model retrained.'
+              : 'False alarm saved as fire hard-negative sample.';
+      final trainMessage = result.trainMessage.trim();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(trainMessage.isEmpty ? message : '$message $trainMessage'),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Feedback failed: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _busySnapshotId = null);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -310,6 +477,10 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                           final canReview =
                               snapshot.actionableAlertId != null &&
                                   !snapshot.isTerminalReviewStatus;
+                          final canSubmitFeedback =
+                              snapshot.actionableAlertId != null &&
+                                  snapshot.supportsSnapshotFeedback &&
+                                  !snapshot.hasFeedbackReview;
                           final canDelete = snapshot.actionableAlertId != null;
                           return Card(
                             clipBehavior: Clip.antiAlias,
@@ -404,6 +575,36 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                                     spacing: 8,
                                     runSpacing: 8,
                                     children: <Widget>[
+                                      if (canSubmitFeedback)
+                                        FilledButton.icon(
+                                          onPressed:
+                                              _busySnapshotId == snapshot.id
+                                                  ? null
+                                                  : () => _submitSnapshotFeedback(
+                                                        snapshot,
+                                                        'confirmed',
+                                                      ),
+                                          icon: const Icon(
+                                            Icons.verified_outlined,
+                                            size: 18,
+                                          ),
+                                          label: const Text('Confirm'),
+                                        ),
+                                      if (canSubmitFeedback)
+                                        FilledButton.tonalIcon(
+                                          onPressed:
+                                              _busySnapshotId == snapshot.id
+                                                  ? null
+                                                  : () => _submitSnapshotFeedback(
+                                                        snapshot,
+                                                        'false_positive',
+                                                      ),
+                                          icon: const Icon(
+                                            Icons.report_gmailerrorred_rounded,
+                                            size: 18,
+                                          ),
+                                          label: const Text('False Alarm'),
+                                        ),
                                       if (canReview)
                                         FilledButton.tonalIcon(
                                           onPressed:

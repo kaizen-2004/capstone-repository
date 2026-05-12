@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
+
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+    "rtsp_transport;tcp|fflags;nobuffer|max_delay;0",
+)
 
 import cv2
 import httpx
@@ -133,6 +139,35 @@ class CameraWorker:
             return None
         return frame
 
+    @staticmethod
+    def _env_int(name: str, default: int, low: int, high: int) -> int:
+        raw = os.environ.get(name, str(default)).strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+        return max(low, min(high, value))
+
+    def _open_video_capture(
+        self, source_url: str, api_preference: int
+    ) -> cv2.VideoCapture:
+        open_timeout_ms = self._env_int(
+            "CAMERA_RTSP_OPEN_TIMEOUT_MS", 5000, 1000, 30000
+        )
+        read_timeout_ms = self._env_int(
+            "CAMERA_RTSP_READ_TIMEOUT_MS", 5000, 1000, 30000
+        )
+        params = [
+            int(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC),
+            int(open_timeout_ms),
+            int(cv2.CAP_PROP_READ_TIMEOUT_MSEC),
+            int(read_timeout_ms),
+        ]
+        try:
+            return cv2.VideoCapture(source_url, api_preference, params)
+        except Exception:
+            return cv2.VideoCapture(source_url, api_preference)
+
     def _connect_rtsp(self) -> bool:
         if not self.config.rtsp_url:
             self._status = "offline"
@@ -141,25 +176,10 @@ class CameraWorker:
             return False
 
         source_url = (self.config.rtsp_url or "").strip()
-        parsed = urlparse(source_url)
-        open_url = source_url
-        if parsed.scheme == "rtsp":
-            query = parsed.query
-            if "rtsp_transport=" not in query:
-                query = f"{query}&rtsp_transport=tcp" if query else "rtsp_transport=tcp"
-            if "fflags=" not in query:
-                query = f"{query}&fflags=nobuffer" if query else "fflags=nobuffer"
-            if "max_delay=" not in query:
-                query = f"{query}&max_delay=0" if query else "max_delay=0"
-            open_url = urlunparse(parsed._replace(query=query))
-
-        cap = cv2.VideoCapture(open_url, cv2.CAP_FFMPEG)
-        if not cap.isOpened() and open_url != source_url:
-            cap.release()
-            cap = cv2.VideoCapture(source_url, cv2.CAP_FFMPEG)
+        cap = self._open_video_capture(source_url, cv2.CAP_FFMPEG)
         if not cap.isOpened():
             cap.release()
-            cap = cv2.VideoCapture(source_url)
+            cap = self._open_video_capture(source_url, cv2.CAP_ANY)
         if not cap.isOpened():
             self._status = "offline"
             self._last_error = "unable to open RTSP stream"

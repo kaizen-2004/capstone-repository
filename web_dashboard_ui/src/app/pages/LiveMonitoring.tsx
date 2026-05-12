@@ -46,11 +46,11 @@ function buildCameraSrc(path: string | undefined, retryTick: number, faceDebugOv
   const isStream = path.includes('/camera/stream/');
   if (isStream) {
     const debugPart = faceDebugOverlay ? '&face_debug=1&face_debug_manual=1' : '';
-    const fps = faceDebugOverlay ? 8 : 20;
-    return `${path}${separator}fps=${fps}&max_width=1280&quality=75${debugPart}&retry_tick=${retryTick}`;
+    const fps = faceDebugOverlay ? 8 : 25;
+    return `${path}${separator}fps=${fps}&max_width=960&quality=70${debugPart}&retry_tick=${retryTick}`;
   }
   const debugPart = faceDebugOverlay ? '&face_debug=1&face_debug_manual=1' : '';
-  return `${path}${separator}max_width=1280&quality=75&frame_tick=${frameRefreshTick}${debugPart}`;
+  return `${path}${separator}max_width=960&quality=70&frame_tick=${frameRefreshTick}${debugPart}`;
 }
 
 function CameraPanel({

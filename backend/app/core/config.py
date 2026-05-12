@@ -202,7 +202,7 @@ def load_settings() -> Settings:
         camera_door_rtsp=os.environ.get("CAMERA_DOOR_RTSP", "").strip(),
         camera_indoor_webcam_index=_env_int("CAMERA_INDOOR_WEBCAM_INDEX", 0, 0, 20),
         camera_door_webcam_index=_env_int("CAMERA_DOOR_WEBCAM_INDEX", 1, 0, 20),
-        camera_processing_fps=_env_int("CAMERA_PROCESSING_FPS", 20, 5, 20),
+        camera_processing_fps=_env_int("CAMERA_PROCESSING_FPS", 25, 5, 30),
         face_cosine_threshold=_env_float("FACE_COSINE_THRESHOLD", 0.60, 0.30, 0.95),
         face_uncertain_threshold=_env_float("FACE_UNCERTAIN_THRESHOLD", 0.45, 0.01, 0.95),
         face_insightface_model_root=Path(
@@ -211,7 +211,7 @@ def load_settings() -> Settings:
                 str(storage_root / "models" / "insightface"),
             )
         ),
-        face_det_size=_env_int("FACE_DET_SIZE", 640, 160, 1280),
+        face_det_size=_env_int("FACE_DET_SIZE", 480, 160, 1280),
         face_detect_score_threshold=_env_float(
             "FACE_DETECT_SCORE_THRESHOLD", 0.60, 0.01, 1.0
         ),
@@ -226,7 +226,7 @@ def load_settings() -> Settings:
             )
         ),
         fire_model_threshold=_env_float("FIRE_MODEL_THRESHOLD", 0.60, 0.05, 0.99),
-        fire_model_input_size=_env_int("FIRE_MODEL_INPUT_SIZE", 640, 64, 640),
+        fire_model_input_size=_env_int("FIRE_MODEL_INPUT_SIZE", 416, 64, 640),
         fire_model_fire_class_index=_env_int("FIRE_MODEL_FIRE_CLASS_INDEX", 0, 0, 8),
         authorized_presence_logging_enabled=_env_bool(
             "AUTHORIZED_PRESENCE_LOGGING_ENABLED", True

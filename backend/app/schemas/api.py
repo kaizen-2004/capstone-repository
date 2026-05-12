@@ -129,6 +129,12 @@ class AlertReviewUpdateRequest(BaseModel):
     review_note: str = Field(default="", max_length=1000)
 
 
+class SnapshotFeedbackRequest(BaseModel):
+    verdict: str = Field(min_length=3, max_length=32)
+    face_name: str = Field(default="", max_length=120)
+    note: str = Field(default="", max_length=1000)
+
+
 class BackupRestoreRequest(BaseModel):
     name: str = Field(min_length=5, max_length=255)
     include_snapshots: bool = False

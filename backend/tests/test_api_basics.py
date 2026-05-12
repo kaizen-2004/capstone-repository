@@ -920,6 +920,144 @@ def test_alert_snapshot_delete_clears_file_and_path() -> None:
         assert not snap_file.exists()
 
 
+def test_snapshot_feedback_confirm_marks_alert_confirmed() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        alert_id = store.create_alert(
+            alert_type="INTRUDER",
+            severity="critical",
+            status="ACTIVE",
+            requires_ack=True,
+            title="Snapshot Confirm Test",
+            description="confirm endpoint contract",
+            source_node="cam_door",
+            location="Door Entrance Area",
+        )
+
+        response = client.post(
+            f"/api/alerts/{alert_id}/snapshot/feedback",
+            json={"verdict": "confirmed"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["verdict"] == "confirmed"
+
+        updated = store.get_alert(alert_id)
+        assert updated is not None
+        assert str(updated.get("review_status") or "") == "confirmed"
+
+
+def test_snapshot_feedback_intruder_false_positive_imports_and_retrains() -> None:
+    class FakeFaceService:
+        def __init__(self) -> None:
+            self.captured: list[tuple[str, str]] = []
+
+        def capture_sample(self, person_name: str, image_data_url: str, source: str) -> dict:
+            self.captured.append((person_name, source))
+            assert image_data_url.startswith("data:image/jpeg;base64,")
+            return {"ok": True, "name": person_name, "count": 1}
+
+        def train(self) -> tuple[bool, str]:
+            return True, "trained"
+
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        settings = app.state.settings
+        day = "2099-12-30"
+        snap_dir = settings.snapshot_root / day
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        snap_file = snap_dir / f"pytest_intruder_{uuid.uuid4().hex[:8]}.jpg"
+        snap_file.write_bytes(b"pytest-intruder-snapshot")
+
+        face_name = f"Feedback Face {uuid.uuid4().hex[:6]}"
+        store.create_face(face_name, "Owner")
+        alert_id = store.create_alert(
+            alert_type="INTRUDER",
+            severity="critical",
+            status="ACTIVE",
+            requires_ack=True,
+            title="Intruder Feedback Test",
+            description="false positive endpoint contract",
+            source_node="cam_door",
+            location="Door Entrance Area",
+            snapshot_path=f"snapshots/{day}/{snap_file.name}",
+        )
+
+        original_face_service = app.state.face_service
+        fake_face_service = FakeFaceService()
+        app.state.face_service = fake_face_service
+        try:
+            response = client.post(
+                f"/api/alerts/{alert_id}/snapshot/feedback",
+                json={"verdict": "false_positive", "face_name": face_name},
+            )
+        finally:
+            app.state.face_service = original_face_service
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["train_ok"] is True
+        assert payload["train_message"] == "trained"
+        assert fake_face_service.captured == [
+            (face_name, f"snapshot_false_positive:alert_{alert_id}")
+        ]
+
+        updated = store.get_alert(alert_id)
+        assert updated is not None
+        assert str(updated.get("review_status") or "") == "false_positive"
+
+
+def test_snapshot_feedback_fire_false_positive_copies_hard_negative() -> None:
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        settings = app.state.settings
+        day = "2099-12-29"
+        snap_dir = settings.snapshot_root / day
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        snap_file = snap_dir / f"pytest_fire_{uuid.uuid4().hex[:8]}.jpg"
+        snap_file.write_bytes(b"pytest-fire-snapshot")
+        alert_id = store.create_alert(
+            alert_type="FIRE",
+            severity="critical",
+            status="ACTIVE",
+            requires_ack=True,
+            title="Fire Feedback Test",
+            description="false positive endpoint contract",
+            source_node="cam_indoor",
+            location="Living Room",
+            snapshot_path=f"snapshots/{day}/{snap_file.name}",
+        )
+
+        response = client.post(
+            f"/api/alerts/{alert_id}/snapshot/feedback",
+            json={"verdict": "false_positive"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        copied_path = str(payload["copied_path"])
+        assert copied_path.startswith("training/fire/negative_false_alarms/")
+        assert (settings.storage_root / copied_path).read_bytes() == b"pytest-fire-snapshot"
+
+        updated = store.get_alert(alert_id)
+        assert updated is not None
+        assert str(updated.get("review_status") or "") == "false_positive"
+
+
 def test_mobile_status_nodes_sensors_and_assistant_routes() -> None:
     with TestClient(app) as client:
         login = client.post(

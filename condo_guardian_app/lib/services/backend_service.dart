@@ -73,6 +73,30 @@ class EnrollmentStatus {
   }
 }
 
+class SnapshotFeedbackResult {
+  SnapshotFeedbackResult({
+    required this.verdict,
+    required this.copiedPath,
+    required this.trainOk,
+    required this.trainMessage,
+  });
+
+  final String verdict;
+  final String copiedPath;
+  final bool? trainOk;
+  final String trainMessage;
+
+  factory SnapshotFeedbackResult.fromJson(Map<String, dynamic> json) {
+    final trainRaw = json['train_ok'];
+    return SnapshotFeedbackResult(
+      verdict: json['verdict']?.toString() ?? '',
+      copiedPath: json['copied_path']?.toString() ?? '',
+      trainOk: trainRaw is bool ? trainRaw : null,
+      trainMessage: json['train_message']?.toString() ?? '',
+    );
+  }
+}
+
 class BackendService {
   BackendService(this.apiClient);
 
@@ -292,6 +316,23 @@ class BackendService {
       'api/alerts/$alertId/snapshot/delete',
       <String, dynamic>{},
     );
+  }
+
+  Future<SnapshotFeedbackResult> submitSnapshotFeedback(
+    String alertId, {
+    required String verdict,
+    String faceName = '',
+    String note = '',
+  }) async {
+    final json = await apiClient.postJson(
+      'api/alerts/$alertId/snapshot/feedback',
+      <String, dynamic>{
+        'verdict': verdict,
+        'face_name': faceName,
+        'note': note,
+      },
+    );
+    return SnapshotFeedbackResult.fromJson(json);
   }
 
   Future<List<FaceProfile>> fetchFaceProfiles() async {
