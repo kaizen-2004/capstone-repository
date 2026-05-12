@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../core/network/backend_endpoint_resolver.dart';
 import '../core/storage/settings_store.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -21,31 +22,25 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  late final TextEditingController _mdnsBaseUrlController;
   late final TextEditingController _lanBaseUrlController;
   late final TextEditingController _tailscaleBaseUrlController;
   late final TextEditingController _pollingController;
   String? _message;
   bool _isSuccess = false;
-  late String _networkMode;
 
   @override
   void initState() {
     super.initState();
-    _mdnsBaseUrlController =
-        TextEditingController(text: widget.settingsStore.mdnsBaseUrl);
     _lanBaseUrlController =
         TextEditingController(text: widget.settingsStore.lanBaseUrl);
     _tailscaleBaseUrlController =
         TextEditingController(text: widget.settingsStore.tailscaleBaseUrl);
     _pollingController =
         TextEditingController(text: '${widget.settingsStore.pollingSeconds}');
-    _networkMode = widget.settingsStore.networkMode;
   }
 
   @override
   void dispose() {
-    _mdnsBaseUrlController.dispose();
     _lanBaseUrlController.dispose();
     _tailscaleBaseUrlController.dispose();
     _pollingController.dispose();
@@ -54,10 +49,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _save() async {
     await widget.settingsStore.setConnectionProfiles(
-      mdnsBaseUrl: _mdnsBaseUrlController.text.trim(),
-      lanBaseUrl: _lanBaseUrlController.text.trim(),
-      tailscaleBaseUrl: _tailscaleBaseUrlController.text.trim(),
-      networkMode: _networkMode,
+      lanBaseUrl: BackendEndpointResolver.normalizeBaseUrl(
+        _lanBaseUrlController.text,
+      ),
+      tailscaleBaseUrl: BackendEndpointResolver.normalizeBaseUrl(
+        _tailscaleBaseUrlController.text,
+      ),
     );
     await widget.settingsStore
         .setPollingSeconds(int.tryParse(_pollingController.text.trim()) ?? 10);
@@ -133,38 +130,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
         const SizedBox(height: 12),
-        DropdownButtonFormField<String>(
-          initialValue: _networkMode,
-          decoration: const InputDecoration(
-            labelText: 'Connection mode',
-            prefixIcon: Icon(Icons.hub_outlined, size: 20),
-          ),
-          items: const [
-            DropdownMenuItem(
-                value: 'auto', child: Text('Auto: mDNS → LAN → Tailscale')),
-            DropdownMenuItem(
-                value: 'home', child: Text('Home only: mDNS → LAN')),
-            DropdownMenuItem(
-                value: 'away', child: Text('Away only: Tailscale')),
-          ],
-          onChanged: (value) {
-            if (value == null) {
-              return;
-            }
-            setState(() => _networkMode = value);
-          },
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _mdnsBaseUrlController,
-          textInputAction: TextInputAction.next,
-          decoration: const InputDecoration(
-            labelText: 'Home mDNS URL',
-            hintText: 'http://thesis-monitor.local:8765',
-            prefixIcon: Icon(Icons.dns_outlined, size: 20),
-          ),
-        ),
-        const SizedBox(height: 12),
         TextField(
           controller: _lanBaseUrlController,
           textInputAction: TextInputAction.next,
@@ -186,7 +151,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         const SizedBox(height: 10),
         Text(
-          'Auto mode uses mDNS or LAN at home and Tailscale outside the house.',
+          'The app always tries LAN first and switches to Tailscale only when LAN is unreachable.',
           style: Theme.of(context).textTheme.bodySmall,
         ),
         _sectionHeader('POLLING', icon: Icons.timer_outlined),

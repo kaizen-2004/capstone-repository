@@ -5,14 +5,12 @@ class SettingsStore {
 
   static const _backendBaseUrlKey = 'backend_base_url';
   static const _dashboardUrlKey = 'dashboard_url';
-  static const _mdnsBaseUrlKey = 'mdns_base_url';
   static const _lanBaseUrlKey = 'lan_base_url';
   static const _tailscaleBaseUrlKey = 'tailscale_base_url';
   static const _activeBackendBaseUrlKey = 'active_backend_base_url';
-  static const _networkModeKey = 'network_mode';
   static const _authTokenKey = 'auth_token';
+  static const _usernameKey = 'username';
   static const _pollingSecondsKey = 'polling_seconds';
-  static const defaultMdnsBaseUrl = 'http://thesis-monitor.local:8765';
 
   final SharedPreferences _prefs;
 
@@ -23,10 +21,40 @@ class SettingsStore {
 
   String get backendBaseUrl => activeBackendBaseUrl;
 
-  String get activeBackendBaseUrl =>
-      _prefs.getString(_activeBackendBaseUrlKey) ??
-      _prefs.getString(_backendBaseUrlKey) ??
-      mdnsBaseUrl;
+  String get activeBackendBaseUrl {
+    final active = (_prefs.getString(_activeBackendBaseUrlKey) ??
+            _prefs.getString(_backendBaseUrlKey) ??
+            '')
+        .trim();
+    final lan = lanBaseUrl;
+    final tailscale = tailscaleBaseUrl;
+    final savedProfiles = <String>{
+      if (lan.isNotEmpty) lan,
+      if (tailscale.isNotEmpty) tailscale,
+    };
+
+    if (active.isNotEmpty &&
+        !_isLocalHostname(active) &&
+        (savedProfiles.isEmpty || savedProfiles.contains(active))) {
+      return active;
+    }
+
+    if (lan.isNotEmpty) {
+      return lan;
+    }
+
+    if (tailscale.isNotEmpty) {
+      return tailscale;
+    }
+
+    return '';
+  }
+
+  bool _isLocalHostname(String value) {
+    final uri = Uri.tryParse(value);
+    final host = uri?.host.toLowerCase() ?? '';
+    return host.endsWith('.local');
+  }
 
   Future<void> setBackendBaseUrl(String value) async {
     await setActiveBackendBaseUrl(value);
@@ -35,13 +63,6 @@ class SettingsStore {
 
   Future<void> setActiveBackendBaseUrl(String value) async {
     await _prefs.setString(_activeBackendBaseUrlKey, value.trim());
-  }
-
-  String get mdnsBaseUrl =>
-      _prefs.getString(_mdnsBaseUrlKey) ?? defaultMdnsBaseUrl;
-
-  Future<void> setMdnsBaseUrl(String value) async {
-    await _prefs.setString(_mdnsBaseUrlKey, value.trim());
   }
 
   String get lanBaseUrl => _prefs.getString(_lanBaseUrlKey) ?? '';
@@ -56,30 +77,12 @@ class SettingsStore {
     await _prefs.setString(_tailscaleBaseUrlKey, value.trim());
   }
 
-  String get networkMode {
-    final value =
-        (_prefs.getString(_networkModeKey) ?? 'auto').trim().toLowerCase();
-    return value == 'home' || value == 'away' ? value : 'auto';
-  }
-
-  Future<void> setNetworkMode(String value) async {
-    final normalized = value.trim().toLowerCase();
-    await _prefs.setString(
-      _networkModeKey,
-      normalized == 'home' || normalized == 'away' ? normalized : 'auto',
-    );
-  }
-
   Future<void> setConnectionProfiles({
-    required String mdnsBaseUrl,
     required String lanBaseUrl,
     required String tailscaleBaseUrl,
-    required String networkMode,
   }) async {
-    await setMdnsBaseUrl(mdnsBaseUrl);
     await setLanBaseUrl(lanBaseUrl);
     await setTailscaleBaseUrl(tailscaleBaseUrl);
-    await setNetworkMode(networkMode);
   }
 
   String get dashboardUrl =>
@@ -93,6 +96,12 @@ class SettingsStore {
 
   Future<void> setAuthToken(String value) async {
     await _prefs.setString(_authTokenKey, value);
+  }
+
+  String get username => _prefs.getString(_usernameKey) ?? 'admin';
+
+  Future<void> setUsername(String value) async {
+    await _prefs.setString(_usernameKey, value.trim());
   }
 
   int get pollingSeconds => _prefs.getInt(_pollingSecondsKey) ?? 10;

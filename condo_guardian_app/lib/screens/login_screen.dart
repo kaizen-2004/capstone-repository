@@ -35,7 +35,8 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void initState() {
     super.initState();
-    _usernameController = TextEditingController(text: 'admin');
+    _usernameController =
+        TextEditingController(text: widget.settingsStore.username);
     _passwordController = TextEditingController();
     _lanBaseUrlController = TextEditingController(
       text: widget.settingsStore.lanBaseUrl,
@@ -66,9 +67,8 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _testConnection({required bool tailscale}) async {
-    final controller = tailscale
-        ? _tailscaleBaseUrlController
-        : _lanBaseUrlController;
+    final controller =
+        tailscale ? _tailscaleBaseUrlController : _lanBaseUrlController;
     final normalized = BackendEndpointResolver.normalizeBaseUrl(
       controller.text,
     );
@@ -203,6 +203,7 @@ class _LoginScreenState extends State<LoginScreen> {
       await widget.settingsStore
           .setActiveBackendBaseUrl(resolvedEndpoint.baseUrl);
       await widget.settingsStore.setAuthToken(token);
+      await widget.settingsStore.setUsername(username);
       await BackendEndpointResolver.refreshBootstrap(
         widget.settingsStore,
         baseUrl: resolvedEndpoint.baseUrl,
@@ -297,8 +298,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         decoration: const InputDecoration(
                           labelText: 'Local Backend URL',
                           hintText: 'http://192.168.x.x:8765',
-                          prefixIcon:
-                              Icon(Icons.router_outlined, size: 20),
+                          prefixIcon: Icon(Icons.router_outlined, size: 20),
                         ),
                       ),
                       const SizedBox(height: 8),
@@ -316,7 +316,8 @@ class _LoginScreenState extends State<LoginScreen> {
                                     strokeWidth: 2,
                                   ),
                                 )
-                              : const Icon(Icons.wifi_tethering_rounded, size: 16),
+                              : const Icon(Icons.wifi_tethering_rounded,
+                                  size: 16),
                           label: Text(_testingLan
                               ? 'Testing...'
                               : 'Test Local Connection'),
@@ -327,13 +328,14 @@ class _LoginScreenState extends State<LoginScreen> {
                           padding: const EdgeInsets.only(top: 4),
                           child: Text(
                             _lanTestMessage!,
-                            style:
-                                Theme.of(context).textTheme.bodySmall?.copyWith(
-                                      color: lanOk ? Colors.green[700] : cs.error,
-                                      fontWeight: lanOk
-                                          ? FontWeight.w600
-                                          : FontWeight.w500,
-                                    ),
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(
+                                  color: lanOk ? Colors.green[700] : cs.error,
+                                  fontWeight:
+                                      lanOk ? FontWeight.w600 : FontWeight.w500,
+                                ),
                           ),
                         ),
                       const SizedBox(height: 12),
@@ -344,8 +346,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         decoration: const InputDecoration(
                           labelText: 'Tailscale Backend URL',
                           hintText: 'http://100.x.x.x:8765',
-                          prefixIcon:
-                              Icon(Icons.vpn_lock_outlined, size: 20),
+                          prefixIcon: Icon(Icons.vpn_lock_outlined, size: 20),
                         ),
                       ),
                       const SizedBox(height: 8),
@@ -363,7 +364,8 @@ class _LoginScreenState extends State<LoginScreen> {
                                     strokeWidth: 2,
                                   ),
                                 )
-                              : const Icon(Icons.network_check_rounded, size: 16),
+                              : const Icon(Icons.network_check_rounded,
+                                  size: 16),
                           label: Text(_testingTailscale
                               ? 'Testing...'
                               : 'Test Tailscale Connection'),

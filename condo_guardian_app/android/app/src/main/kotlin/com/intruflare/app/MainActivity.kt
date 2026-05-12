@@ -76,6 +76,46 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                         }
                     }
 
+                    "downloadReport" -> {
+                        val url = call.argument<String>("url")?.trim().orEmpty()
+                        if (url.isBlank()) {
+                            result.error("invalid_url", "Report URL is required.", null)
+                            return@setMethodCallHandler
+                        }
+
+                        val rawFileName =
+                            call.argument<String>("fileName")?.trim().orEmpty()
+                        val fileName =
+                            if (rawFileName.isBlank()) "daily_report_${System.currentTimeMillis()}.pdf" else rawFileName
+
+                        val rawHeaders = call.argument<Map<String, Any?>>("headers")
+                        val headers = mutableMapOf<String, String>()
+                        rawHeaders?.forEach { (key, value) ->
+                            val headerValue = value?.toString()?.trim().orEmpty()
+                            if (key.isNotBlank() && headerValue.isNotBlank()) {
+                                headers[key.trim()] = headerValue
+                            }
+                        }
+
+                        try {
+                            val downloadId = queueFileDownload(
+                                url = url,
+                                fileName = fileName,
+                                headers = headers,
+                                publicDirectory = Environment.DIRECTORY_DOWNLOADS,
+                                relativePath = "IntruFlare/$fileName",
+                                description = "IntruFlare daily report",
+                            )
+                            result.success(downloadId)
+                        } catch (error: Exception) {
+                            result.error(
+                                "download_failed",
+                                error.message ?: "Unable to queue report download.",
+                                null,
+                            )
+                        }
+                    }
+
                     else -> result.notImplemented()
                 }
             }
@@ -86,16 +126,37 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         fileName: String,
         headers: Map<String, String>,
     ): Long {
+        return queueFileDownload(
+            url = url,
+            fileName = fileName,
+            headers = headers,
+            publicDirectory = Environment.DIRECTORY_PICTURES,
+            relativePath = "IntruFlare/$fileName",
+            description = "IntruFlare snapshot",
+        )
+    }
+
+    private fun queueFileDownload(
+        url: String,
+        fileName: String,
+        headers: Map<String, String>,
+        publicDirectory: String,
+        relativePath: String,
+        description: String,
+    ): Long {
         val safeName = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val safeRelativePath = relativePath
+            .split('/')
+            .joinToString("/") { part -> part.replace(Regex("[^A-Za-z0-9._-]"), "_") }
         val request = DownloadManager.Request(Uri.parse(url)).apply {
             setTitle(safeName)
-            setDescription("IntruFlare snapshot")
+            setDescription(description)
             setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             setAllowedOverMetered(true)
             setAllowedOverRoaming(true)
             setDestinationInExternalPublicDir(
-                Environment.DIRECTORY_PICTURES,
-                "IntruFlare/$safeName",
+                publicDirectory,
+                safeRelativePath,
             )
             headers.forEach { (key, value) ->
                 addRequestHeader(key, value)

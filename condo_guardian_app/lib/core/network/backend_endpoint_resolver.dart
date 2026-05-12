@@ -33,13 +33,9 @@ class BackendEndpointResolver {
   }
 
   static List<BackendEndpointResolution> candidates({
-    required String mode,
-    required String mdnsBaseUrl,
     required String lanBaseUrl,
     required String tailscaleBaseUrl,
-    String activeBaseUrl = '',
   }) {
-    final normalizedMode = mode.trim().toLowerCase();
     final selected = <BackendEndpointResolution>[];
 
     void add(String label, String rawUrl) {
@@ -50,31 +46,17 @@ class BackendEndpointResolver {
       selected.add(BackendEndpointResolution(baseUrl: url, label: label));
     }
 
-    if (normalizedMode == 'away') {
-      add('Tailscale', tailscaleBaseUrl);
-    } else if (normalizedMode == 'home') {
-      add('mDNS', mdnsBaseUrl);
-      add('LAN', lanBaseUrl);
-    } else {
-      add('mDNS', mdnsBaseUrl);
-      add('LAN', lanBaseUrl);
-      add('Tailscale', tailscaleBaseUrl);
-    }
+    add('LAN', lanBaseUrl);
+    add('Tailscale', tailscaleBaseUrl);
 
-    if (selected.isEmpty) {
-      add('Last active', activeBaseUrl);
-    }
     return selected;
   }
 
   static List<BackendEndpointResolution> candidatesFromStore(
       SettingsStore store) {
     return candidates(
-      mode: store.networkMode,
-      mdnsBaseUrl: store.mdnsBaseUrl,
       lanBaseUrl: store.lanBaseUrl,
       tailscaleBaseUrl: store.tailscaleBaseUrl,
-      activeBaseUrl: store.activeBackendBaseUrl,
     );
   }
 
@@ -122,17 +104,14 @@ class BackendEndpointResolver {
         timeout: probeTimeout,
       );
       final payload = await client.getJson('api/mobile/bootstrap');
-      final mdns = normalizeBaseUrl(payload['mdns_base_url']?.toString() ?? '');
       final lan = normalizeBaseUrl(payload['lan_base_url']?.toString() ?? '');
       final tailscale =
           normalizeBaseUrl(payload['tailscale_base_url']?.toString() ?? '');
-      if (mdns.isNotEmpty) {
-        await store.setMdnsBaseUrl(mdns);
-      }
-      if (lan.isNotEmpty) {
+      if (lan.isNotEmpty && normalizeBaseUrl(store.lanBaseUrl).isEmpty) {
         await store.setLanBaseUrl(lan);
       }
-      if (tailscale.isNotEmpty) {
+      if (tailscale.isNotEmpty &&
+          normalizeBaseUrl(store.tailscaleBaseUrl).isEmpty) {
         await store.setTailscaleBaseUrl(tailscale);
       }
     } catch (_) {

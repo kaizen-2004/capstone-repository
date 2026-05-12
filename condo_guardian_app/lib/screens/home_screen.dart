@@ -1,4 +1,6 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/storage/settings_store.dart';
 import '../models/node_status.dart';
@@ -29,8 +31,12 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
+  static const MethodChannel _filesChannel = MethodChannel('intruflare/files');
+
   late Future<SystemSnapshot> _snapshotFuture;
   late final AnimationController _staggerCtrl;
+  DateTime _reportDate = DateTime.now();
+  bool _exportingReport = false;
 
   @override
   void initState() {
@@ -48,6 +54,14 @@ class _HomeScreenState extends State<HomeScreen>
     super.dispose();
   }
 
+  @override
+  void didUpdateWidget(covariant HomeScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.activeBackendBaseUrl != widget.activeBackendBaseUrl) {
+      _snapshotFuture = _fetch();
+    }
+  }
+
   Future<SystemSnapshot> _fetch() {
     _staggerCtrl.reset();
     final future = widget.backendService.fetchSystemSnapshot();
@@ -59,6 +73,72 @@ class _HomeScreenState extends State<HomeScreen>
     final future = _fetch();
     setState(() => _snapshotFuture = future);
     await future;
+  }
+
+  Future<void> _pickReportDate() async {
+    final now = DateTime.now();
+    final selected = await showDatePicker(
+      context: context,
+      initialDate: _reportDate,
+      firstDate: DateTime(now.year - 5),
+      lastDate: DateTime(now.year, now.month, now.day),
+    );
+    if (selected == null || !mounted) {
+      return;
+    }
+    setState(() {
+      _reportDate = DateTime(selected.year, selected.month, selected.day);
+    });
+  }
+
+  Future<void> _exportDailyReport() async {
+    if (_exportingReport) {
+      return;
+    }
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Report download is currently supported on Android.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _exportingReport = true);
+    try {
+      final headers = <String, String>{};
+      final token = widget.settingsStore.authToken.trim();
+      if (token.isNotEmpty) {
+        headers['Authorization'] = 'Bearer $token';
+      }
+
+      await _filesChannel
+          .invokeMethod<dynamic>('downloadReport', <String, dynamic>{
+        'url': widget.backendService.dailySummaryReportUrl(_reportDate),
+        'fileName': BackendService.dailySummaryReportFileName(_reportDate),
+        'headers': headers,
+      });
+
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Daily report download queued. Check notifications.'),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Report export failed: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _exportingReport = false);
+      }
+    }
   }
 
   Color _stateColor(String state) {
@@ -99,6 +179,10 @@ class _HomeScreenState extends State<HomeScreen>
             liveAlertCount: widget.activeAlertCount,
             staggerCtrl: _staggerCtrl,
             stateColor: _stateColor,
+            reportDate: _reportDate,
+            exportingReport: _exportingReport,
+            onPickReportDate: _pickReportDate,
+            onExportReport: _exportDailyReport,
           );
         },
       ),
@@ -182,6 +266,10 @@ class _DataView extends StatelessWidget {
     required this.liveAlertCount,
     required this.staggerCtrl,
     required this.stateColor,
+    required this.reportDate,
+    required this.exportingReport,
+    required this.onPickReportDate,
+    required this.onExportReport,
   });
 
   final SystemSnapshot data;
@@ -190,6 +278,10 @@ class _DataView extends StatelessWidget {
   final int? liveAlertCount;
   final AnimationController staggerCtrl;
   final Color Function(String) stateColor;
+  final DateTime reportDate;
+  final bool exportingReport;
+  final Future<void> Function() onPickReportDate;
+  final Future<void> Function() onExportReport;
 
   Animation<double> _anim(double start, double end) => CurvedAnimation(
         parent: staggerCtrl,
@@ -273,6 +365,16 @@ class _DataView extends StatelessWidget {
             ),
           ),
         ),
+        const SizedBox(height: 16),
+        FadeTransition(
+          opacity: _anim(0.18, 0.55),
+          child: _ReportExportPanel(
+            reportDate: reportDate,
+            exporting: exportingReport,
+            onPickDate: onPickReportDate,
+            onExport: onExportReport,
+          ),
+        ),
         const SizedBox(height: 24),
         if (data.sensorReadings.isNotEmpty) ...[
           FadeTransition(
@@ -343,6 +445,90 @@ class _DataView extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _ReportExportPanel extends StatelessWidget {
+  const _ReportExportPanel({
+    required this.reportDate,
+    required this.exporting,
+    required this.onPickDate,
+    required this.onExport,
+  });
+
+  final DateTime reportDate;
+  final bool exporting;
+  final Future<void> Function() onPickDate;
+  final Future<void> Function() onExport;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final reportDateText = BackendService.reportDateValue(reportDate);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.picture_as_pdf_rounded, color: cs.primary, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Daily Report',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Generate a readable PDF summary with metrics, node status, alerts, and a 7-day trend graph.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              OutlinedButton.icon(
+                onPressed: exporting
+                    ? null
+                    : () {
+                        onPickDate();
+                      },
+                icon: const Icon(Icons.calendar_month_rounded, size: 18),
+                label: Text(reportDateText),
+              ),
+              FilledButton.icon(
+                onPressed: exporting
+                    ? null
+                    : () {
+                        onExport();
+                      },
+                icon: exporting
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.download_rounded, size: 18),
+                label: Text(exporting ? 'Exporting...' : 'Export PDF'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

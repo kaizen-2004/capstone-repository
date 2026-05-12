@@ -75,9 +75,8 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
   }
 
   String _absoluteSnapshotUrl(String snapshotPath) {
-    final normalizedBase = widget.settingsStore.backendBaseUrl.endsWith('/')
-        ? widget.settingsStore.backendBaseUrl
-        : '${widget.settingsStore.backendBaseUrl}/';
+    final baseUrl = widget.backendService.apiClient.baseUrl;
+    final normalizedBase = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
     return Uri.parse(normalizedBase).resolve(snapshotPath).toString();
   }
 

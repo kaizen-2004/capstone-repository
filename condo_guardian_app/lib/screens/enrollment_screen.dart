@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
@@ -30,6 +31,9 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
   String? _result;
   bool _isSuccess = false;
   EnrollmentStatus? _enrollmentStatus;
+  int _uploadCompletedSteps = 0;
+  int _uploadTotalSteps = 0;
+  String _uploadProgressLabel = '';
 
   static const _requiredSamples = 5;
 
@@ -128,6 +132,30 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
     return message;
   }
 
+  double get _uploadProgressFraction {
+    if (_uploadTotalSteps <= 0) {
+      return 0;
+    }
+    return (_uploadCompletedSteps / _uploadTotalSteps).clamp(0.0, 1.0);
+  }
+
+  int get _uploadProgressPercent => (_uploadProgressFraction * 100).round();
+
+  void _setUploadProgress({
+    required int completedSteps,
+    required int totalSteps,
+    required String label,
+  }) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _uploadCompletedSteps = completedSteps.clamp(0, totalSteps).toInt();
+      _uploadTotalSteps = totalSteps;
+      _uploadProgressLabel = label;
+    });
+  }
+
   Future<void> _loadExistingProfiles() async {
     setState(() {
       _loadingProfiles = true;
@@ -207,31 +235,56 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
     setState(() {
       _uploading = true;
       _result = null;
+      _uploadCompletedSteps = 0;
+      _uploadTotalSteps = _images.length + 2;
+      _uploadProgressLabel = 'Preparing enrollment...';
     });
     var uploadedAllSamples = false;
     try {
+      final totalSteps = _images.length + 2;
       final startStatus = await widget.backendService
           .submitEnrollmentStart(fullName: name, userCode: userCode);
       if (mounted) {
-        setState(() => _enrollmentStatus = startStatus);
+        setState(() {
+          _enrollmentStatus = startStatus;
+          _uploadCompletedSteps = 1;
+          _uploadProgressLabel = 'Starting image upload...';
+        });
       }
 
       for (var i = 0; i < _images.length; i++) {
+        _setUploadProgress(
+          completedSteps: i + 1,
+          totalSteps: totalSteps,
+          label: 'Uploading sample ${i + 1} of ${_images.length}...',
+        );
         final uploadStatus = await widget.backendService.uploadEnrollmentImage(
           userCode: userCode,
           filePath: _images[i].path,
           sampleIndex: i + 1,
         );
         if (mounted) {
-          setState(() => _enrollmentStatus = uploadStatus);
+          setState(() {
+            _enrollmentStatus = uploadStatus;
+            _uploadCompletedSteps = i + 2;
+          });
         }
       }
       uploadedAllSamples = true;
 
+      _setUploadProgress(
+        completedSteps: totalSteps - 1,
+        totalSteps: totalSteps,
+        label: 'Finalizing enrollment and training model...',
+      );
       final completeStatus =
           await widget.backendService.completeEnrollment(userCode: userCode);
       if (mounted) {
-        setState(() => _enrollmentStatus = completeStatus);
+        setState(() {
+          _enrollmentStatus = completeStatus;
+          _uploadCompletedSteps = totalSteps;
+          _uploadProgressLabel = 'Enrollment completed.';
+        });
       }
 
       _showResult(
@@ -250,12 +303,31 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
         _friendlyEnrollmentMessage(error.message),
         success: uploadedAllSamples && isMinimumSamples,
       );
-    } catch (_) {
-      _showResult('Enrollment upload failed. Please try again.',
-          success: false);
+    } on TimeoutException {
+      _showResult(
+        uploadedAllSamples
+            ? 'Samples were uploaded, but training took too long to respond. Wait a moment, then refresh profiles or try recognition.'
+            : 'Enrollment upload timed out. Check whether the phone is still connected to the backend, then try again.',
+        success: false,
+      );
+    } on SocketException catch (error) {
+      _showResult(
+        'Enrollment connection failed: ${error.message}',
+        success: false,
+      );
+    } catch (error) {
+      _showResult(
+        'Enrollment upload failed: $error',
+        success: false,
+      );
     } finally {
       if (mounted) {
-        setState(() => _uploading = false);
+        setState(() {
+          _uploading = false;
+          _uploadCompletedSteps = 0;
+          _uploadTotalSteps = 0;
+          _uploadProgressLabel = '';
+        });
       }
     }
   }
@@ -529,6 +601,58 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
               : const Icon(Icons.cloud_upload_outlined, size: 20),
           label: Text(_uploading ? 'Uploading…' : 'Upload Enrollment'),
         ),
+        if (_uploading && _uploadTotalSteps > 0) ...[
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: cs.primary.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: cs.primary.withValues(alpha: 0.22)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _uploadProgressLabel,
+                        style: tt.bodySmall?.copyWith(
+                          color: cs.onSurface,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '$_uploadProgressPercent%',
+                      style: TextStyle(
+                        color: cs.primary,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(999),
+                  child: LinearProgressIndicator(
+                    value: _uploadProgressFraction,
+                    minHeight: 8,
+                    color: cs.primary,
+                    backgroundColor: cs.outlineVariant,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Step $_uploadCompletedSteps of $_uploadTotalSteps',
+                  style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+        ],
         if (_result != null) ...[
           const SizedBox(height: 16),
           AnimatedContainer(
@@ -660,7 +784,7 @@ class _InAppCaptureScreenState extends State<_InAppCaptureScreen>
     with WidgetsBindingObserver {
   static const MethodChannel _ttsChannel = MethodChannel('intruflare/tts');
   static const List<int> _timerOptions = <int>[0, 2, 3, 5];
-  static const List<int> _batchTargetOptions = <int>[3, 5, 10, 15];
+  static const List<int> _batchTargetOptions = <int>[3, 5, 10, 15, 20, 30, 40];
 
   CameraController? _controller;
   List<CameraDescription> _cameras = const [];
@@ -790,8 +914,11 @@ class _InAppCaptureScreenState extends State<_InAppCaptureScreen>
       return;
     }
 
+    final target = _batchTarget.clamp(1, 100).toInt();
+
     setState(() {
       _batchRunning = true;
+      _batchTarget = target;
       _batchCapturedCount = 0;
       _countdownValue = null;
     });
@@ -831,6 +958,59 @@ class _InAppCaptureScreenState extends State<_InAppCaptureScreen>
         ),
       );
     }
+  }
+
+  Future<void> _chooseCustomBatchTarget() async {
+    if (_batchRunning || _capturing || _initializing) {
+      return;
+    }
+
+    final controller = TextEditingController(text: '$_batchTarget');
+    final selected = await showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Batch capture target'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          decoration: const InputDecoration(
+            labelText: 'Images to capture',
+            helperText: 'Use 40 for a full new enrollment batch.',
+          ),
+          onSubmitted: (value) {
+            final parsed = int.tryParse(value.trim());
+            if (parsed != null) {
+              Navigator.of(context).pop(parsed);
+            }
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final parsed = int.tryParse(controller.text.trim());
+              if (parsed == null) {
+                return;
+              }
+              Navigator.of(context).pop(parsed);
+            },
+            child: const Text('Apply'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+
+    if (!mounted || selected == null) {
+      return;
+    }
+
+    setState(() => _batchTarget = selected.clamp(1, 100).toInt());
   }
 
   Future<void> _stopBatchCapture() async {
@@ -1179,18 +1359,30 @@ class _InAppCaptureScreenState extends State<_InAppCaptureScreen>
                               Wrap(
                                 spacing: 8,
                                 runSpacing: 8,
-                                children: _batchTargetOptions
-                                    .map(
-                                      (value) => ChoiceChip(
-                                        label: Text('$value shots'),
-                                        selected: _batchTarget == value,
-                                        onSelected: controlsDisabled
-                                            ? null
-                                            : (_) => setState(
-                                                () => _batchTarget = value),
-                                      ),
-                                    )
-                                    .toList(),
+                                children: [
+                                  ..._batchTargetOptions.map(
+                                    (value) => ChoiceChip(
+                                      label: Text('$value shots'),
+                                      selected: _batchTarget == value,
+                                      onSelected: controlsDisabled
+                                          ? null
+                                          : (_) => setState(
+                                              () => _batchTarget = value),
+                                    ),
+                                  ),
+                                  ChoiceChip(
+                                    label: Text(
+                                      _batchTargetOptions.contains(_batchTarget)
+                                          ? 'Custom'
+                                          : '$_batchTarget shots',
+                                    ),
+                                    selected: !_batchTargetOptions
+                                        .contains(_batchTarget),
+                                    onSelected: controlsDisabled
+                                        ? null
+                                        : (_) => _chooseCustomBatchTarget(),
+                                  ),
+                                ],
                               ),
                               const SizedBox(height: 10),
                               FilledButton.tonalIcon(

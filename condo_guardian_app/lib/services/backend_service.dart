@@ -76,7 +76,15 @@ class EnrollmentStatus {
 class BackendService {
   BackendService(this.apiClient);
 
+  static const _enrollmentTimeout = Duration(seconds: 120);
+
   final ApiClient apiClient;
+
+  ApiClient get _enrollmentClient => ApiClient(
+        baseUrl: apiClient.baseUrl,
+        token: apiClient.token,
+        timeout: _enrollmentTimeout,
+      );
 
   ({String fromTs, String toTs}) _localDayUtcRange(DateTime localDate) {
     final startLocal = DateTime(localDate.year, localDate.month, localDate.day);
@@ -96,6 +104,31 @@ class BackendService {
       'from_ts': range.fromTs,
       'to_ts': range.toTs,
     };
+  }
+
+  static String reportDateValue(DateTime localDate) {
+    final local = localDate.toLocal();
+    final year = local.year.toString().padLeft(4, '0');
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    return '$year-$month-$day';
+  }
+
+  static String dailySummaryReportFileName(DateTime localDate) {
+    return 'intruflare_daily_report_${reportDateValue(localDate)}.pdf';
+  }
+
+  String dailySummaryReportUrl(DateTime localDate) {
+    final normalizedBase = apiClient.baseUrl.endsWith('/')
+        ? apiClient.baseUrl
+        : '${apiClient.baseUrl}/';
+    return Uri.parse(normalizedBase)
+        .resolve('api/reports/daily-summary')
+        .replace(
+      queryParameters: <String, String>{
+        'date': reportDateValue(localDate),
+      },
+    ).toString();
   }
 
   bool _isOnLocalDay(DateTime value, DateTime localDay) {
@@ -331,10 +364,13 @@ class BackendService {
     required String fullName,
     required String userCode,
   }) async {
-    final json = await apiClient.postJson('api/enroll/start', <String, dynamic>{
-      'full_name': fullName,
-      'user_code': userCode,
-    });
+    final json = await _enrollmentClient.postJson(
+      'api/enroll/start',
+      <String, dynamic>{
+        'full_name': fullName,
+        'user_code': userCode,
+      },
+    );
     return EnrollmentStatus.fromResponse(json);
   }
 
@@ -343,7 +379,7 @@ class BackendService {
     required String filePath,
     required int sampleIndex,
   }) async {
-    final json = await apiClient.multipartPost(
+    final json = await _enrollmentClient.multipartPost(
       'api/enroll/upload',
       fields: <String, String>{
         'user_code': userCode,
@@ -359,8 +395,8 @@ class BackendService {
 
   Future<EnrollmentStatus> completeEnrollment(
       {required String userCode}) async {
-    final json =
-        await apiClient.postJson('api/enroll/complete', <String, dynamic>{
+    final json = await _enrollmentClient
+        .postJson('api/enroll/complete', <String, dynamic>{
       'user_code': userCode,
     });
     return EnrollmentStatus.fromResponse(json);

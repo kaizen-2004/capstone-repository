@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/storage/settings_store.dart';
@@ -30,6 +32,8 @@ class _EventsScreenState extends State<EventsScreen> {
   List<AlertItem> _events = <AlertItem>[];
   DateTime? _selectedDate;
   String? _busyAlertId;
+  Timer? _timer;
+  bool _refreshing = false;
 
   @override
   void initState() {
@@ -42,13 +46,38 @@ class _EventsScreenState extends State<EventsScreen> {
       );
     }
     _loadEvents();
+    _timer = Timer.periodic(
+      Duration(seconds: _pollingSeconds),
+      (_) {
+        if (_busyAlertId == null) {
+          unawaited(_loadEvents(silent: true));
+        }
+      },
+    );
   }
 
-  Future<void> _loadEvents() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  int get _pollingSeconds {
+    final seconds = widget.settingsStore.pollingSeconds;
+    return seconds < 1 ? 10 : seconds;
+  }
+
+  Future<void> _loadEvents({bool silent = false}) async {
+    if (_refreshing) {
+      return;
+    }
+    _refreshing = true;
+    if (!silent) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
 
     try {
       final events =
@@ -59,15 +88,18 @@ class _EventsScreenState extends State<EventsScreen> {
       setState(() {
         _events = events;
         _loading = false;
+        _error = null;
       });
     } catch (error) {
-      if (!mounted) {
+      if (!mounted || silent) {
         return;
       }
       setState(() {
         _loading = false;
         _error = '$error';
       });
+    } finally {
+      _refreshing = false;
     }
   }
 
@@ -83,9 +115,8 @@ class _EventsScreenState extends State<EventsScreen> {
   }
 
   String _absoluteSnapshotUrl(String snapshotPath) {
-    final normalizedBase = widget.settingsStore.backendBaseUrl.endsWith('/')
-        ? widget.settingsStore.backendBaseUrl
-        : '${widget.settingsStore.backendBaseUrl}/';
+    final baseUrl = widget.backendService.apiClient.baseUrl;
+    final normalizedBase = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
     return Uri.parse(normalizedBase).resolve(snapshotPath).toString();
   }
 
@@ -119,7 +150,7 @@ class _EventsScreenState extends State<EventsScreen> {
         reviewStatus: 'resolved',
         reviewNote: 'Resolved from mobile event history.',
       );
-      await _loadEvents();
+      await _loadEvents(silent: true);
       widget.onAlertResolved?.call();
       if (!mounted) {
         return;

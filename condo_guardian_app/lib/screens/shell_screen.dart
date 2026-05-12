@@ -12,7 +12,6 @@ import 'assistant_screen.dart';
 import 'enrollment_screen.dart';
 import 'home_screen.dart';
 import 'monitor_screen.dart';
-import 'provisioning_screen.dart';
 import 'settings_screen.dart';
 
 class ShellScreen extends StatefulWidget {
@@ -39,6 +38,7 @@ class _ShellScreenState extends State<ShellScreen>
   late final AlertNotificationCoordinator _alertNotificationCoordinator;
   StreamSubscription<void>? _alertTapSubscription;
   StreamSubscription<int>? _activeAlertCountSubscription;
+  bool _sessionInvalidating = false;
 
   static const _navItems =
       <({String label, IconData icon, IconData activeIcon})>[
@@ -77,7 +77,7 @@ class _ShellScreenState extends State<ShellScreen>
   static const _pageTitles = <String>[
     'Dashboard',
     'Live Monitor',
-    'Alerts',
+    'Alerts & Snapshots',
     'Enrollment',
     'AI Assistant',
     'Settings',
@@ -100,11 +100,15 @@ class _ShellScreenState extends State<ShellScreen>
       duration: const Duration(milliseconds: 180),
       value: 1,
     );
-    _activeBackendBaseUrl = widget.settingsStore.activeBackendBaseUrl;
+    final lanBaseUrl = widget.settingsStore.lanBaseUrl;
+    _activeBackendBaseUrl = lanBaseUrl.isNotEmpty
+        ? lanBaseUrl
+        : widget.settingsStore.activeBackendBaseUrl;
 
     _alertNotificationCoordinator = AlertNotificationCoordinator(
       settingsStore: widget.settingsStore,
       backendServiceFactory: _buildBackendService,
+      onAuthenticationExpired: _invalidateSession,
     );
     _activeAlertCountSubscription =
         _alertNotificationCoordinator.activeAlertCountStream.listen((count) {
@@ -159,6 +163,22 @@ class _ShellScreenState extends State<ShellScreen>
         _activeBackendBaseUrl = resolved.baseUrl;
         _activeConnectionLabel = resolved.label;
       });
+    } on ApiException catch (error) {
+      if (error.statusCode == 401) {
+        await _invalidateSession();
+        return;
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _activeBackendBaseUrl = widget.settingsStore.activeBackendBaseUrl;
+        _activeConnectionLabel = 'Saved endpoint';
+      });
+      final token = widget.settingsStore.authToken.trim();
+      if (token.isEmpty) {
+        await _invalidateSession();
+      }
     } catch (_) {
       if (!mounted) {
         return;
@@ -169,8 +189,19 @@ class _ShellScreenState extends State<ShellScreen>
       });
       final token = widget.settingsStore.authToken.trim();
       if (token.isEmpty) {
-        widget.onSessionInvalidated?.call();
+        await _invalidateSession();
       }
+    }
+  }
+
+  Future<void> _invalidateSession() async {
+    if (_sessionInvalidating) {
+      return;
+    }
+    _sessionInvalidating = true;
+    await widget.settingsStore.setAuthToken('');
+    if (mounted) {
+      widget.onSessionInvalidated?.call();
     }
   }
 
@@ -243,47 +274,6 @@ class _ShellScreenState extends State<ShellScreen>
             Text(_pageTitles[_selectedIndex]),
           ],
         ),
-        actions: [
-          Tooltip(
-            message: 'Provision node',
-            child: InkWell(
-              borderRadius: BorderRadius.circular(10),
-              onTap: () async {
-                await Navigator.of(context).push(
-                  PageRouteBuilder<void>(
-                    pageBuilder: (_, animation, __) => FadeTransition(
-                        opacity: animation, child: const ProvisioningScreen()),
-                    transitionDuration: const Duration(milliseconds: 220),
-                  ),
-                );
-              },
-              child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  border: Border.all(color: cs.outline),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.router_outlined,
-                        size: 16, color: cs.onSurfaceVariant),
-                    const SizedBox(width: 5),
-                    Text(
-                      'Provision',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: cs.onSurfaceVariant,
-                            fontSize: 12,
-                          ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
       ),
       body: FadeTransition(
         opacity: _fadeController,

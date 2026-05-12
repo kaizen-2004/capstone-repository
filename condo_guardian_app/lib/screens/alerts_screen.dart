@@ -7,8 +7,6 @@ import '../models/alert_item.dart';
 import '../models/snapshot_item.dart';
 import '../services/backend_service.dart';
 import '../widgets/snapshot_image_with_overlay.dart';
-import 'events_screen.dart';
-import 'snapshots_screen.dart';
 
 class AlertsScreen extends StatefulWidget {
   const AlertsScreen({
@@ -30,29 +28,59 @@ class AlertsScreen extends StatefulWidget {
 
 class _AlertsScreenState extends State<AlertsScreen> {
   List<AlertItem> _alerts = [];
+  List<SnapshotItem> _snapshots = [];
   bool _loading = true;
   String? _error;
   Timer? _timer;
   DateTime? _selectedDate;
   String? _busyAlertId;
+  DateTime? _lastUpdated;
+  bool _refreshing = false;
+  bool _historyFiltersOpen = false;
+  String _historySearchQuery = '';
+  String _selectedSeverity = 'all';
+  String _selectedType = 'all';
+  late final TextEditingController _historySearchController;
 
   @override
   void initState() {
     super.initState();
+    _historySearchController = TextEditingController();
     _loadAlerts();
-    _timer = Timer.periodic(
-      Duration(seconds: widget.pollingSeconds),
-      (_) => _loadAlerts(silent: true),
-    );
+    _startPolling();
+  }
+
+  @override
+  void didUpdateWidget(covariant AlertsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.pollingSeconds != widget.pollingSeconds) {
+      _startPolling();
+    }
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _historySearchController.dispose();
     super.dispose();
   }
 
+  int get _pollingSeconds =>
+      widget.pollingSeconds < 1 ? 10 : widget.pollingSeconds;
+
+  void _startPolling() {
+    _timer?.cancel();
+    _timer = Timer.periodic(
+      Duration(seconds: _pollingSeconds),
+      (_) => _loadAlerts(silent: true),
+    );
+  }
+
   Future<void> _loadAlerts({bool silent = false}) async {
+    if (_refreshing) {
+      return;
+    }
+    _refreshing = true;
     if (!silent) {
       setState(() {
         _loading = true;
@@ -60,22 +88,29 @@ class _AlertsScreenState extends State<AlertsScreen> {
       });
     }
     try {
-      final alerts =
-          await widget.backendService.fetchAlerts(localDate: _selectedDate);
+      final alertsFuture = widget.backendService.fetchAlerts();
+      final snapshotsFuture =
+          widget.backendService.fetchSnapshots(localDate: _selectedDate);
+      final alerts = await alertsFuture;
+      final snapshots = await snapshotsFuture;
       if (mounted) {
         setState(() {
           _alerts = alerts;
+          _snapshots = snapshots;
           _loading = false;
           _error = null;
+          _lastUpdated = DateTime.now();
         });
       }
     } catch (error) {
-      if (mounted) {
+      if (mounted && !silent) {
         setState(() {
           _loading = false;
           _error = '$error';
         });
       }
+    } finally {
+      _refreshing = false;
     }
   }
 
@@ -99,66 +134,9 @@ class _AlertsScreenState extends State<AlertsScreen> {
     }
   }
 
-  Future<void> _resolveAlert(String alertId) async {
-    setState(() => _busyAlertId = alertId);
-    try {
-      await widget.backendService.updateAlertReview(
-        alertId,
-        reviewStatus: 'resolved',
-        reviewNote: 'Resolved from mobile app.',
-      );
-      await _loadAlerts(silent: true);
-      widget.onAlertAcknowledged?.call();
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Alert marked resolved.')),
-      );
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Resolve failed: $error')),
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _busyAlertId = null);
-      }
-    }
-  }
-
-  Future<void> _openEvents() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => EventsScreen(
-          backendService: widget.backendService,
-          settingsStore: widget.settingsStore,
-          initialDate: _selectedDate,
-          onAlertResolved: widget.onAlertAcknowledged,
-        ),
-      ),
-    );
-  }
-
-  Future<void> _openSnapshots() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => SnapshotsScreen(
-          backendService: widget.backendService,
-          settingsStore: widget.settingsStore,
-          initialDate: _selectedDate,
-          onAlertResolved: widget.onAlertAcknowledged,
-        ),
-      ),
-    );
-  }
-
   String _absoluteSnapshotUrl(String snapshotPath) {
-    final normalizedBase = widget.settingsStore.backendBaseUrl.endsWith('/')
-        ? widget.settingsStore.backendBaseUrl
-        : '${widget.settingsStore.backendBaseUrl}/';
+    final baseUrl = widget.backendService.apiClient.baseUrl;
+    final normalizedBase = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
     return Uri.parse(normalizedBase).resolve(snapshotPath).toString();
   }
 
@@ -204,7 +182,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
       initialDate: _selectedDate ?? now,
       firstDate: DateTime(now.year - 5, 1, 1),
       lastDate: DateTime(now.year + 1, 12, 31),
-      helpText: 'Filter alerts by date',
+      helpText: 'Filter snapshot history by date',
       confirmText: 'Apply',
     );
     if (picked == null) {
@@ -228,21 +206,94 @@ class _AlertsScreenState extends State<AlertsScreen> {
     await _loadAlerts();
   }
 
-  Widget _buildTopControls() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _IncidentSwitcher(
-          onOpenEvents: _openEvents,
-          onOpenSnapshots: _openSnapshots,
-        ),
-        _DateFilterBar(
-          selectedDate: _selectedDate,
-          onPickDate: _pickDate,
-          onClearDate: _clearDateFilter,
-          dateLabelBuilder: _calendarLabel,
-        ),
-      ],
+  Widget _buildHistoryControls() {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _historySearchController,
+            onChanged: (value) => setState(() => _historySearchQuery = value),
+            textInputAction: TextInputAction.search,
+            decoration: const InputDecoration(
+              prefixIcon: Icon(Icons.search_rounded),
+              labelText: 'Search snapshot history',
+              hintText: 'Code, title, location, source node',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              _DateFilterBar(
+                selectedDate: _selectedDate,
+                onPickDate: _pickDate,
+                onClearDate: _clearDateFilter,
+                dateLabelBuilder: _calendarLabel,
+              ),
+              OutlinedButton.icon(
+                onPressed: () => setState(
+                  () => _historyFiltersOpen = !_historyFiltersOpen,
+                ),
+                icon: const Icon(Icons.filter_list_rounded, size: 18),
+                label: Text(
+                  _historyFiltersOpen ? 'Hide filters' : 'More filters',
+                ),
+              ),
+              if (_hasHistoryFilters)
+                TextButton(
+                  onPressed: _clearHistoryFilters,
+                  child: const Text('Clear filters'),
+                ),
+            ],
+          ),
+          if (_historyFiltersOpen) ...[
+            const SizedBox(height: 10),
+            Column(
+              children: [
+                _FilterDropdown(
+                  label: 'Severity',
+                  value: _selectedSeverity,
+                  items: const <String, String>{
+                    'all': 'All severities',
+                    'critical': 'Critical',
+                    'warning': 'Warning',
+                    'normal': 'Normal',
+                    'info': 'Info',
+                  },
+                  onChanged: (value) => setState(
+                    () => _selectedSeverity = value,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                _FilterDropdown(
+                  label: 'Type',
+                  value: _selectedType,
+                  items: const <String, String>{
+                    'all': 'All types',
+                    'intruder': 'Intruder',
+                    'fire': 'Fire',
+                    'sensor': 'Sensor',
+                    'authorized': 'Authorized',
+                    'system': 'System',
+                  },
+                  onChanged: (value) => setState(() => _selectedType = value),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -283,141 +334,207 @@ class _AlertsScreenState extends State<AlertsScreen> {
     return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
   }
 
-  String _formatReviewStatusLabel(String value) {
-    final words = value.replaceAll('_', ' ').trim().split(RegExp(r'\s+'));
-    return words
-        .where((word) => word.isNotEmpty)
-        .map((word) => '${word[0].toUpperCase()}${word.substring(1)}')
-        .join(' ');
+  String _formatClock(DateTime value) {
+    final local = value.toLocal();
+    return '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}:'
+        '${local.second.toString().padLeft(2, '0')}';
+  }
+
+  Widget _buildAutoRefreshStatus() {
+    final suffix =
+        _lastUpdated == null ? '' : ' • updated ${_formatClock(_lastUpdated!)}';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+      child: Text(
+        'Auto-refreshing every $_pollingSeconds sec$suffix',
+        style: Theme.of(context).textTheme.bodySmall,
+      ),
+    );
+  }
+
+  bool get _hasHistoryFilters =>
+      _historySearchQuery.trim().isNotEmpty ||
+      _selectedDate != null ||
+      _selectedSeverity != 'all' ||
+      _selectedType != 'all';
+
+  void _clearHistoryFilters() {
+    _historySearchController.clear();
+    setState(() {
+      _historySearchQuery = '';
+      _selectedDate = null;
+      _selectedSeverity = 'all';
+      _selectedType = 'all';
+    });
+    unawaited(_loadAlerts());
+  }
+
+  int _severityRank(String severity) {
+    switch (severity.toLowerCase()) {
+      case 'critical':
+        return 0;
+      case 'warning':
+        return 1;
+      case 'normal':
+        return 2;
+      default:
+        return 3;
+    }
+  }
+
+  String _snapshotType(SnapshotItem snapshot) {
+    final eventCode = snapshot.eventCode.toUpperCase();
+    final text = '${snapshot.title} ${snapshot.message}'.toLowerCase();
+    if (eventCode.contains('FIRE') ||
+        eventCode.contains('SMOKE') ||
+        text.contains('fire') ||
+        text.contains('smoke')) {
+      return 'fire';
+    }
+    if (eventCode.contains('AUTHORIZED')) {
+      return 'authorized';
+    }
+    if (eventCode.contains('INTRUDER') ||
+        eventCode.contains('UNKNOWN') ||
+        text.contains('intruder') ||
+        text.contains('non-authorized')) {
+      return 'intruder';
+    }
+    if (eventCode.contains('SENSOR') ||
+        eventCode.contains('CAMERA') ||
+        text.contains('sensor') ||
+        text.contains('camera')) {
+      return 'sensor';
+    }
+    return 'system';
+  }
+
+  String _displaySnapshotTitle(SnapshotItem snapshot) {
+    return snapshot.isPersonSnapshot ? 'Person Detected' : snapshot.title;
+  }
+
+  List<AlertItem> get _activeAlerts {
+    final active = _alerts.where((alert) => !alert.acknowledged).toList()
+      ..sort((a, b) {
+        final severityCompare =
+            _severityRank(a.severity).compareTo(_severityRank(b.severity));
+        if (severityCompare != 0) {
+          return severityCompare;
+        }
+        return b.createdAt.compareTo(a.createdAt);
+      });
+    return active;
+  }
+
+  List<SnapshotItem> _snapshotHistory(List<AlertItem> activeAlerts) {
+    final activeSnapshotPaths = activeAlerts
+        .map((alert) => alert.snapshotPath.trim())
+        .where((path) => path.isNotEmpty)
+        .toSet();
+    final query = _historySearchQuery.toLowerCase().trim();
+
+    return _snapshots.where((snapshot) {
+      final snapshotPath = snapshot.snapshotPath.trim();
+      if (snapshotPath.isEmpty || activeSnapshotPaths.contains(snapshotPath)) {
+        return false;
+      }
+      final matchesSearch = query.isEmpty ||
+          snapshot.title.toLowerCase().contains(query) ||
+          snapshot.message.toLowerCase().contains(query) ||
+          snapshot.eventCode.toLowerCase().contains(query) ||
+          snapshot.sourceNodeLabel.toLowerCase().contains(query) ||
+          snapshot.location.toLowerCase().contains(query) ||
+          snapshot.recordLabel.toLowerCase().contains(query);
+      final matchesSeverity = _selectedSeverity == 'all' ||
+          snapshot.severity.toLowerCase() == _selectedSeverity;
+      final matchesType =
+          _selectedType == 'all' || _snapshotType(snapshot) == _selectedType;
+      return matchesSearch && matchesSeverity && matchesType;
+    }).toList();
   }
 
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return Column(
-        children: [
-          _buildTopControls(),
-          const Expanded(child: Center(child: CircularProgressIndicator())),
-        ],
-      );
+      return const Center(child: CircularProgressIndicator());
     }
 
     if (_error != null) {
-      return Column(
-        children: [
-          _buildTopControls(),
-          Expanded(
-            child: _ErrorState(error: _error!, onRetry: () => _loadAlerts()),
-          ),
-        ],
-      );
+      return _ErrorState(error: _error!, onRetry: () => _loadAlerts());
     }
 
-    if (_alerts.isEmpty) {
-      return Column(
-        children: [
-          _buildTopControls(),
-          const Expanded(child: _EmptyState()),
-        ],
+    final active = _activeAlerts;
+    final history = _snapshotHistory(active);
+
+    if (active.isEmpty && history.isEmpty && !_hasHistoryFilters) {
+      return RefreshIndicator(
+        onRefresh: _loadAlerts,
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
+          children: [
+            _buildAutoRefreshStatus(),
+            const SizedBox(height: 96),
+            const _EmptyState(),
+          ],
+        ),
       );
     }
-
-    final active = _alerts
-        .where((alert) => !alert.acknowledged && !alert.isTerminalReviewStatus)
-        .toList();
-    final acked = _alerts
-        .where((alert) => alert.acknowledged || alert.isTerminalReviewStatus)
-        .toList();
 
     return RefreshIndicator(
       onRefresh: _loadAlerts,
       child: ListView(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
         children: [
-          _buildTopControls(),
+          _buildAutoRefreshStatus(),
           const SizedBox(height: 8),
-          if (active.isNotEmpty) ...[
-            _SectionLabel(
-                label: 'Review Queue', count: active.length, isActive: true),
-            const SizedBox(height: 8),
+          _SectionLabel(
+              label: 'Active Alerts', count: active.length, isActive: true),
+          const SizedBox(height: 8),
+          if (active.isEmpty)
+            const _NoActiveAlertsCard()
+          else
             ...active.map(
               (alert) => Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: _AlertCard(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: _ActiveAlertCard(
                   alert: alert,
                   style: _severityStyle(alert.severity),
                   timeLabel: _formatDate(alert.createdAt),
-                  reviewStatusLabel:
-                      _formatReviewStatusLabel(alert.reviewStatus),
                   snapshotUrl: alert.hasSnapshot
                       ? _absoluteSnapshotUrl(alert.snapshotPath)
                       : null,
                   imageHeaders: _imageHeaders,
                   busy: _busyAlertId == alert.id,
                   onAcknowledge: () => _acknowledge(alert.id),
-                  onResolve: () => _resolveAlert(alert.id),
                 ),
               ),
             ),
-            const SizedBox(height: 8),
-          ],
-          if (acked.isNotEmpty) ...[
-            _SectionLabel(
-              label: 'Reviewed / Acknowledged',
-              count: acked.length,
-              isActive: false,
-            ),
-            const SizedBox(height: 8),
-            ...acked.map(
-              (alert) => Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: _AlertCard(
-                  alert: alert,
-                  style: _severityStyle(alert.severity),
-                  timeLabel: _formatDate(alert.createdAt),
-                  reviewStatusLabel:
-                      _formatReviewStatusLabel(alert.reviewStatus),
-                  snapshotUrl: alert.hasSnapshot
-                      ? _absoluteSnapshotUrl(alert.snapshotPath)
-                      : null,
-                  imageHeaders: _imageHeaders,
-                  busy: _busyAlertId == alert.id,
-                  onAcknowledge: null,
-                  onResolve: null,
-                  dimmed: true,
-                ),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _IncidentSwitcher extends StatelessWidget {
-  const _IncidentSwitcher({
-    required this.onOpenEvents,
-    required this.onOpenSnapshots,
-  });
-
-  final VoidCallback onOpenEvents;
-  final VoidCallback onOpenSnapshots;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(0, 8, 0, 8),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: [
-          const FilledButton.tonal(onPressed: null, child: Text('Alerts')),
-          OutlinedButton(onPressed: onOpenEvents, child: const Text('Events')),
-          OutlinedButton(
-            onPressed: onOpenSnapshots,
-            child: const Text('Snapshots'),
+          const SizedBox(height: 20),
+          _SectionLabel(
+            label: 'Snapshot History',
+            count: history.length,
+            isActive: false,
           ),
+          const SizedBox(height: 8),
+          _buildHistoryControls(),
+          const SizedBox(height: 12),
+          if (history.isEmpty)
+            const _NoSnapshotHistoryCard()
+          else
+            ...history.map(
+              (snapshot) => Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: _SnapshotHistoryCard(
+                  snapshot: snapshot,
+                  title: _displaySnapshotTitle(snapshot),
+                  severityColor: _severityStyle(snapshot.severity).text,
+                  timeLabel: _formatDate(snapshot.capturedAt),
+                  snapshotUrl: _absoluteSnapshotUrl(snapshot.snapshotPath),
+                  imageHeaders: _imageHeaders,
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -440,29 +557,26 @@ class _DateFilterBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasFilter = selectedDate != null;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(0, 0, 0, 8),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          OutlinedButton.icon(
-            onPressed: onPickDate,
-            icon: const Icon(Icons.calendar_month_outlined, size: 18),
-            label: Text(
-              hasFilter
-                  ? 'Date: ${dateLabelBuilder(selectedDate!)}'
-                  : 'Filter by date',
-            ),
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        OutlinedButton.icon(
+          onPressed: onPickDate,
+          icon: const Icon(Icons.calendar_month_outlined, size: 18),
+          label: Text(
+            hasFilter
+                ? 'Date: ${dateLabelBuilder(selectedDate!)}'
+                : 'Filter history by date',
           ),
-          if (hasFilter)
-            TextButton(
-              onPressed: onClearDate,
-              child: const Text('Clear'),
-            ),
-        ],
-      ),
+        ),
+        if (hasFilter)
+          TextButton(
+            onPressed: onClearDate,
+            child: const Text('Clear'),
+          ),
+      ],
     );
   }
 }
@@ -513,180 +627,387 @@ class _SectionLabel extends StatelessWidget {
   }
 }
 
-class _AlertCard extends StatelessWidget {
-  const _AlertCard({
+class _FilterDropdown extends StatelessWidget {
+  const _FilterDropdown({
+    required this.label,
+    required this.value,
+    required this.items,
+    required this.onChanged,
+  });
+
+  final String label;
+  final String value;
+  final Map<String, String> items;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      initialValue: value,
+      decoration: InputDecoration(
+        labelText: label,
+        border: const OutlineInputBorder(),
+      ),
+      items: items.entries
+          .map(
+            (entry) => DropdownMenuItem<String>(
+              value: entry.key,
+              child: Text(entry.value),
+            ),
+          )
+          .toList(),
+      onChanged: (value) {
+        if (value != null) {
+          onChanged(value);
+        }
+      },
+    );
+  }
+}
+
+class _NoActiveAlertsCard extends StatelessWidget {
+  const _NoActiveAlertsCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF26A69A).withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(18),
+        border:
+            Border.all(color: const Color(0xFF26A69A).withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.check_circle_outline_rounded,
+              color: Color(0xFF26A69A)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'No active alerts need acknowledgement right now.',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodyMedium
+                  ?.copyWith(color: cs.onSurface),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NoSnapshotHistoryCard extends StatelessWidget {
+  const _NoSnapshotHistoryCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: const Row(
+        children: [
+          Icon(Icons.photo_library_outlined),
+          SizedBox(width: 10),
+          Expanded(child: Text('No snapshots match the current filters.')),
+        ],
+      ),
+    );
+  }
+}
+
+class _SnapshotHistoryCard extends StatelessWidget {
+  const _SnapshotHistoryCard({
+    required this.snapshot,
+    required this.title,
+    required this.severityColor,
+    required this.timeLabel,
+    required this.snapshotUrl,
+    required this.imageHeaders,
+  });
+
+  final SnapshotItem snapshot;
+  final String title;
+  final Color severityColor;
+  final String timeLabel;
+  final String snapshotUrl;
+  final Map<String, String>? imageHeaders;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _AlertSnapshotPreview(
+            imageUrl: snapshotUrl,
+            headers: imageHeaders,
+            overlays: snapshot.faceOverlays,
+            severityColor: severityColor,
+          ),
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    _StatusPill(label: snapshot.recordLabel, color: cs.primary),
+                    _StatusPill(
+                      label: snapshot.severity.toUpperCase(),
+                      color: severityColor,
+                      filled: true,
+                    ),
+                    _StatusPill(
+                      label: snapshot.isAlertRecord
+                          ? 'Acknowledged Alert'
+                          : 'Event Snapshot',
+                      color: const Color(0xFF1E88E5),
+                    ),
+                    if (snapshot.linkedRecordLabel.isNotEmpty)
+                      _StatusPill(
+                        label: snapshot.linkedRecordLabel,
+                        color: const Color(0xFF7E57C2),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  title,
+                  style: tt.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (snapshot.message.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    snapshot.message,
+                    style: tt.bodySmall?.copyWith(
+                      color: cs.onSurfaceVariant,
+                      height: 1.45,
+                    ),
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    if (snapshot.eventCode.isNotEmpty)
+                      _MetadataChip(
+                        icon: Icons.confirmation_number_outlined,
+                        label: snapshot.eventCode,
+                      ),
+                    if (snapshot.sourceNodeLabel.isNotEmpty)
+                      _MetadataChip(
+                        icon: Icons.memory_rounded,
+                        label: snapshot.sourceNodeLabel,
+                      ),
+                    if (snapshot.location.isNotEmpty)
+                      _MetadataChip(
+                        icon: Icons.place_outlined,
+                        label: snapshot.location,
+                      ),
+                    _MetadataChip(
+                      icon: Icons.access_time_rounded,
+                      label: timeLabel,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActiveAlertCard extends StatelessWidget {
+  const _ActiveAlertCard({
     required this.alert,
     required this.style,
     required this.timeLabel,
-    required this.reviewStatusLabel,
     required this.busy,
     required this.onAcknowledge,
-    required this.onResolve,
     this.snapshotUrl,
     this.imageHeaders,
-    this.dimmed = false,
   });
 
   final AlertItem alert;
   final ({Color bg, Color border, Color text, IconData icon}) style;
   final String timeLabel;
-  final String reviewStatusLabel;
   final bool busy;
-  final VoidCallback? onAcknowledge;
-  final VoidCallback? onResolve;
+  final VoidCallback onAcknowledge;
   final String? snapshotUrl;
   final Map<String, String>? imageHeaders;
-  final bool dimmed;
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final tt = Theme.of(context).textTheme;
 
-    return Opacity(
-      opacity: dimmed ? 0.55 : 1.0,
-      child: Container(
-        decoration: BoxDecoration(
-          color: cs.surface,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-            color: dimmed ? cs.outlineVariant : style.border,
-            width: dimmed ? 1 : 1.4,
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: style.border, width: 1.4),
+        boxShadow: [
+          BoxShadow(
+            color: cs.shadow.withValues(alpha: 0.06),
+            blurRadius: 16,
+            offset: const Offset(0, 8),
           ),
-          boxShadow: [
-            BoxShadow(
-              color: cs.shadow.withValues(alpha: dimmed ? 0.02 : 0.06),
-              blurRadius: 16,
-              offset: const Offset(0, 8),
-            ),
-          ],
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (snapshotUrl != null)
-              _AlertSnapshotPreview(
-                imageUrl: snapshotUrl!,
-                headers: imageHeaders,
-                overlays: alert.faceOverlays,
-                severityColor: style.text,
-              ),
-            Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (snapshotUrl != null)
+            _AlertSnapshotPreview(
+              imageUrl: snapshotUrl!,
+              headers: imageHeaders,
+              overlays: alert.faceOverlays,
+              severityColor: style.text,
+            )
+          else
+            _SnapshotFallbackPreview(severityColor: style.text),
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    _StatusPill(label: 'Alert #${alert.id}', color: cs.primary),
+                    _StatusPill(
+                      label: alert.severity.toUpperCase(),
+                      color: style.text,
+                      filled: true,
+                    ),
+                    if (alert.eventId != null)
                       _StatusPill(
-                        label: 'Alert #${alert.id}',
-                        color: cs.primary,
+                        label: 'Linked Event #${alert.eventId}',
+                        color: const Color(0xFF7E57C2),
                       ),
-                      _StatusPill(
-                        label: alert.severity.toUpperCase(),
-                        color: style.text,
-                        filled: true,
-                      ),
-                      _StatusPill(
-                        label: reviewStatusLabel.isEmpty
-                            ? 'Needs Review'
-                            : reviewStatusLabel,
-                        color: const Color(0xFF1E88E5),
-                      ),
-                      if (alert.eventId != null)
-                        _StatusPill(
-                          label: 'Linked Event #${alert.eventId}',
-                          color: const Color(0xFF7E57C2),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(style.icon, size: 18, color: style.text),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        alert.title,
+                        style: tt.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w700,
+                          color: cs.onSurface,
                         ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(style.icon, size: 18, color: style.text),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          alert.title,
-                          style: tt.titleSmall?.copyWith(
-                            fontWeight: FontWeight.w700,
-                            color: cs.onSurface,
-                          ),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                    ],
-                  ),
-                  if (alert.message.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      alert.message,
-                      style: tt.bodySmall?.copyWith(
-                        height: 1.45,
-                        color: cs.onSurfaceVariant,
-                      ),
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
                     ),
                   ],
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      if (alert.eventCode.isNotEmpty)
-                        _MetadataChip(
-                          icon: Icons.confirmation_number_outlined,
-                          label: alert.eventCode,
-                        ),
-                      if (alert.sourceNodeLabel.isNotEmpty)
-                        _MetadataChip(
-                          icon: Icons.memory_rounded,
-                          label: alert.sourceNodeLabel,
-                        ),
-                      if (alert.location.isNotEmpty)
-                        _MetadataChip(
-                          icon: Icons.place_outlined,
-                          label: alert.location,
-                        ),
-                      _MetadataChip(
-                        icon: Icons.access_time_rounded,
-                        label: timeLabel,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      if (onAcknowledge != null)
-                        OutlinedButton.icon(
-                          onPressed: busy ? null : onAcknowledge,
-                          icon: const Icon(Icons.done_rounded, size: 17),
-                          label: const Text('Acknowledge'),
-                        ),
-                      if (onResolve != null)
-                        FilledButton.tonalIcon(
-                          onPressed: busy ? null : onResolve,
-                          icon: const Icon(Icons.task_alt_rounded, size: 17),
-                          label: const Text('Resolve'),
-                        ),
-                      if (onAcknowledge == null && onResolve == null)
-                        const _ReviewedIndicator(),
-                    ],
+                ),
+                if (alert.message.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    alert.message,
+                    style: tt.bodySmall?.copyWith(
+                      height: 1.45,
+                      color: cs.onSurfaceVariant,
+                    ),
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ],
-              ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    if (alert.eventCode.isNotEmpty)
+                      _MetadataChip(
+                        icon: Icons.confirmation_number_outlined,
+                        label: alert.eventCode,
+                      ),
+                    if (alert.sourceNodeLabel.isNotEmpty)
+                      _MetadataChip(
+                        icon: Icons.memory_rounded,
+                        label: alert.sourceNodeLabel,
+                      ),
+                    if (alert.location.isNotEmpty)
+                      _MetadataChip(
+                        icon: Icons.place_outlined,
+                        label: alert.location,
+                      ),
+                    _MetadataChip(
+                      icon: Icons.access_time_rounded,
+                      label: timeLabel,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: busy ? null : onAcknowledge,
+                  icon: const Icon(Icons.done_rounded, size: 17),
+                  label: Text(busy ? 'Acknowledging...' : 'Acknowledge'),
+                ),
+              ],
             ),
-          ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SnapshotFallbackPreview extends StatelessWidget {
+  const _SnapshotFallbackPreview({required this.severityColor});
+
+  final Color severityColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return AspectRatio(
+      aspectRatio: 16 / 9,
+      child: Container(
+        color: Colors.black12,
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.image_not_supported_outlined,
+                  size: 42, color: severityColor),
+              const SizedBox(height: 8),
+              const Text('Snapshot unavailable'),
+            ],
+          ),
         ),
       ),
     );
@@ -824,33 +1145,6 @@ class _MetadataChip extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-}
-
-class _ReviewedIndicator extends StatelessWidget {
-  const _ReviewedIndicator();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(
-          Icons.check_circle_rounded,
-          size: 16,
-          color: Color(0xFF26A69A),
-        ),
-        SizedBox(width: 5),
-        Text(
-          'Reviewed',
-          style: TextStyle(
-            color: Color(0xFF26A69A),
-            fontSize: 12,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ],
     );
   }
 }

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../core/network/api_client.dart';
 import '../core/storage/settings_store.dart';
 import '../models/alert_item.dart';
 import 'alert_notification_service.dart';
@@ -9,14 +10,17 @@ class AlertNotificationCoordinator {
   AlertNotificationCoordinator({
     required SettingsStore settingsStore,
     required BackendService Function() backendServiceFactory,
+    Future<void> Function()? onAuthenticationExpired,
     AlertNotificationService? notificationService,
   })  : _settingsStore = settingsStore,
         _backendServiceFactory = backendServiceFactory,
+        _onAuthenticationExpired = onAuthenticationExpired,
         _notificationService =
             notificationService ?? AlertNotificationService();
 
   final SettingsStore _settingsStore;
   final BackendService Function() _backendServiceFactory;
+  final Future<void> Function()? _onAuthenticationExpired;
   final AlertNotificationService _notificationService;
 
   Timer? _timer;
@@ -93,6 +97,10 @@ class AlertNotificationCoordinator {
         body: body,
         critical: _severityRank(primary.severity) >= _severityRank('critical'),
       );
+    } on ApiException catch (error) {
+      if (error.statusCode == 401) {
+        await _onAuthenticationExpired?.call();
+      }
     } catch (_) {
       // Keep app stable if backend is temporarily unreachable.
     } finally {

@@ -8,6 +8,7 @@ class FaceOverlay {
     required this.height,
     required this.classification,
     required this.label,
+    this.kind = 'face',
     this.confidence,
   });
 
@@ -15,11 +16,20 @@ class FaceOverlay {
   final int y;
   final int width;
   final int height;
+  final String kind;
   final String classification;
   final String label;
   final double? confidence;
 
   bool get isAuthorized => classification.toUpperCase() == 'AUTHORIZED';
+
+  bool get isFire {
+    final normalizedKind = kind.toLowerCase();
+    final normalizedClassification = classification.toUpperCase();
+    return normalizedKind == 'fire' ||
+        normalizedClassification.contains('FIRE') ||
+        normalizedClassification.contains('SMOKE');
+  }
 
   factory FaceOverlay.fromJson(Map<String, dynamic> json) {
     final bbox = json['bbox'];
@@ -47,6 +57,7 @@ class FaceOverlay {
       y: readAt(1),
       width: readAt(2),
       height: readAt(3),
+      kind: json['kind']?.toString() ?? 'face',
       classification: classification,
       label: json['label']?.toString() ?? classification,
       confidence: confidence,
@@ -154,7 +165,7 @@ class SnapshotItem {
     final message = json['message']?.toString();
     final description = json['description']?.toString();
     final normalizedRecordType = recordType == 'event' ? 'event' : 'alert';
-    final overlaysRaw = json['face_overlays'];
+    final overlaysRaw = json['snapshot_overlays'] ?? json['face_overlays'];
     final overlays = overlaysRaw is List
         ? overlaysRaw
             .whereType<Map<String, dynamic>>()

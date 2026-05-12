@@ -220,23 +220,29 @@ class _FaceOverlayPainter extends CustomPainter {
         continue;
       }
 
-      final borderColor = overlay.isAuthorized
-          ? const Color(0xFF2ECC71)
-          : const Color(0xFFFF9800);
+      final normalizedClassification = overlay.classification.toUpperCase();
+      final borderColor = overlay.isFire
+          ? (normalizedClassification.contains('SMOKE')
+              ? const Color(0xFFFF9800)
+              : const Color(0xFFFF3B30))
+          : (overlay.isAuthorized
+              ? const Color(0xFF2ECC71)
+              : const Color(0xFFFF9800));
       final borderPaint = Paint()
         ..color = borderColor
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.2;
       canvas.drawRect(clampedBox, borderPaint);
 
-      final normalizedClassification = overlay.classification.toUpperCase();
-      final labelText = normalizedClassification == 'AUTHORIZED'
-          ? 'AUTH'
-          : (normalizedClassification == 'NON-AUTHORIZED' ||
-                  normalizedClassification == 'UNAUTHORIZED' ||
-                  normalizedClassification == 'UNKNOWN')
-              ? 'NON-AUTH'
-              : 'PERSON';
+      final labelText = overlay.isFire
+          ? (normalizedClassification.contains('SMOKE') ? 'SMOKE' : 'FIRE')
+          : normalizedClassification == 'AUTHORIZED'
+              ? 'AUTH'
+              : (normalizedClassification == 'NON-AUTHORIZED' ||
+                      normalizedClassification == 'UNAUTHORIZED' ||
+                      normalizedClassification == 'UNKNOWN')
+                  ? 'NON-AUTH'
+                  : 'PERSON';
       final textPainter = TextPainter(
         text: TextSpan(
           text: labelText,

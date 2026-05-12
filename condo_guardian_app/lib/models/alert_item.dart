@@ -120,7 +120,8 @@ class AlertItem {
       sourceNode: replaceKnownNodeIds(json['source_node']?.toString() ?? ''),
       location: replaceKnownNodeIds(json['location']?.toString() ?? ''),
       snapshotPath: json['snapshot_path']?.toString() ?? '',
-      faceOverlays: _faceOverlaysFromJson(json['face_overlays']),
+      faceOverlays: _faceOverlaysFromJson(
+          json['snapshot_overlays'] ?? json['face_overlays']),
       reviewStatus: json['review_status']?.toString() ?? 'needs_review',
       reviewNote: json['review_note']?.toString() ?? '',
       reviewedBy: json['reviewed_by']?.toString() ?? '',
