@@ -1,25 +1,24 @@
 @echo off
 setlocal enabledelayedexpansion
 
-REM Builds a distributable Windows installer (Setup EXE) using Inno Setup.
-REM Prereq:
-REM 1) Python, npm, uv installed
-REM 2) Inno Setup 6 installed (iscc.exe available)
+REM Builds the IntruFlare Windows installer using Inno Setup.
+REM Optional: set MODEL_PACK_ZIP=C:\path\to\IntruFlare-AI-Models-v2.2.0.zip
 
 set "ROOT=%~dp0.."
 set "STAGING=%ROOT%\installer\staging"
 set "DIST=%ROOT%\installer\dist"
+set "VERSION=2.2.0"
 
 pushd "%ROOT%" || (
   echo [ERROR] Unable to locate repository root.
   exit /b 1
 )
 
-echo [1/8] Building backend executable + dashboard...
+echo [1/7] Building desktop executable + dashboard...
 call "%ROOT%\scripts\windows_build_backend.bat"
 if errorlevel 1 goto :fail
 
-echo [2/8] Checking Inno Setup compiler (iscc)...
+echo [2/7] Checking Inno Setup compiler (iscc)...
 where iscc >nul 2>nul
 if errorlevel 1 (
   echo [ERROR] iscc.exe not found.
@@ -28,34 +27,32 @@ if errorlevel 1 (
   goto :fail
 )
 
-echo [3/8] Preparing installer staging folders...
+echo [3/7] Preparing installer staging folders...
 if exist "%STAGING%" rmdir /s /q "%STAGING%"
-mkdir "%STAGING%" || goto :fail
+mkdir "%STAGING%\app" || goto :fail
+mkdir "%STAGING%\models" || goto :fail
+mkdir "%STAGING%\prereqs" || goto :fail
 if not exist "%DIST%" mkdir "%DIST%" || goto :fail
 
-echo [4/8] Copying backend bundle...
-robocopy "%ROOT%\backend\dist\backend" "%STAGING%\backend\dist\backend" /E /NFL /NDL /NJH /NJS /NP >nul
+echo [4/7] Copying desktop executable bundle...
+robocopy "%ROOT%\dist\CondoGuardian" "%STAGING%\app" /E /NFL /NDL /NJH /NJS /NP >nul
 if errorlevel 8 goto :fail
 
-echo [5/8] Copying dashboard build...
-robocopy "%ROOT%\web_dashboard_ui\dist" "%STAGING%\web_dashboard_ui\dist" /E /NFL /NDL /NJH /NJS /NP >nul
-if errorlevel 8 goto :fail
-
-echo [6/8] Copying runtime defaults and models...
-if exist "%ROOT%\.env" (
-  copy /Y "%ROOT%\.env" "%STAGING%\.env" >nul || goto :fail
-) else if exist "%ROOT%\.env.example" (
-  copy /Y "%ROOT%\.env.example" "%STAGING%\.env" >nul || goto :fail
-)
-
-if exist "%ROOT%\backend\storage\models" (
-  robocopy "%ROOT%\backend\storage\models" "%STAGING%\backend\storage\models" /E /NFL /NDL /NJH /NJS /NP >nul
+echo [5/7] Staging AI models...
+if defined MODEL_PACK_ZIP (
+  if not exist "%MODEL_PACK_ZIP%" (
+    echo [ERROR] MODEL_PACK_ZIP not found: %MODEL_PACK_ZIP%
+    goto :fail
+  )
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -Path $env:MODEL_PACK_ZIP -DestinationPath '%STAGING%\models' -Force" || goto :fail
+) else if exist "%ROOT%\backend\storage\models" (
+  robocopy "%ROOT%\backend\storage\models" "%STAGING%\models" /E /NFL /NDL /NJH /NJS /NP >nul
   if errorlevel 8 goto :fail
+) else (
+  echo [ERROR] No MODEL_PACK_ZIP or backend\storage\models found.
+  echo [INFO] The full offline installer requires bundled AI models.
+  goto :fail
 )
-
-if not exist "%STAGING%\backend\storage\snapshots" mkdir "%STAGING%\backend\storage\snapshots"
-if not exist "%STAGING%\backend\storage\logs" mkdir "%STAGING%\backend\storage\logs"
-if not exist "%STAGING%\backend\storage\backups" mkdir "%STAGING%\backend\storage\backups"
 
 if exist "%ROOT%\installer\prereqs" (
   echo [INFO] Copying optional prerequisite installers...
@@ -63,29 +60,31 @@ if exist "%ROOT%\installer\prereqs" (
   if errorlevel 8 goto :fail
 )
 
-echo [7/8] Writing launcher scripts...
-(
-  echo @echo off
-  echo setlocal
-  echo set "APP_DIR=%%~dp0"
-  echo start "Thesis Backend" "%%APP_DIR%%backend\dist\backend\backend.exe"
-  echo powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='http://127.0.0.1:8765/health'; $ok=$false; for($i=0; $i -lt 30; $i^++){ try { Invoke-WebRequest -UseBasicParsing -Uri $u -TimeoutSec 2 ^| Out-Null; $ok=$true; break } catch {}; Start-Sleep -Milliseconds 500 }; if(-not $ok){ Start-Sleep -Seconds 2 }" ^>nul 2^>^&1
-  echo start "" "http://127.0.0.1:8765/dashboard"
-  echo endlocal
-) > "%STAGING%\run_thesis_monitor.bat"
+echo [6/7] Validating staged app bundle...
+if not exist "%STAGING%\app\CondoGuardian.exe" (
+  echo [ERROR] Staged app is missing CondoGuardian.exe.
+  goto :fail
+)
+if not exist "%STAGING%\models\fire\yolov8s_fire_smoke_hardneg.onnx" (
+  echo [ERROR] Staged model pack is missing fire\yolov8s_fire_smoke_hardneg.onnx.
+  goto :fail
+)
+if not exist "%STAGING%\models\insightface\models\buffalo_l\det_10g.onnx" (
+  echo [ERROR] Staged model pack is missing insightface\models\buffalo_l\det_10g.onnx.
+  goto :fail
+)
+if not exist "%STAGING%\models\insightface\models\buffalo_l\w600k_r50.onnx" (
+  echo [ERROR] Staged model pack is missing insightface\models\buffalo_l\w600k_r50.onnx.
+  goto :fail
+)
 
-(
-  echo @echo off
-  echo taskkill /F /IM backend.exe /T ^>nul 2^>^&1
-) > "%STAGING%\stop_thesis_monitor.bat"
-
-echo [8/8] Building installer setup EXE...
-iscc "%ROOT%\scripts\windows_installer.iss" /DSourceRoot="%ROOT%"
+echo [7/7] Building installer setup EXE...
+iscc "%ROOT%\scripts\windows_installer.iss" /DSourceRoot="%ROOT%" /DMyAppVersion="%VERSION%"
 if errorlevel 1 goto :fail
 
 echo.
 echo [OK] Installer build complete.
-echo Output: %DIST%\ThesisMonitorSetup.exe
+echo Output: %DIST%\IntruFlare-Setup-v%VERSION%.exe
 popd
 exit /b 0
 

@@ -158,7 +158,7 @@ def load_settings() -> Settings:
 
     backend_root = Path(__file__).resolve().parents[2]
     project_root = backend_root.parent
-    storage_root = backend_root / "storage"
+    storage_root = Path(os.environ.get("STORAGE_ROOT", backend_root / "storage"))
     db_path = Path(os.environ.get("BACKEND_DB_PATH", storage_root / "system.db"))
 
     default_fire_model = _first_existing_path(

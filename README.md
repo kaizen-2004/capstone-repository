@@ -145,21 +145,28 @@ Run end-to-end preview checks (tests, build, backend startup, auth, event trigge
 bash scripts/preview_full_system.sh
 ```
 
-## Windows Packaging (PyInstaller)
+## Windows Packaging
 
-```bash
-cd web_dashboard_ui
-npm install
-npm run build
+Pushing to `main` builds the portable Windows artifact through GitHub Actions:
 
-cd ..
-python -m pip install pyinstaller
-python -m PyInstaller backend/run_backend.py --name backend --onedir --clean --noconfirm --distpath backend/dist --workpath backend/build --specpath backend --paths . --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto --hidden-import uvicorn.lifespan.on
+```text
+CondoGuardian-Windows
 ```
 
-Packaged backend entry point (Windows): `backend/dist/backend/backend.exe`
+For thesis/demo distribution, publish the full offline installer:
 
-Before shipping, include model files under `backend/storage/models` and dashboard assets from `web_dashboard_ui/dist` in the same project layout used at runtime.
+```text
+IntruFlare-Setup-v2.2.0.exe
+```
+
+The installer expects the AI model pack release asset:
+
+```text
+IntruFlare-AI-Models-v2.2.0.zip
+```
+
+See `docs/instructions/deployment/windows_local_startup.md` for the model-pack
+layout, installer workflow inputs, and Windows runtime paths.
 
 ## Sensor Event Contract
 

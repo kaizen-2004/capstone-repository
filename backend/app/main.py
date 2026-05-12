@@ -47,13 +47,32 @@ def get_app_data_dir() -> Path:
     return app_dir
 
 
-def configure_packaged_db_path() -> None:
+def configure_packaged_runtime_paths() -> None:
     if not is_packaged_runtime():
         return
-    if os.getenv("BACKEND_DB_PATH", "").strip():
-        return
-    db_path = get_app_data_dir() / "system.db"
-    os.environ["BACKEND_DB_PATH"] = str(db_path)
+
+    app_data_dir = get_app_data_dir()
+
+    def _set_default_path(name: str, path: Path) -> None:
+        if not os.getenv(name, "").strip():
+            os.environ[name] = str(path)
+
+    storage_root = Path(os.getenv("STORAGE_ROOT", "").strip() or app_data_dir)
+    _set_default_path("THESIS_ENV_FILE", app_data_dir / ".env")
+    _set_default_path("STORAGE_ROOT", storage_root)
+    _set_default_path("BACKEND_DB_PATH", storage_root / "system.db")
+    _set_default_path("SNAPSHOT_ROOT", storage_root / "snapshots")
+    _set_default_path("LOGS_ROOT", storage_root / "logs")
+    _set_default_path("FACE_SAMPLES_ROOT", storage_root / "face_samples")
+    _set_default_path("MODELS_ROOT", storage_root / "models")
+    _set_default_path(
+        "FACE_INSIGHTFACE_MODEL_ROOT",
+        storage_root / "models" / "insightface",
+    )
+    _set_default_path(
+        "FIRE_MODEL_PATH",
+        storage_root / "models" / "fire" / "yolov8s_fire_smoke_hardneg.onnx",
+    )
 
 
 def _seed_default_settings(settings) -> None:
@@ -87,7 +106,7 @@ def _camera_stream_setting_key(node_id: str) -> str | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    configure_packaged_db_path()
+    configure_packaged_runtime_paths()
     settings = load_settings()
     app.state.settings = settings
 

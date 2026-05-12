@@ -26,6 +26,15 @@ Override using env vars:
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD`
 
+## Storage Env Vars
+
+- `STORAGE_ROOT` (default `backend/storage`; packaged Windows builds default to `%LOCALAPPDATA%\CondoGuardian`)
+- `BACKEND_DB_PATH` (default `${STORAGE_ROOT}/system.db`)
+- `SNAPSHOT_ROOT` (default `${STORAGE_ROOT}/snapshots`)
+- `LOGS_ROOT` (default `${STORAGE_ROOT}/logs`)
+- `FACE_SAMPLES_ROOT` (default `${STORAGE_ROOT}/face_samples`)
+- `MODELS_ROOT` (default `${STORAGE_ROOT}/models`)
+
 ## Camera Env Vars
 
 - `CAMERA_SOURCE_MODE` (`rtsp` default, `webcam` for temporary local testing)

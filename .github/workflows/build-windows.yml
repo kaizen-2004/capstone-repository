@@ -2,9 +2,33 @@ name: Build Windows EXE
 
 on:
   workflow_dispatch:
+    inputs:
+      build_installer:
+        description: "Build full offline IntruFlare installer with bundled AI models"
+        required: false
+        default: false
+        type: boolean
+      model_release_tag:
+        description: "Release tag containing the AI model pack asset"
+        required: false
+        default: "v2.2.0"
+        type: string
+      model_asset_name:
+        description: "AI model pack asset name"
+        required: false
+        default: "IntruFlare-AI-Models-v2.2.0.zip"
+        type: string
+      upload_installer_to_release:
+        description: "Upload installer EXE back to the model release"
+        required: false
+        default: true
+        type: boolean
   push:
     branches:
       - main
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
@@ -14,6 +38,7 @@ jobs:
       PYTHON_VERSION: "3.11"
       NODE_VERSION: "20"
       APP_NAME: "CondoGuardian"
+      INSTALLER_VERSION: "2.2.0"
 
     steps:
       - name: Checkout repository
@@ -51,14 +76,11 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Check optional model bundle
+      - name: Check external model bundle expectation
         shell: pwsh
         run: |
-          if (Test-Path "backend\storage\models") {
-            Write-Host "Model directory found and will be bundled."
-          } else {
-            Write-Warning "Model directory not found in repository. EXE will build without local models."
-          }
+          Write-Host "Portable EXE builds without committed AI models."
+          Write-Host "Installer builds download IntruFlare-AI-Models-v2.2.0.zip from a release asset."
 
       - name: Verify backend import
         shell: pwsh
@@ -93,9 +115,6 @@ jobs:
           if (Test-Path "tools\ffmpeg.exe") {
             $pyinstallerArgs += @("--add-binary", "tools\ffmpeg.exe;tools")
           }
-          if (Test-Path "backend\storage\models") {
-            $pyinstallerArgs += @("--add-data", "backend\storage\models;backend\storage\models")
-          }
           $pyinstallerArgs += "desktop_launcher.py"
           pyinstaller @pyinstallerArgs
 
@@ -117,3 +136,105 @@ jobs:
           path: dist/CondoGuardian
           if-no-files-found: error
           retention-days: 14
+
+      - name: Prepare installer staging
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_installer }}
+        shell: pwsh
+        run: |
+          if (Test-Path "installer\staging") {
+            Remove-Item "installer\staging" -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path "installer\staging\app" | Out-Null
+          New-Item -ItemType Directory -Force -Path "installer\staging\models" | Out-Null
+          New-Item -ItemType Directory -Force -Path "installer\staging\prereqs" | Out-Null
+
+          Copy-Item "dist\${env:APP_NAME}\*" "installer\staging\app" -Recurse -Force
+          if (Test-Path "installer\prereqs") {
+            Copy-Item "installer\prereqs\*" "installer\staging\prereqs" -Recurse -Force
+          }
+
+      - name: Download AI model pack release asset
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_installer }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force -Path "installer\model-pack" | Out-Null
+          gh release download "${{ inputs.model_release_tag }}" `
+            --repo "${{ github.repository }}" `
+            --pattern "${{ inputs.model_asset_name }}" `
+            --dir "installer\model-pack"
+
+          $modelZip = Join-Path "installer\model-pack" "${{ inputs.model_asset_name }}"
+          if (!(Test-Path $modelZip)) {
+            Write-Error "Model pack asset was not downloaded: $modelZip"
+            exit 1
+          }
+
+      - name: Extract and verify AI model pack
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_installer }}
+        shell: pwsh
+        run: |
+          $modelZip = Join-Path "installer\model-pack" "${{ inputs.model_asset_name }}"
+          Expand-Archive -Path $modelZip -DestinationPath "installer\staging\models" -Force
+
+          $requiredFiles = @(
+            "installer\staging\models\fire\yolov8s_fire_smoke_hardneg.onnx",
+            "installer\staging\models\insightface\models\buffalo_l\det_10g.onnx",
+            "installer\staging\models\insightface\models\buffalo_l\w600k_r50.onnx"
+          )
+
+          foreach ($path in $requiredFiles) {
+            if (!(Test-Path $path)) {
+              Write-Error "Required model file missing after extraction: $path"
+              exit 1
+            }
+          }
+
+      - name: Install Inno Setup
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_installer }}
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build IntruFlare installer
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_installer }}
+        shell: pwsh
+        run: |
+          if (Test-Path "installer\dist") {
+            Remove-Item "installer\dist" -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path "installer\dist" | Out-Null
+
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) {
+            $iscc = "iscc"
+          }
+
+          & $iscc "scripts\windows_installer.iss" "/DSourceRoot=$PWD" "/DMyAppVersion=${env:INSTALLER_VERSION}"
+
+          $installerPath = "installer\dist\IntruFlare-Setup-v${env:INSTALLER_VERSION}.exe"
+          if (!(Test-Path $installerPath)) {
+            Write-Error "Installer not found: $installerPath"
+            exit 1
+          }
+          Get-Item $installerPath
+
+      - name: Upload installer artifact
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_installer }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: IntruFlare-Setup-v2.2.0
+          path: installer/dist/IntruFlare-Setup-v2.2.0.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload installer to release
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_installer && inputs.upload_installer_to_release }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ inputs.model_release_tag }}" `
+            "installer\dist\IntruFlare-Setup-v${env:INSTALLER_VERSION}.exe" `
+            --repo "${{ github.repository }}" `
+            --clobber

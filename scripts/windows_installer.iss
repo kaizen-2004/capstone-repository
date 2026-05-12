@@ -1,8 +1,11 @@
-#define MyAppName "Thesis Monitor"
+#define MyAppName "IntruFlare"
 #define MyAppPublisher "Thesis Project"
 #define MyAppURL "https://github.com/kaizen-2004/capstone-repository"
-#define MyAppExeName "run_thesis_monitor.bat"
-#define MyAppVersion "1.0.0"
+#define MyAppExeName "CondoGuardian.exe"
+
+#ifndef MyAppVersion
+  #define MyAppVersion "2.2.0"
+#endif
 
 #ifndef SourceRoot
   #define SourceRoot ".."
@@ -16,32 +19,42 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-DefaultDirName={localappdata}\ThesisMonitor
+DefaultDirName={localappdata}\Programs\IntruFlare
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir={#SourceRoot}\installer\dist
-OutputBaseFilename=ThesisMonitorSetup
-Compression=lzma
+OutputBaseFilename=IntruFlare-Setup-v{#MyAppVersion}
+Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-UninstallDisplayIcon={app}\backend\dist\backend\backend.exe
+UninstallDisplayIcon={app}\{#MyAppExeName}
 ChangesEnvironment=no
+CloseApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+
+[Dirs]
+Name: "{localappdata}\CondoGuardian"; Flags: uninsneveruninstall
+Name: "{localappdata}\CondoGuardian\models"; Flags: uninsneveruninstall
+Name: "{localappdata}\CondoGuardian\snapshots"; Flags: uninsneveruninstall
+Name: "{localappdata}\CondoGuardian\logs"; Flags: uninsneveruninstall
+Name: "{localappdata}\CondoGuardian\face_samples"; Flags: uninsneveruninstall
 
 [Files]
-Source: "{#SourceRoot}\installer\staging\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#SourceRoot}\installer\staging\app\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#SourceRoot}\installer\staging\models\*"; DestDir: "{localappdata}\CondoGuardian\models"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
+Source: "{#SourceRoot}\installer\staging\prereqs\*"; DestDir: "{app}\prereqs"; Flags: recursesubdirs createallsubdirs ignoreversion skipifsourcedoesntexist
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\backend\dist\backend\backend.exe"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\backend\dist\backend\backend.exe"
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"
 
 [Run]
 Filename: "{app}\prereqs\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Flags: waituntilterminated skipifdoesntexist; Check: NeedsVCRedist
