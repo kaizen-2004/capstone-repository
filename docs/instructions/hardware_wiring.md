@@ -79,7 +79,7 @@ Device: ESP32-C3 + GY-LSM6DS3 IMU
 
 ### Magnetic Reed Switch
 
-- `GPIO4 -> reed switch -> GND`
+- `GPIO4 -> reed switch NC`, `reed switch COM -> GND`.
 - Firmware uses `INPUT_PULLUP`.
 - `LOW = door closed`, `HIGH = door open`.
 - Place the magnet so the reed switch is closed when the door is fully shut.

@@ -22,7 +22,7 @@ static const char* NODE_ID = "door_force";
 static const char* NODE_LABEL = "Door Force Node";
 static const char* NODE_LOCATION = "Door Entrance Area";
 static const char* NODE_TYPE = "force";
-static const char* FIRMWARE_VERSION = "door_force_http_v3_manual_wifi";
+static const char* FIRMWARE_VERSION = "door_force_http_v10_latest_motion_decision";
 
 // Adaptive TX power profile:
 // - start with moderate TX for join attempts
@@ -58,28 +58,36 @@ static const uint8_t WIFI_ESCALATE_AFTER_ATTEMPTS = 2;
 
 // Sensor and heartbeat timing.
 static const uint32_t HEARTBEAT_INTERVAL_MS = 15000;
-static const uint32_t SENSOR_REPORT_INTERVAL_MS = 50;
+static const uint32_t SENSOR_REPORT_INTERVAL_MS = 10;
 static const uint32_t WIFI_PROVISIONING_FALLBACK_MS = 30000;
 static const uint32_t PROVISIONING_SUCCESS_HOLD_MS = 30000;
 static const uint32_t PROVISIONING_CONNECT_DELAY_MS = 1500;
 static const uint32_t MIN_FORCE_EVENT_GAP_MS = 10000;
 static const uint32_t IMU_REINIT_INTERVAL_MS = 5000;
 static const uint32_t DOOR_REED_DEBOUNCE_MS = 50;
-static const uint32_t DOOR_OPEN_FORCE_GRACE_MS = 500;
+static const uint32_t DOOR_FORCE_DECISION_WINDOW_MS = 5000;
 static const uint32_t DOOR_STATE_REPORT_RETRY_MS = 5000;
 
 static const int I2C_SDA_PIN = 8;
 static const int I2C_SCL_PIN = 9;
+static const uint32_t I2C_CLOCK_HZ = 100000;
 static const int DOOR_REED_PIN = 4;
 static const int DOOR_REED_CLOSED_LEVEL = LOW;
 
-static const uint16_t CALIBRATION_SAMPLES = 100;
+static const uint16_t CALIBRATION_SAMPLES = 300;
 static const uint8_t FORCE_CONFIRM_SAMPLES = 2;
-static const float ACCEL_DELTA_THRESHOLD_G = 0.35f;
-static const float GYRO_THRESHOLD_DPS = 90.0f;
+static const float ACCEL_DELTA_THRESHOLD_G = 0.12f;
+static const float JERK_THRESHOLD_G = 0.35f;
+static const float GYRO_THRESHOLD_DPS = 30.0f;
+static const float GYRO_MAG_THRESHOLD_DPS = 40.0f;
 static const float BASELINE_ALPHA = 0.01f;
-static const float BASELINE_UPDATE_MAX_DELTA_G = 0.12f;
-static const float BASELINE_UPDATE_MAX_GYRO_DPS = 25.0f;
+static const float BASELINE_UPDATE_MAX_DELTA_G = 0.03f;
+static const float BASELINE_UPDATE_MAX_JERK_G = 0.10f;
+static const float BASELINE_UPDATE_MAX_GYRO_DPS = 5.0f;
+static const float BASELINE_UPDATE_MAX_GYRO_MAG_DPS = 7.0f;
+
+static const uint8_t IMU_ACCEL_CONFIG = 0x50;
+static const uint8_t IMU_GYRO_CONFIG = 0x50;
 
 static const uint8_t REG_WHO_AM_I = 0x0F;
 static const uint8_t REG_CTRL1_XL = 0x10;
@@ -157,6 +165,7 @@ bool doorRawClosed = false;
 bool doorStableClosed = false;
 bool doorStateReportPending = false;
 bool doorStateEverReported = false;
+bool forceDecisionPending = false;
 uint8_t preferredWiFiBssid[6] = {0, 0, 0, 0, 0, 0};
 uint8_t imuAddress = 0;
 uint8_t forceConfirmCount = 0;
@@ -164,13 +173,25 @@ uint16_t calibrationCount = 0;
 int32_t preferredWiFiChannel = 0;
 float baselineMagG = 1.0f;
 float calibrationSumMagG = 0.0f;
+float previousAccelXG = 0.0f;
+float previousAccelYG = 0.0f;
+float previousAccelZG = 0.0f;
 uint32_t lastImuInitAttemptMs = 0;
 uint32_t lastForceEventMs = 0;
 uint32_t doorRawChangedMs = 0;
 uint32_t doorOpenedAtMs = 0;
 uint32_t lastDoorStateReportAttemptMs = 0;
+uint32_t forceDecisionStartedAtMs = 0;
+uint32_t forceDecisionLastMotionAtMs = 0;
 String setupApSsid;
 const char* doorStateReportReason = "initial";
+bool previousImuSampleReady = false;
+float pendingForceScore = 0.0f;
+float pendingForceDeltaG = 0.0f;
+float pendingForceJerkG = 0.0f;
+float pendingForceGyroDps = 0.0f;
+float pendingForceGyroMagDps = 0.0f;
+float pendingForceAccelMagG = 0.0f;
 
 WebServer provisioningServer(80);
 DNSServer provisioningDnsServer;
@@ -1159,10 +1180,10 @@ bool configureImu(uint8_t addr) {
   if (!i2cWriteByte(addr, REG_CTRL3_C, 0x44)) {
     return false;
   }
-  if (!i2cWriteByte(addr, REG_CTRL1_XL, 0x30)) {
+  if (!i2cWriteByte(addr, REG_CTRL1_XL, IMU_ACCEL_CONFIG)) {
     return false;
   }
-  if (!i2cWriteByte(addr, REG_CTRL2_G, 0x30)) {
+  if (!i2cWriteByte(addr, REG_CTRL2_G, IMU_GYRO_CONFIG)) {
     return false;
   }
   delay(20);
@@ -1201,6 +1222,7 @@ bool initImuIfNeeded() {
     calibrationCount = 0;
     calibrationSumMagG = 0.0f;
     baselineMagG = 1.0f;
+    previousImuSampleReady = false;
     Serial.printf("[IMU] LSM6DS3 ready at 0x%02X\n", imuAddress);
     return true;
   }
@@ -1217,6 +1239,7 @@ bool readImuSample(ImuSample& sample) {
   uint8_t raw[12] = {0};
   if (!i2cReadBytes(imuAddress, REG_OUTX_L_G, raw, sizeof(raw))) {
     imuReady = false;
+    previousImuSampleReady = false;
     Serial.println("[IMU] read failed; IMU marked offline");
     return false;
   }
@@ -1246,6 +1269,28 @@ float gyroMaxDps(const ImuSample& sample) {
   float ay = fabsf(sample.gy);
   float az = fabsf(sample.gz);
   return max(ax, max(ay, az));
+}
+
+float gyroMagnitudeDps(const ImuSample& sample) {
+  return sqrtf((sample.gx * sample.gx) + (sample.gy * sample.gy) + (sample.gz * sample.gz));
+}
+
+float accelJerkG(const ImuSample& sample) {
+  if (!previousImuSampleReady) {
+    previousAccelXG = sample.ax;
+    previousAccelYG = sample.ay;
+    previousAccelZG = sample.az;
+    previousImuSampleReady = true;
+    return 0.0f;
+  }
+
+  float dx = sample.ax - previousAccelXG;
+  float dy = sample.ay - previousAccelYG;
+  float dz = sample.az - previousAccelZG;
+  previousAccelXG = sample.ax;
+  previousAccelYG = sample.ay;
+  previousAccelZG = sample.az;
+  return sqrtf((dx * dx) + (dy * dy) + (dz * dz));
 }
 
 void sendRegister() {
@@ -1338,7 +1383,11 @@ void updateDoorState(uint32_t now) {
       (uint32_t)(now - doorRawChangedMs) >= DOOR_REED_DEBOUNCE_MS) {
     doorStableClosed = rawClosed;
     if (!doorStableClosed) {
-      doorOpenedAtMs = now;
+      doorOpenedAtMs = doorRawChangedMs;
+      if (forceDecisionPending && forceDecisionLastMotionAtMs != 0 &&
+          (uint32_t)(now - forceDecisionLastMotionAtMs) <= DOOR_FORCE_DECISION_WINDOW_MS) {
+        cancelPendingForceDecision("door_opened", now);
+      }
     }
     forceConfirmCount = 0;
     queueDoorStateReport("change");
@@ -1360,15 +1409,80 @@ void updateDoorState(uint32_t now) {
   }
 }
 
-bool doorAllowsForceEvent(uint32_t now) {
-  if (doorStableClosed) {
-    return true;
-  }
-  return doorOpenedAtMs != 0 &&
-         (uint32_t)(now - doorOpenedAtMs) <= DOOR_OPEN_FORCE_GRACE_MS;
+void clearPendingForceDecision() {
+  forceDecisionPending = false;
+  forceDecisionStartedAtMs = 0;
+  forceDecisionLastMotionAtMs = 0;
+  pendingForceScore = 0.0f;
+  pendingForceDeltaG = 0.0f;
+  pendingForceJerkG = 0.0f;
+  pendingForceGyroDps = 0.0f;
+  pendingForceGyroMagDps = 0.0f;
+  pendingForceAccelMagG = 0.0f;
 }
 
-bool sendDoorForceEvent(float score, float delta, float gyro, float mag) {
+void cancelPendingForceDecision(const char* reason, uint32_t now) {
+  if (!forceDecisionPending) {
+    return;
+  }
+
+  uint32_t elapsed = (uint32_t)(now - forceDecisionStartedAtMs);
+  uint32_t sinceLastMotion = forceDecisionLastMotionAtMs != 0
+                                 ? (uint32_t)(now - forceDecisionLastMotionAtMs)
+                                 : elapsed;
+  Serial.printf("[FORCE] pending suppressed reason=%s elapsed_ms=%lu\n",
+                reason != nullptr ? reason : "unknown",
+                static_cast<unsigned long>(elapsed));
+  Serial.printf("[FORCE] pending suppressed since_last_motion_ms=%lu\n",
+                static_cast<unsigned long>(sinceLastMotion));
+  clearPendingForceDecision();
+  forceConfirmCount = 0;
+}
+
+void startOrUpdateForceDecision(uint32_t now,
+                                float score,
+                                float delta,
+                                float jerk,
+                                float gyro,
+                                float gyroMag,
+                                float mag) {
+  if (!doorStableClosed) {
+    return;
+  }
+
+  if (!forceDecisionPending) {
+    forceDecisionPending = true;
+    forceDecisionStartedAtMs = now;
+    forceDecisionLastMotionAtMs = now;
+    pendingForceScore = score;
+    pendingForceDeltaG = delta;
+    pendingForceJerkG = jerk;
+    pendingForceGyroDps = gyro;
+    pendingForceGyroMagDps = gyroMag;
+    pendingForceAccelMagG = mag;
+    Serial.printf("[FORCE] pending decision started score=%.3f window_ms=%lu\n",
+                  score,
+                  static_cast<unsigned long>(DOOR_FORCE_DECISION_WINDOW_MS));
+    return;
+  }
+
+  forceDecisionLastMotionAtMs = now;
+  pendingForceScore = max(pendingForceScore, score);
+  pendingForceDeltaG = max(pendingForceDeltaG, delta);
+  pendingForceJerkG = max(pendingForceJerkG, jerk);
+  pendingForceGyroDps = max(pendingForceGyroDps, gyro);
+  pendingForceGyroMagDps = max(pendingForceGyroMagDps, gyroMag);
+  pendingForceAccelMagG = max(pendingForceAccelMagG, mag);
+}
+
+bool sendDoorForceEvent(float score,
+                        float delta,
+                        float jerk,
+                        float gyro,
+                        float gyroMag,
+                        float mag,
+                        uint32_t elapsedMs,
+                        uint32_t lastMotionElapsedMs) {
   if (!backendEnabled()) {
     return false;
   }
@@ -1384,7 +1498,13 @@ bool sendDoorForceEvent(float score, float delta, float gyro, float mag) {
                 "\"door_state\":\"" + state + "\"," +
                 "\"score\":" + String(score, 3) + "," +
                 "\"delta_g\":" + String(delta, 3) + "," +
+                "\"jerk_g\":" + String(jerk, 3) + "," +
                 "\"gyro_max_dps\":" + String(gyro, 1) + "," +
+                "\"gyro_mag_dps\":" + String(gyroMag, 1) + "," +
+                "\"decision\":\"no_door_open_within_decision_window\"," +
+                "\"decision_window_ms\":" + String(DOOR_FORCE_DECISION_WINDOW_MS) + "," +
+                "\"elapsed_ms\":" + String(elapsedMs) + "," +
+                "\"last_motion_elapsed_ms\":" + String(lastMotionElapsedMs) + "," +
                 "\"accel_mag_g\":" + String(mag, 3) +
                 "}}";
   bool ok = postJson(endpoint("/api/sensors/event"), body);
@@ -1392,6 +1512,44 @@ bool sendDoorForceEvent(float score, float delta, float gyro, float mag) {
     Serial.printf("[HTTP] event=%s value=%.3f door_state=%s\n", eventCode, score, state);
   }
   return ok;
+}
+
+void updatePendingForceDecision(uint32_t now) {
+  if (!forceDecisionPending) {
+    return;
+  }
+
+  uint32_t elapsed = (uint32_t)(now - forceDecisionStartedAtMs);
+  uint32_t lastMotionElapsed = forceDecisionLastMotionAtMs != 0
+                                   ? (uint32_t)(now - forceDecisionLastMotionAtMs)
+                                   : elapsed;
+  if (!doorStableClosed && forceDecisionLastMotionAtMs != 0) {
+    if ((uint32_t)(now - forceDecisionLastMotionAtMs) <= DOOR_FORCE_DECISION_WINDOW_MS) {
+      cancelPendingForceDecision("door_opened", now);
+      return;
+    }
+  }
+
+  if (lastMotionElapsed < DOOR_FORCE_DECISION_WINDOW_MS) {
+    return;
+  }
+
+  sendDoorForceEvent(pendingForceScore,
+                     pendingForceDeltaG,
+                     pendingForceJerkG,
+                     pendingForceGyroDps,
+                     pendingForceGyroMagDps,
+                     pendingForceAccelMagG,
+                     elapsed,
+                     lastMotionElapsed);
+  lastForceEventMs = now;
+  forceConfirmCount = 0;
+  Serial.printf("[FORCE] decision=unauthorized elapsed_ms=%lu last_motion_elapsed_ms=%lu score=%.3f door_state=%s\n",
+                static_cast<unsigned long>(elapsed),
+                static_cast<unsigned long>(lastMotionElapsed),
+                pendingForceScore,
+                doorStateText(doorStableClosed));
+  clearPendingForceDecision();
 }
 
 void handleWiFiStateChange() {
@@ -1426,7 +1584,7 @@ void setup() {
   WiFi.onEvent(onWiFiEvent);
   loadRuntimeConfigFromStorage();
   initDoorReedSwitch();
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, 400000);
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_CLOCK_HZ);
   Serial.printf("[BOOT] node=%s room=%s sda=%d scl=%d reed=%d\n",
                 runtimeNodeId.c_str(),
                 runtimeNodeLocation.c_str(),
@@ -1471,6 +1629,7 @@ void loop() {
 
   uint32_t now = millis();
   updateDoorState(now);
+  updatePendingForceDecision(now);
 
   if (WiFi.status() != WL_CONNECTED) {
     if ((uint32_t)(now - lastWiFiStatusLogMs) >= 2000) {
@@ -1500,6 +1659,8 @@ void loop() {
     if (readImuSample(sample)) {
       float mag = accelMagnitudeG(sample);
       float gyro = gyroMaxDps(sample);
+      float gyroMag = gyroMagnitudeDps(sample);
+      float jerk = accelJerkG(sample);
 
       if (!calibrated) {
         calibrationSumMagG += mag;
@@ -1511,9 +1672,11 @@ void loop() {
         }
       } else {
         float delta = fabsf(mag - baselineMagG);
-        bool triggered = doorAllowsForceEvent(now) &&
-                         ((delta >= ACCEL_DELTA_THRESHOLD_G) ||
-                          (gyro >= GYRO_THRESHOLD_DPS));
+        bool triggered = doorStableClosed &&
+                          ((delta >= ACCEL_DELTA_THRESHOLD_G) ||
+                           (jerk >= JERK_THRESHOLD_G) ||
+                           (gyro >= GYRO_THRESHOLD_DPS) ||
+                           (gyroMag >= GYRO_MAG_THRESHOLD_DPS));
 
         if (triggered) {
           if (forceConfirmCount < 255) {
@@ -1523,22 +1686,21 @@ void loop() {
           forceConfirmCount = 0;
         }
 
-        if (delta <= BASELINE_UPDATE_MAX_DELTA_G && gyro <= BASELINE_UPDATE_MAX_GYRO_DPS) {
+        if (delta <= BASELINE_UPDATE_MAX_DELTA_G &&
+            jerk <= BASELINE_UPDATE_MAX_JERK_G &&
+            gyro <= BASELINE_UPDATE_MAX_GYRO_DPS &&
+            gyroMag <= BASELINE_UPDATE_MAX_GYRO_MAG_DPS) {
           baselineMagG = baselineMagG * (1.0f - BASELINE_ALPHA) + mag * BASELINE_ALPHA;
         }
 
         if (forceConfirmCount >= FORCE_CONFIRM_SAMPLES &&
             (uint32_t)(now - lastForceEventMs) >= MIN_FORCE_EVENT_GAP_MS) {
-          float score = max(delta / max(ACCEL_DELTA_THRESHOLD_G, 0.01f),
-                            gyro / max(GYRO_THRESHOLD_DPS, 1.0f));
-          sendDoorForceEvent(score, delta, gyro, mag);
-          lastForceEventMs = now;
-          forceConfirmCount = 0;
-          Serial.printf("[FORCE] score=%.3f delta=%.3f gyro=%.1f door_state=%s\n",
-                        score,
-                        delta,
-                        gyro,
-                        doorStateText(doorStableClosed));
+          float motionScore = max(delta / max(ACCEL_DELTA_THRESHOLD_G, 0.01f),
+                                  jerk / max(JERK_THRESHOLD_G, 0.01f));
+          float rotationScore = max(gyro / max(GYRO_THRESHOLD_DPS, 1.0f),
+                                    gyroMag / max(GYRO_MAG_THRESHOLD_DPS, 1.0f));
+          float score = max(motionScore, rotationScore);
+          startOrUpdateForceDecision(now, score, delta, jerk, gyro, gyroMag, mag);
         }
       }
     }
