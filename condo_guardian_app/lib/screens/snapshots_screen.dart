@@ -310,22 +310,24 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                 ConstrainedBox(
                   constraints: const BoxConstraints(maxHeight: 320),
                   child: SingleChildScrollView(
-                    child: Column(
-                      children: profiles
-                          .map(
-                            (profile) => RadioListTile<FaceProfile>(
-                              value: profile,
-                              groupValue: selected,
-                              onChanged: (value) {
-                                if (value != null) {
-                                  setDialogState(() => selected = value);
-                                }
-                              },
-                              title: Text(profile.name),
-                              subtitle: Text('${profile.sampleCount} samples'),
-                            ),
-                          )
-                          .toList(),
+                    child: RadioGroup<FaceProfile>(
+                      groupValue: selected,
+                      onChanged: (value) {
+                        if (value != null) {
+                          setDialogState(() => selected = value);
+                        }
+                      },
+                      child: Column(
+                        children: profiles
+                            .map(
+                              (profile) => RadioListTile<FaceProfile>(
+                                value: profile,
+                                title: Text(profile.name),
+                                subtitle: Text('${profile.sampleCount} samples'),
+                              ),
+                            )
+                            .toList(),
+                      ),
                     ),
                   ),
                 ),
@@ -372,6 +374,9 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
     }
 
     if (verdict == 'false_positive' && snapshot.supportsFireFeedback) {
+      if (!mounted) {
+        return;
+      }
       final confirmed = await showDialog<bool>(
             context: context,
             builder: (context) => AlertDialog(

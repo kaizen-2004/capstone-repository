@@ -24,6 +24,7 @@ import {
   createBackup,
   regenerateRecoveryCode,
   fetchBackupStatus,
+  fetchLiveNodes,
   fetchRetentionStatus,
   trainFaceModel,
   updateFaceProfile,
@@ -34,7 +35,17 @@ import {
   type RetentionStatusPayload,
   type RemoteAccessLinksPayload,
 } from '../data/liveApi';
-import type { AuthorizedProfile, RuntimeSetting } from '../data/types';
+import type {
+  AuthorizedProfile,
+  CameraFeed,
+  DetectionPipeline,
+  RuntimeSetting,
+  SensorStatus,
+  ServiceStatus,
+  SystemHealth,
+} from '../data/types';
+import { StatusBadge } from '../components/StatusBadge';
+import { Slider } from '../components/ui/slider';
 
 type GuidedPoseId = 'center' | 'left' | 'right' | 'up' | 'down';
 
@@ -123,6 +134,212 @@ const DEFAULT_SECTION_BY_STEP: Record<SettingsStep, SettingsSection> = {
   mobile: 'mobile-remote',
 };
 
+type RuntimePreset = {
+  label: string;
+  value: string;
+  helper: string;
+};
+
+type RuntimeControlMeta = {
+  title: string;
+  group: string;
+  description: string;
+  presets?: RuntimePreset[];
+};
+
+const RUNTIME_CONTROL_META: Record<string, RuntimeControlMeta> = {
+  FACE_COSINE_THRESHOLD: {
+    title: 'Face Match Strictness',
+    group: 'Detection Sensitivity',
+    description: 'How strict the system is before treating a face as authorized.',
+    presets: [
+      { label: 'Relaxed', value: '0.50', helper: '0.50' },
+      { label: 'Balanced', value: '0.60', helper: '0.60' },
+      { label: 'Strict', value: '0.75', helper: '0.75' },
+      { label: 'Very strict', value: '0.85', helper: '0.85' },
+    ],
+  },
+  FACE_UNCERTAIN_THRESHOLD: {
+    title: 'Face Uncertainty Band',
+    group: 'Detection Sensitivity',
+    description: 'How much room the system gives borderline face matches before calling them unknown.',
+    presets: [
+      { label: 'Narrow', value: '0.05', helper: '0.05' },
+      { label: 'Balanced', value: '0.10', helper: '0.10' },
+      { label: 'Wider', value: '0.20', helper: '0.20' },
+    ],
+  },
+  FIRE_MODEL_ENABLED: {
+    title: 'Fire Vision Scanning',
+    group: 'Detection Sensitivity',
+    description: 'Run camera-frame flame scanning continuously.',
+  },
+  FIRE_MODEL_THRESHOLD: {
+    title: 'Fire Detection Sensitivity',
+    group: 'Detection Sensitivity',
+    description: 'How easily the vision model reports possible flame activity.',
+    presets: [
+      { label: 'Very sensitive', value: '0.25', helper: '0.25' },
+      { label: 'Sensitive', value: '0.40', helper: '0.40' },
+      { label: 'Balanced', value: '0.60', helper: '0.60' },
+      { label: 'Conservative', value: '0.75', helper: '0.75' },
+      { label: 'Very conservative', value: '0.90', helper: '0.90' },
+    ],
+  },
+  INTRUDER_EVENT_COOLDOWN_SECONDS: {
+    title: 'Intruder Alert Cooldown',
+    group: 'Detection Timing',
+    description: 'How often repeated intruder triggers can create new events.',
+    presets: [
+      { label: 'Frequent', value: '30', helper: '30s' },
+      { label: 'Balanced', value: '120', helper: '120s' },
+      { label: 'Quiet', value: '300', helper: '300s' },
+    ],
+  },
+  AUTHORIZED_PRESENCE_LOGGING_ENABLED: {
+    title: 'Authorized Entry Logging',
+    group: 'Detection Timing',
+    description: 'Auto-log recognized authorized entries from the live camera view.',
+  },
+  AUTHORIZED_PRESENCE_SCAN_SECONDS: {
+    title: 'Authorized Scan Pace',
+    group: 'Detection Timing',
+    description: 'How often the backend checks for authorized presence.',
+    presets: [
+      { label: 'Fast', value: '3', helper: '3s' },
+      { label: 'Balanced', value: '10', helper: '10s' },
+      { label: 'Battery friendly', value: '20', helper: '20s' },
+    ],
+  },
+  AUTHORIZED_PRESENCE_COOLDOWN_SECONDS: {
+    title: 'Authorized Entry Cooldown',
+    group: 'Detection Timing',
+    description: 'How often repeated authorized entries are logged.',
+    presets: [
+      { label: 'Frequent', value: '30', helper: '30s' },
+      { label: 'Balanced', value: '120', helper: '120s' },
+      { label: 'Quiet', value: '300', helper: '300s' },
+    ],
+  },
+  UNKNOWN_PRESENCE_LOGGING_ENABLED: {
+    title: 'Unknown Entry Logging',
+    group: 'Detection Timing',
+    description: 'Auto-log unknown-person entries from the live camera view.',
+  },
+  UNKNOWN_PRESENCE_COOLDOWN_SECONDS: {
+    title: 'Unknown Entry Cooldown',
+    group: 'Detection Timing',
+    description: 'How often repeated unknown-person entries are logged.',
+    presets: [
+      { label: 'Frequent', value: '30', helper: '30s' },
+      { label: 'Balanced', value: '120', helper: '120s' },
+      { label: 'Quiet', value: '300', helper: '300s' },
+    ],
+  },
+  NODE_OFFLINE_SECONDS: {
+    title: 'Sensor Offline Window',
+    group: 'Health Windows',
+    description: 'How quickly sensor nodes are marked offline after silence.',
+    presets: [
+      { label: 'Fast alert', value: '30', helper: '30s' },
+      { label: 'Balanced', value: '120', helper: '120s' },
+      { label: 'Lenient', value: '300', helper: '300s' },
+    ],
+  },
+  CAMERA_OFFLINE_SECONDS: {
+    title: 'Camera Offline Window',
+    group: 'Health Windows',
+    description: 'How quickly camera streams are marked disconnected.',
+    presets: [
+      { label: 'Fast alert', value: '15', helper: '15s' },
+      { label: 'Balanced', value: '45', helper: '45s' },
+      { label: 'Lenient', value: '120', helper: '120s' },
+    ],
+  },
+  EVENT_RETENTION_DAYS: {
+    title: 'Event History Retention',
+    group: 'Retention Windows',
+    description: 'How long event history is kept before cleanup.',
+    presets: [
+      { label: 'Short', value: '7', helper: '7 days' },
+      { label: 'Standard', value: '30', helper: '30 days' },
+      { label: 'Long', value: '90', helper: '90 days' },
+      { label: 'Archive', value: '180', helper: '180 days' },
+    ],
+  },
+  LOG_RETENTION_DAYS: {
+    title: 'System Log Retention',
+    group: 'Retention Windows',
+    description: 'How long backend logs are kept before cleanup.',
+    presets: [
+      { label: 'Short', value: '7', helper: '7 days' },
+      { label: 'Standard', value: '30', helper: '30 days' },
+      { label: 'Long', value: '90', helper: '90 days' },
+      { label: 'Archive', value: '180', helper: '180 days' },
+    ],
+  },
+  REGULAR_SNAPSHOT_RETENTION_DAYS: {
+    title: 'Regular Snapshot Retention',
+    group: 'Retention Windows',
+    description: 'How long routine snapshots are kept.',
+    presets: [
+      { label: 'Short', value: '7', helper: '7 days' },
+      { label: 'Standard', value: '30', helper: '30 days' },
+      { label: 'Long', value: '90', helper: '90 days' },
+      { label: 'Archive', value: '180', helper: '180 days' },
+    ],
+  },
+  CRITICAL_SNAPSHOT_RETENTION_DAYS: {
+    title: 'Critical Snapshot Retention',
+    group: 'Retention Windows',
+    description: 'How long critical alert snapshots are kept.',
+    presets: [
+      { label: 'Short', value: '30', helper: '30 days' },
+      { label: 'Standard', value: '90', helper: '90 days' },
+      { label: 'Long', value: '180', helper: '180 days' },
+      { label: 'Archive', value: '365', helper: '365 days' },
+    ],
+  },
+};
+
+const RUNTIME_CONTROL_GROUPS = [
+  'Detection Sensitivity',
+  'Detection Timing',
+  'Health Windows',
+  'Retention Windows',
+] as const;
+
+const RUNTIME_CONTROL_ORDER = Object.keys(RUNTIME_CONTROL_META);
+
+function toRuntimeNumber(value: string): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function nearestPresetIndex(presets: RuntimePreset[], value: string): number {
+  const target = toRuntimeNumber(value);
+  let nearestIndex = 0;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  presets.forEach((preset, index) => {
+    const distance = Math.abs(toRuntimeNumber(preset.value) - target);
+    if (distance < nearestDistance) {
+      nearestIndex = index;
+      nearestDistance = distance;
+    }
+  });
+  return nearestIndex;
+}
+
+function detectionPipelineSeverity(state: DetectionPipeline['state']): 'online' | 'warning' | 'offline' {
+  if (state === 'active') {
+    return 'online';
+  }
+  if (state === 'degraded') {
+    return 'warning';
+  }
+  return 'offline';
+}
+
 function emptyGuidedPoseCounts(): Record<GuidedPoseId, number> {
   return {
     center: 0,
@@ -206,6 +423,12 @@ export function Settings() {
   const [recoveryCode, setRecoveryCode] = useState('');
   const [backupStatus, setBackupStatus] = useState<BackupStatusPayload | null>(null);
   const [retentionStatus, setRetentionStatus] = useState<RetentionStatusPayload | null>(null);
+  const [sensorStatuses, setSensorStatuses] = useState<SensorStatus[]>([]);
+  const [serviceStatuses, setServiceStatuses] = useState<ServiceStatus[]>([]);
+  const [cameraFeeds, setCameraFeeds] = useState<CameraFeed[]>([]);
+  const [detectionPipelines, setDetectionPipelines] = useState<DetectionPipeline[]>([]);
+  const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
+  const [liveNodesError, setLiveNodesError] = useState('');
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupMessage, setBackupMessage] = useState('');
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -460,12 +683,13 @@ export function Settings() {
   }, [trainingCameraSource]);
 
   const loadSettings = useCallback(async () => {
-    const [liveResult, remoteStatusResult, linksResult, backupResult, retentionResult] = await Promise.allSettled([
+    const [liveResult, remoteStatusResult, linksResult, backupResult, retentionResult, nodesResult] = await Promise.allSettled([
       fetchSettingsLive(),
       fetchMobileRemoteStatus(),
       fetchRemoteAccessLinks(),
       fetchBackupStatus(),
       fetchRetentionStatus(),
+      fetchLiveNodes(),
     ]);
 
     if (liveResult.status === 'fulfilled') {
@@ -489,6 +713,16 @@ export function Settings() {
     }
     if (retentionResult.status === 'fulfilled') {
       setRetentionStatus(retentionResult.value);
+    }
+    if (nodesResult.status === 'fulfilled') {
+      setSensorStatuses(nodesResult.value.sensorStatuses);
+      setServiceStatuses(nodesResult.value.serviceStatuses);
+      setCameraFeeds(nodesResult.value.cameraFeeds);
+      setDetectionPipelines(nodesResult.value.detectionPipelines);
+      setSystemHealth(nodesResult.value.systemHealth);
+      setLiveNodesError('');
+    } else {
+      setLiveNodesError('Backend component status is unavailable right now.');
     }
   }, [syncRuntimeDrafts]);
 
@@ -529,25 +763,23 @@ export function Settings() {
     [runtimeEditableSettings],
   );
 
-  const primaryRuntimeKeys = useMemo(
-    () =>
-      new Set([
-        'FACE_COSINE_THRESHOLD',
-        'FIRE_MODEL_ENABLED',
-        'FIRE_MODEL_THRESHOLD',
-        'NODE_OFFLINE_SECONDS',
-        'CAMERA_OFFLINE_SECONDS',
-        'LAN_BASE_URL',
-        'TAILSCALE_BASE_URL',
-        'AUTHORIZED_PRESENCE_LOGGING_ENABLED',
-        'UNKNOWN_PRESENCE_LOGGING_ENABLED',
-      ]),
-    [],
-  );
+  const primaryRuntimeKeys = useMemo(() => new Set(RUNTIME_CONTROL_ORDER), []);
 
   const runtimeMainSettings = useMemo(
-    () => runtimeNonSecretSettings.filter((setting) => primaryRuntimeKeys.has(setting.key)),
+    () =>
+      runtimeNonSecretSettings
+        .filter((setting) => primaryRuntimeKeys.has(setting.key))
+        .sort((left, right) => RUNTIME_CONTROL_ORDER.indexOf(left.key) - RUNTIME_CONTROL_ORDER.indexOf(right.key)),
     [runtimeNonSecretSettings, primaryRuntimeKeys],
+  );
+
+  const runtimeControlGroups = useMemo(
+    () =>
+      RUNTIME_CONTROL_GROUPS.map((group) => ({
+        group,
+        settings: runtimeMainSettings.filter((setting) => RUNTIME_CONTROL_META[setting.key]?.group === group),
+      })).filter((group) => group.settings.length > 0),
+    [runtimeMainSettings],
   );
 
   const runtimeSettingByKey = useMemo(() => {
@@ -833,7 +1065,11 @@ export function Settings() {
     }
 
     const key = setting.key;
-    const draftValue = runtimeDrafts[key] ?? (setting.secret ? '' : setting.value);
+    const rawDraftValue = runtimeDrafts[key] ?? (setting.secret ? '' : setting.value);
+    const presetOptions = RUNTIME_CONTROL_META[key]?.presets;
+    const draftValue = presetOptions && setting.inputType === 'number'
+      ? presetOptions[nearestPresetIndex(presetOptions, rawDraftValue)].value
+      : rawDraftValue;
     const normalizedValue = setting.inputType === 'switch'
       ? (draftValue.trim().toLowerCase() === 'true' ? 'true' : 'false')
       : draftValue.trim();
@@ -912,6 +1148,12 @@ export function Settings() {
     0,
     Math.min(100, Math.round((capturedSamples / GUIDED_CAPTURE_TARGET) * 100)),
   );
+  const onlineSensorCount = sensorStatuses.filter((sensor) => sensor.status === 'online').length;
+  const warningSensorCount = sensorStatuses.filter((sensor) => sensor.status === 'warning').length;
+  const offlineSensorCount = sensorStatuses.filter((sensor) => sensor.status === 'offline').length;
+  const onlineServiceCount = serviceStatuses.filter((service) => service.status === 'online').length;
+  const onlineCameraCount = cameraFeeds.filter((cameraFeed) => cameraFeed.status === 'online').length;
+  const latestBackupLabel = backupStatus?.latest?.name || 'No backup yet';
 
   const handleChangePassword = async () => {
     if (!currentPassword || !newPassword) {
@@ -1699,75 +1941,278 @@ export function Settings() {
               <Shield className="w-5 h-5 text-blue-600" />
             </div>
             <div>
-              <h3 className="font-semibold text-gray-900">Connection, Detection & Health Runtime</h3>
-              <p className="text-sm text-gray-600">Common live controls for backend routes, detection sensitivity, and node health.</p>
+              <h3 className="font-semibold text-gray-900">Detection & Backend Controls</h3>
+              <p className="text-sm text-gray-600">Adjust live behavior with labeled ranges and monitor the backend components behind them.</p>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            {runtimeMainSettings.map((setting) => {
-              const currentDraft = runtimeDrafts[setting.key] ?? setting.value;
-              const saving = runtimeSavingKey === setting.key;
-              const message = runtimeSaveMessages[setting.key] || '';
-              return (
-                <div key={setting.key} className="rounded-lg border border-gray-200 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-[11px] sm:text-sm font-mono text-gray-900 break-all">{setting.key}</p>
-                    <span className="rounded-full bg-green-50 text-green-700 px-2 py-0.5 text-xs">
-                      {setting.liveApply ? 'Live apply' : 'Restart'}
-                    </span>
-                  </div>
-                  <p className="text-xs text-gray-600 mt-1">{setting.description}</p>
-
-                  <div className="mt-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
-                    {setting.inputType === 'switch' ? (
-                      <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                        <input
-                          type="checkbox"
-                          className="sr-only peer"
-                          checked={isRuntimeBoolOn(setting)}
-                          onChange={(event) => {
-                            handleRuntimeDraftChange(setting.key, event.target.checked ? 'true' : 'false');
-                          }}
-                          disabled={Boolean(runtimeSavingKey)}
-                        />
-                        <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-100 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600 peer-disabled:opacity-60" />
-                      </label>
-                    ) : (
-                      <input
-                        type={setting.inputType === 'number' ? 'number' : 'text'}
-                        min={setting.min}
-                        max={setting.max}
-                        step={setting.step || (setting.inputType === 'number' ? 1 : undefined)}
-                        value={currentDraft}
-                        onChange={(event) => {
-                          handleRuntimeDraftChange(setting.key, event.target.value);
-                        }}
-                        disabled={Boolean(runtimeSavingKey)}
-                        className="w-full sm:w-56 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
-                      />
-                    )}
-
-                    <button
-                      onClick={() => {
-                        void handleSaveRuntimeSetting(setting);
-                      }}
-                      disabled={Boolean(runtimeSavingKey)}
-                      className="px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
-                    >
-                      {saving ? 'Saving...' : 'Save'}
-                    </button>
-                  </div>
-                  {message ? <p className="mt-2 text-xs text-gray-700 break-words">{message}</p> : null}
+          <div className="space-y-4">
+            {runtimeControlGroups.map(({ group, settings }) => (
+              <section key={group} className="space-y-2.5">
+                <div>
+                  <h4 className="text-sm font-semibold text-gray-900">{group}</h4>
+                  <p className="text-xs text-gray-600">Changes are staged until you press Save.</p>
                 </div>
-              );
-            })}
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-2.5">
+                  {settings.map((setting) => {
+                    const meta = RUNTIME_CONTROL_META[setting.key];
+                    const currentDraft = runtimeDrafts[setting.key] ?? setting.value;
+                    const saving = runtimeSavingKey === setting.key;
+                    const message = runtimeSaveMessages[setting.key] || '';
+                    const presets = meta?.presets;
+                    const presetIndex = presets ? nearestPresetIndex(presets, currentDraft) : 0;
+                    const selectedPreset = presets?.[presetIndex];
+
+                    return (
+                      <div key={setting.key} className="rounded-xl border border-border bg-card p-3 text-card-foreground">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-card-foreground">{meta?.title || setting.key}</p>
+                            <p className="mt-0.5 text-[11px] font-mono text-muted-foreground break-all">{setting.key}</p>
+                          </div>
+                          <span className={`rounded-full px-2 py-0.5 text-xs ${setting.liveApply ? 'bg-green-50 text-green-700 dark:bg-green-400/15 dark:text-green-200' : 'bg-amber-50 text-amber-700 dark:bg-amber-400/15 dark:text-amber-100'}`}>
+                            {setting.liveApply ? 'Live apply' : 'Restart'}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-xs text-foreground/80">{meta?.description || setting.description}</p>
+
+                        <div className="mt-2.5 space-y-2">
+                          {setting.inputType === 'switch' ? (
+                            <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background/70 px-3 py-2">
+                              <span className="text-sm text-foreground">{isRuntimeBoolOn(setting) ? 'Enabled' : 'Disabled'}</span>
+                              <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                                <input
+                                  type="checkbox"
+                                  className="sr-only peer"
+                                  checked={isRuntimeBoolOn(setting)}
+                                  onChange={(event) => {
+                                    handleRuntimeDraftChange(setting.key, event.target.checked ? 'true' : 'false');
+                                  }}
+                                  disabled={Boolean(runtimeSavingKey)}
+                                />
+                                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-100 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600 peer-disabled:opacity-60" />
+                              </label>
+                            </div>
+                          ) : presets && selectedPreset ? (
+                            <div className="space-y-2">
+                              <div className="rounded-lg border border-border bg-background/70 px-3 py-2.5">
+                                <Slider
+                                  value={[presetIndex]}
+                                  min={0}
+                                  max={presets.length - 1}
+                                  step={1}
+                                  onValueChange={(values) => {
+                                    const nextIndex = Math.max(0, Math.min(presets.length - 1, Math.round(values[0] ?? 0)));
+                                    handleRuntimeDraftChange(setting.key, presets[nextIndex].value);
+                                  }}
+                                  disabled={Boolean(runtimeSavingKey)}
+                                />
+                                <div className="mt-2 grid gap-1" style={{ gridTemplateColumns: `repeat(${presets.length}, minmax(0, 1fr))` }}>
+                                  {presets.map((preset, index) => (
+                                    <button
+                                      key={preset.label}
+                                      type="button"
+                                      onClick={() => handleRuntimeDraftChange(setting.key, preset.value)}
+                                      disabled={Boolean(runtimeSavingKey)}
+                                      className={`min-w-0 whitespace-normal break-words rounded-md px-1 py-0.5 text-center text-[10px] leading-tight transition-colors disabled:opacity-60 sm:text-[11px] ${index === presetIndex ? 'bg-primary/15 font-semibold text-foreground ring-1 ring-primary/30' : 'text-foreground/75 hover:bg-accent'}`}
+                                    >
+                                      {preset.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                              <p className="text-[11px] text-foreground/75">
+                                Selected: <span className="font-medium text-foreground">{selectedPreset.label}</span> ({selectedPreset.helper})
+                              </p>
+                            </div>
+                          ) : (
+                            <input
+                              type={setting.inputType === 'number' ? 'number' : 'text'}
+                              min={setting.min}
+                              max={setting.max}
+                              step={setting.step || (setting.inputType === 'number' ? 1 : undefined)}
+                              value={currentDraft}
+                              onChange={(event) => {
+                                handleRuntimeDraftChange(setting.key, event.target.value);
+                              }}
+                              disabled={Boolean(runtimeSavingKey)}
+                              className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm text-foreground"
+                            />
+                          )}
+
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <button
+                              onClick={() => {
+                                void handleSaveRuntimeSetting(setting);
+                              }}
+                              disabled={Boolean(runtimeSavingKey)}
+                              className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                            >
+                              {saving ? 'Saving...' : 'Save'}
+                            </button>
+                            {message ? <p className="text-xs text-foreground/80 break-words">{message}</p> : null}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
 
             {runtimeMainSettings.length === 0 && (
               <div className="rounded-lg border border-gray-200 p-4 text-sm text-gray-600">
-                No primary runtime controls reported by backend.
+                No user-facing runtime controls reported by backend.
               </div>
             )}
+
+            <section className="space-y-4 border-t border-gray-200 pt-5">
+              <div>
+                <h4 className="text-sm font-semibold text-gray-900">Backend Components</h4>
+                <p className="text-xs text-gray-600">Read-only status for the services and pipelines affected by these controls.</p>
+              </div>
+
+              {liveNodesError ? (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  {liveNodesError}
+                </div>
+              ) : null}
+
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                <div className="rounded-xl border border-gray-200 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Shield className="w-4 h-4 text-blue-600" />
+                    <p className="font-medium text-gray-900">System Health</p>
+                  </div>
+                  {systemHealth ? (
+                    <div className="space-y-2 text-sm">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-gray-600">Backend</span>
+                        <StatusBadge severity={systemHealth.backend} label={systemHealth.backend.toUpperCase()} size="sm" />
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-gray-600">Sensor Transport</span>
+                        <StatusBadge severity={systemHealth.sensorTransport} label={systemHealth.sensorTransport.toUpperCase()} size="sm" />
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-gray-600">Host</span>
+                        <StatusBadge severity={systemHealth.host} label={systemHealth.host.toUpperCase()} size="sm" />
+                      </div>
+                      <p className="text-xs text-gray-500 break-words">Last sync: {systemHealth.lastSync || '-'}</p>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-gray-600">No system health reported yet.</p>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-gray-200 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Wifi className="w-4 h-4 text-blue-600" />
+                    <p className="font-medium text-gray-900">Sensor Nodes</p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-center text-sm">
+                    <div className="rounded-lg bg-green-50 px-2 py-3 text-green-700">
+                      <p className="text-2xl font-semibold">{onlineSensorCount}</p>
+                      <p className="text-xs">Online</p>
+                    </div>
+                    <div className="rounded-lg bg-orange-50 px-2 py-3 text-orange-700">
+                      <p className="text-2xl font-semibold">{warningSensorCount}</p>
+                      <p className="text-xs">Warning</p>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 px-2 py-3 text-gray-700">
+                      <p className="text-2xl font-semibold">{offlineSensorCount}</p>
+                      <p className="text-xs">Offline</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Database className="w-4 h-4 text-blue-600" />
+                    <p className="font-medium text-gray-900">Runtime Services</p>
+                  </div>
+                  <p className="mb-3 text-sm text-gray-600">{onlineServiceCount}/{serviceStatuses.length} services online</p>
+                  <div className="space-y-2">
+                    {serviceStatuses.map((service) => (
+                      <div key={service.id} className="flex items-start justify-between gap-3 rounded-lg bg-gray-50 px-3 py-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-gray-900">{service.name}</p>
+                          <p className="text-xs text-gray-600 break-words">{service.detail}</p>
+                        </div>
+                        <StatusBadge severity={service.status} label={service.status.toUpperCase()} size="sm" />
+                      </div>
+                    ))}
+                    {serviceStatuses.length === 0 ? <p className="text-sm text-gray-600">No runtime services reported yet.</p> : null}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Shield className="w-4 h-4 text-blue-600" />
+                    <p className="font-medium text-gray-900">Detection Pipelines</p>
+                  </div>
+                  <div className="space-y-2">
+                    {detectionPipelines.map((pipeline) => {
+                      const severity = detectionPipelineSeverity(pipeline.state);
+                      return (
+                        <div key={pipeline.name} className="flex items-start justify-between gap-3 rounded-lg bg-gray-50 px-3 py-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-gray-900">{pipeline.name}</p>
+                            <p className="text-xs text-gray-600 break-words">{pipeline.detail}</p>
+                          </div>
+                          <StatusBadge severity={severity} label={pipeline.state.toUpperCase()} size="sm" />
+                        </div>
+                      );
+                    })}
+                    {detectionPipelines.length === 0 ? <p className="text-sm text-gray-600">No detection pipelines reported yet.</p> : null}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Camera className="w-4 h-4 text-blue-600" />
+                    <p className="font-medium text-gray-900">Camera Health</p>
+                  </div>
+                  <p className="mb-3 text-sm text-gray-600">{onlineCameraCount}/{cameraFeeds.length} camera feeds online</p>
+                  <div className="space-y-2">
+                    {cameraFeeds.map((cameraFeed) => (
+                      <div key={cameraFeed.nodeId} className="flex items-start justify-between gap-3 rounded-lg bg-gray-50 px-3 py-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-gray-900">{cameraFeed.location || cameraFeed.nodeId}</p>
+                          <p className="text-xs text-gray-600 break-words">
+                            {cameraFeed.fps} FPS target{cameraFeed.frameWidth && cameraFeed.frameHeight ? ` • ${cameraFeed.frameWidth}x${cameraFeed.frameHeight}` : ''}
+                          </p>
+                        </div>
+                        <StatusBadge severity={cameraFeed.status} label={cameraFeed.status.toUpperCase()} size="sm" />
+                      </div>
+                    ))}
+                    {cameraFeeds.length === 0 ? <p className="text-sm text-gray-600">No camera feeds reported yet.</p> : null}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Database className="w-4 h-4 text-blue-600" />
+                    <p className="font-medium text-gray-900">Retention & Backup</p>
+                  </div>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-gray-600">Events</span>
+                      <span className="font-medium text-gray-900">{retentionStatus ? `${retentionStatus.eventRetentionDays} days` : '-'}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-gray-600">Logs</span>
+                      <span className="font-medium text-gray-900">{retentionStatus ? `${retentionStatus.logRetentionDays} days` : '-'}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-gray-600">Latest backup</span>
+                      <span className="font-medium text-gray-900 text-right break-all">{latestBackupLabel}</span>
+                    </div>
+                    <p className="text-xs text-gray-500">Backup files available: {backupStatus?.count ?? 0}</p>
+                  </div>
+                </div>
+              </div>
+            </section>
           </div>
         </div>
 
