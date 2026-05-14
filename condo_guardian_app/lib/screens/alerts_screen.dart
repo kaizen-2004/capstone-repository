@@ -370,19 +370,6 @@ class _AlertsScreenState extends State<AlertsScreen> {
     unawaited(_loadAlerts());
   }
 
-  int _severityRank(String severity) {
-    switch (severity.toLowerCase()) {
-      case 'critical':
-        return 0;
-      case 'warning':
-        return 1;
-      case 'normal':
-        return 2;
-      default:
-        return 3;
-    }
-  }
-
   String _snapshotType(SnapshotItem snapshot) {
     final eventCode = snapshot.eventCode.toUpperCase();
     final text = '${snapshot.title} ${snapshot.message}'.toLowerCase();
@@ -416,14 +403,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
 
   List<AlertItem> get _activeAlerts {
     final active = _alerts.where((alert) => !alert.acknowledged).toList()
-      ..sort((a, b) {
-        final severityCompare =
-            _severityRank(a.severity).compareTo(_severityRank(b.severity));
-        if (severityCompare != 0) {
-          return severityCompare;
-        }
-        return b.createdAt.compareTo(a.createdAt);
-      });
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return active;
   }
 

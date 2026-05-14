@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..core.security import expiry_iso, hash_password, now_iso, parse_iso, verify_password
+from ..core.security import expiry_iso, hash_password, now_iso, now_utc, parse_iso, verify_password
 
 _LOCK = threading.RLock()
 _DB_PATH: Path | None = None
@@ -25,6 +25,7 @@ DASHBOARD_NOISE_NODE_PREFIXES: tuple[str, ...] = (
     "door_force_cooldown_",
     "door_force_contract_",
 )
+GUEST_MODE_UNTIL_SETTING_KEY = "GUEST_MODE_UNTIL_TS"
 
 
 def configure(path: Path, session_ttl_seconds: int) -> None:
@@ -710,6 +711,39 @@ def create_event(
     return event_id
 
 
+def update_event_classification(
+    event_id: int,
+    *,
+    event_type: str,
+    event_code: str,
+    severity: str,
+    title: str,
+    description: str,
+    details: dict[str, Any] | None = None,
+) -> None:
+    with _LOCK:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE events
+            SET type=?, event_code=?, severity=?, title=?, description=?, details_json=?
+            WHERE id=?
+            """,
+            (
+                event_type,
+                event_code,
+                severity,
+                title,
+                description,
+                json.dumps(details or {}, separators=(",", ":")),
+                event_id,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+
 def create_alert(
     alert_type: str,
     severity: str,
@@ -973,6 +1007,29 @@ def upsert_setting(key: str, value: str) -> None:
         )
         conn.commit()
         conn.close()
+
+
+def guest_mode_status() -> dict[str, Any]:
+    until_ts = get_setting(GUEST_MODE_UNTIL_SETTING_KEY)
+    until = parse_iso(until_ts)
+    now = now_utc()
+    if until is None or until <= now:
+        return {"active": False, "until_ts": "", "remaining_seconds": 0}
+
+    remaining_seconds = int(max(0, (until - now).total_seconds()))
+    return {
+        "active": True,
+        "until_ts": until.isoformat(timespec="seconds"),
+        "remaining_seconds": remaining_seconds,
+    }
+
+
+def is_guest_mode_active() -> bool:
+    return bool(guest_mode_status()["active"])
+
+
+def set_guest_mode_until(until_ts: str) -> None:
+    upsert_setting(GUEST_MODE_UNTIL_SETTING_KEY, until_ts)
 
 
 def list_settings() -> list[dict[str, str]]:

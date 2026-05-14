@@ -105,6 +105,7 @@ EVENT_META: dict[str, dict[str, str]] = {
 }
 
 INTRUDER_TRIGGER_CODES = {"DOOR_FORCE", "ENTRY_MOTION", "PERSON_DETECTED", "UNKNOWN"}
+DOOR_STATE_NOTIFICATION_CODES = {"DOOR_OPEN", "DOOR_CLOSED"}
 
 
 class EventEngine:
@@ -185,7 +186,9 @@ class EventEngine:
             payload.get("description") or details.get("description") or meta["title"]
         )
 
-        if event_code in INTRUDER_TRIGGER_CODES:
+        guest_mode_active = store.is_guest_mode_active()
+
+        if event_code in INTRUDER_TRIGGER_CODES and not guest_mode_active:
             suppressed, remaining_seconds = self._should_suppress_intruder_event(
                 node_id
             )
@@ -228,7 +231,11 @@ class EventEngine:
             alert_id = self._handle_intruder_trigger(
                 event_id, node_id, location, details
             )
-            classification["classification"] = "intruder"
+            if alert_id is None and guest_mode_active:
+                classification["event_code"] = "GUEST_ACTIVITY"
+                classification["classification"] = "guest"
+            else:
+                classification["classification"] = "intruder"
         elif event_code == "NODE_OFFLINE":
             alert_id = self._create_alert(
                 event_id,
@@ -253,7 +260,50 @@ class EventEngine:
             )
 
         classification["alert_id"] = alert_id
+        if alert_id is None and event_code in DOOR_STATE_NOTIFICATION_CODES:
+            self._dispatch_normal_event_notification(
+                event_id=event_id,
+                event_code=event_code,
+                source_node=node_id,
+                location=location,
+                severity=meta["severity"],
+                title=meta["title"],
+                description=description,
+                details=details,
+            )
         return classification
+
+    def _dispatch_normal_event_notification(
+        self,
+        *,
+        event_id: int,
+        event_code: str,
+        source_node: str,
+        location: str,
+        severity: str,
+        title: str,
+        description: str,
+        details: dict[str, Any],
+    ) -> None:
+        if not self.notification_dispatcher:
+            return
+        try:
+            self.notification_dispatcher.dispatch_event(
+                {
+                    "id": event_id,
+                    "event_code": event_code,
+                    "source_node": source_node,
+                    "location": location,
+                    "severity": severity,
+                    "title": title,
+                    "description": description,
+                    "details_json": json.dumps(details or {}, separators=(",", ":")),
+                }
+            )
+        except Exception as exc:
+            store.log(
+                "ERROR", f"notification dispatch failed for event {event_id}: {exc}"
+            )
 
     def _should_suppress_intruder_event(self, node_id: str) -> tuple[bool, float]:
         cooldown_seconds = float(self.intruder_event_cooldown_seconds)
@@ -312,7 +362,7 @@ class EventEngine:
 
     def _handle_intruder_trigger(
         self, event_id: int, node_id: str, location: str, details: dict[str, Any]
-    ) -> int:
+    ) -> int | None:
         primary_node = "cam_door"
         frame = None
         capture_detail = ""
@@ -421,6 +471,15 @@ class EventEngine:
                 dispatch_notification=True,
             )
 
+        if store.is_guest_mode_active():
+            return self._mark_guest_activity_event(
+                event_id=event_id,
+                node_id=node_id,
+                location=location or ROOM_DOOR,
+                snapshot_path=snapshot_path,
+                details={"face": face_result, "faces": face_results, **details},
+            )
+
         face_status = str(face_result.get("face_status") or "").upper()
 
         if face_status == "FACE_UNCLEAR":
@@ -463,6 +522,36 @@ class EventEngine:
             details={"face": face_result, "faces": face_results, **details},
             requires_ack=True,
         )
+
+    def _mark_guest_activity_event(
+        self,
+        *,
+        event_id: int,
+        node_id: str,
+        location: str,
+        snapshot_path: str,
+        details: dict[str, Any],
+    ) -> None:
+        guest_details = {
+            **details,
+            "guest_mode": True,
+            "guest_mode_until_ts": store.guest_mode_status()["until_ts"],
+            "snapshot_path": snapshot_path,
+        }
+        store.update_event_classification(
+            event_id,
+            event_type="system",
+            event_code="GUEST_ACTIVITY",
+            severity="info",
+            title="Guest activity observed",
+            description="Entry activity was seen while Guest Mode was active. No intruder alert was created.",
+            details=guest_details,
+        )
+        store.log(
+            "INFO",
+            f"guest mode suppressed intruder alert node={node_id} event_id={event_id}",
+        )
+        return None
 
     def _create_alert(
         self,

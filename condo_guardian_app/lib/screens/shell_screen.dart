@@ -77,7 +77,7 @@ class _ShellScreenState extends State<ShellScreen>
   static const _pageTitles = <String>[
     'Dashboard',
     'Live Monitor',
-    'Alerts & Snapshots',
+    'Alerts',
     'Enrollment',
     'AI Assistant',
     'Settings',
@@ -243,6 +243,7 @@ class _ShellScreenState extends State<ShellScreen>
         AssistantScreen(backendService: _backendService),
         SettingsScreen(
           settingsStore: widget.settingsStore,
+          backendService: _backendService,
           activeBackendBaseUrl: _activeBackendBaseUrl,
           activeConnectionLabel: _activeConnectionLabel,
           onSaved: _handleSettingsSaved,

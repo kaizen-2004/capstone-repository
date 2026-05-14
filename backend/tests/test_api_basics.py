@@ -384,43 +384,65 @@ def test_intruder_event_cooldown_suppresses_repeats() -> None:
 def test_door_state_events_do_not_create_alerts() -> None:
     node_id = f"door_force_state_{uuid.uuid4().hex[:8]}"
     with TestClient(app) as client:
-        opened = client.post(
-            "/api/sensors/event",
-            json={
-                "node_id": node_id,
-                "event": "DOOR_OPEN",
-                "location": "Door Entrance Area",
-                "value": 1.0,
-                "details": {"sensor": "magnetic_reed_switch", "door_state": "open"},
-            },
-        )
-        assert opened.status_code == 200
-        opened_payload = opened.json()
-        assert opened_payload["ok"] is True
-        assert opened_payload["event_code"] == "DOOR_OPEN"
-        assert opened_payload["classification"] == "sensor"
-        assert isinstance(opened_payload["event_id"], int)
-        assert opened_payload["alert_id"] is None
-        assert opened_payload["suppressed"] is False
+        dispatched_events: list[dict] = []
+        original_dispatcher = app.state.event_engine.notification_dispatcher
 
-        closed = client.post(
-            "/api/sensors/event",
-            json={
-                "node_id": node_id,
-                "event": "DOOR_CLOSED",
-                "location": "Door Entrance Area",
-                "value": 0.0,
-                "details": {"sensor": "magnetic_reed_switch", "door_state": "closed"},
-            },
-        )
-        assert closed.status_code == 200
-        closed_payload = closed.json()
-        assert closed_payload["ok"] is True
-        assert closed_payload["event_code"] == "DOOR_CLOSED"
-        assert closed_payload["classification"] == "sensor"
-        assert isinstance(closed_payload["event_id"], int)
-        assert closed_payload["alert_id"] is None
-        assert closed_payload["suppressed"] is False
+        class FakeDispatcher:
+            def dispatch_event(self, event: dict) -> None:
+                dispatched_events.append(event)
+
+        app.state.event_engine.notification_dispatcher = FakeDispatcher()
+        try:
+            opened = client.post(
+                "/api/sensors/event",
+                json={
+                    "node_id": node_id,
+                    "event": "DOOR_OPEN",
+                    "location": "Door Entrance Area",
+                    "value": 1.0,
+                    "details": {
+                        "sensor": "magnetic_reed_switch",
+                        "door_state": "open",
+                    },
+                },
+            )
+            assert opened.status_code == 200
+            opened_payload = opened.json()
+            assert opened_payload["ok"] is True
+            assert opened_payload["event_code"] == "DOOR_OPEN"
+            assert opened_payload["classification"] == "sensor"
+            assert isinstance(opened_payload["event_id"], int)
+            assert opened_payload["alert_id"] is None
+            assert opened_payload["suppressed"] is False
+
+            closed = client.post(
+                "/api/sensors/event",
+                json={
+                    "node_id": node_id,
+                    "event": "DOOR_CLOSED",
+                    "location": "Door Entrance Area",
+                    "value": 0.0,
+                    "details": {
+                        "sensor": "magnetic_reed_switch",
+                        "door_state": "closed",
+                    },
+                },
+            )
+            assert closed.status_code == 200
+            closed_payload = closed.json()
+            assert closed_payload["ok"] is True
+            assert closed_payload["event_code"] == "DOOR_CLOSED"
+            assert closed_payload["classification"] == "sensor"
+            assert isinstance(closed_payload["event_id"], int)
+            assert closed_payload["alert_id"] is None
+            assert closed_payload["suppressed"] is False
+        finally:
+            app.state.event_engine.notification_dispatcher = original_dispatcher
+
+    assert [event["event_code"] for event in dispatched_events] == [
+        "DOOR_OPEN",
+        "DOOR_CLOSED",
+    ]
 
 
 def test_smoke_warning_event_creates_fire_alert() -> None:
@@ -605,6 +627,99 @@ def test_runtime_settings_update_and_secret_replace_flow() -> None:
         assert secret_row["configured"] is True
         assert secret_row["value"] == ""
         assert "TELEGRAM_BOT_TOKEN" not in runtime_keys
+
+
+def test_guest_mode_suppresses_intruder_alerts_temporarily() -> None:
+    node_id = f"door_force_guest_{uuid.uuid4().hex[:8]}"
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200
+
+        try:
+            enable = client.post(
+                "/api/ui/settings/guest-mode", json={"duration_hours": 2}
+            )
+            assert enable.status_code == 200
+            enable_payload = enable.json()
+            assert enable_payload["active"] is True
+            assert int(enable_payload["remaining_seconds"]) > 0
+
+            event_post = client.post(
+                "/api/sensors/event",
+                json={
+                    "node_id": node_id,
+                    "event": "DOOR_FORCE",
+                    "location": "Door Entrance Area",
+                },
+            )
+            assert event_post.status_code == 200
+            event_payload = event_post.json()
+            assert event_payload["ok"] is True
+            assert event_payload["suppressed"] is False
+            assert event_payload["classification"] == "guest"
+            assert event_payload["event_code"] == "GUEST_ACTIVITY"
+            assert isinstance(event_payload["event_id"], int)
+            assert event_payload["alert_id"] is None
+
+            events = [
+                row
+                for row in store.list_events(limit=100)
+                if int(row.get("id") or 0) == int(event_payload["event_id"])
+            ]
+            assert len(events) == 1
+            assert events[0]["event_code"] == "GUEST_ACTIVITY"
+            assert events[0]["severity"] == "info"
+
+            disable = client.post(
+                "/api/ui/settings/guest-mode", json={"duration_hours": 0}
+            )
+            assert disable.status_code == 200
+            assert disable.json()["active"] is False
+
+            normal_event = client.post(
+                "/api/sensors/event",
+                json={
+                    "node_id": node_id,
+                    "event": "DOOR_FORCE",
+                    "location": "Door Entrance Area",
+                },
+            )
+            assert normal_event.status_code == 200
+            normal_payload = normal_event.json()
+            assert normal_payload["classification"] == "intruder"
+            assert normal_payload["event_code"] == "DOOR_FORCE"
+            assert isinstance(normal_payload["alert_id"], int)
+        finally:
+            store.set_guest_mode_until("")
+
+
+def test_unknown_presence_alerting_ignores_legacy_disabled_flag() -> None:
+    with TestClient(app):
+        original = store.get_setting("UNKNOWN_PRESENCE_LOGGING_ENABLED")
+        store.upsert_setting("UNKNOWN_PRESENCE_LOGGING_ENABLED", "false")
+        try:
+            supervisor = Supervisor(
+                node_offline_seconds=120,
+                camera_offline_seconds=45,
+                event_retention_days=90,
+                log_retention_days=30,
+                snapshot_root=app.state.settings.snapshot_root,
+                regular_snapshot_retention_days=30,
+                critical_snapshot_retention_days=90,
+                camera_manager=object(),
+                face_service=object(),
+                unknown_presence_logging_enabled=False,
+            )
+
+            assert supervisor._presence_logging_enabled_runtime() is True
+            assert supervisor.unknown_presence_logging_enabled is True
+        finally:
+            if original is None:
+                store.upsert_setting("UNKNOWN_PRESENCE_LOGGING_ENABLED", "true")
+            else:
+                store.upsert_setting("UNKNOWN_PRESENCE_LOGGING_ENABLED", original)
 
 
 def test_alerts_and_events_api_contract_routes() -> None:

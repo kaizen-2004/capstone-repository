@@ -26,12 +26,14 @@ import {
   fetchBackupStatus,
   fetchLiveNodes,
   fetchRetentionStatus,
+  updateGuestMode,
   trainFaceModel,
   updateFaceProfile,
   updateRuntimeSetting,
   type FaceTrainingStatus,
   type MobileRemoteStatus,
   type BackupStatusPayload,
+  type GuestModeStatusPayload,
   type RetentionStatusPayload,
   type RemoteAccessLinksPayload,
 } from '../data/liveApi';
@@ -147,6 +149,15 @@ type RuntimeControlMeta = {
   presets?: RuntimePreset[];
 };
 
+const GUEST_MODE_PRESETS: RuntimePreset[] = [
+  { label: '1h', value: '1', helper: '1 hour' },
+  { label: '2h', value: '2', helper: '2 hours' },
+  { label: '4h', value: '4', helper: '4 hours' },
+  { label: '8h', value: '8', helper: '8 hours' },
+  { label: '12h', value: '12', helper: '12 hours' },
+  { label: '24h', value: '24', helper: '24 hours' },
+];
+
 const RUNTIME_CONTROL_META: Record<string, RuntimeControlMeta> = {
   FACE_COSINE_THRESHOLD: {
     title: 'Face Match Strictness',
@@ -220,11 +231,6 @@ const RUNTIME_CONTROL_META: Record<string, RuntimeControlMeta> = {
       { label: 'Balanced', value: '120', helper: '120s' },
       { label: 'Quiet', value: '300', helper: '300s' },
     ],
-  },
-  UNKNOWN_PRESENCE_LOGGING_ENABLED: {
-    title: 'Unknown Entry Logging',
-    group: 'Detection Timing',
-    description: 'Auto-log unknown-person entries from the live camera view.',
   },
   UNKNOWN_PRESENCE_COOLDOWN_SECONDS: {
     title: 'Unknown Entry Cooldown',
@@ -340,6 +346,38 @@ function detectionPipelineSeverity(state: DetectionPipeline['state']): 'online' 
   return 'offline';
 }
 
+function formatGuestModeRemaining(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  if (hours <= 0) {
+    return `${Math.max(1, minutes)}m remaining`;
+  }
+  return minutes > 0 ? `${hours}h ${minutes}m remaining` : `${hours}h remaining`;
+}
+
+function formatGuestModeUntil(untilTs: string): string {
+  if (!untilTs) {
+    return '';
+  }
+  const until = new Date(untilTs);
+  if (Number.isNaN(until.getTime())) {
+    return '';
+  }
+  return until.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function guestModeRemainingSeconds(status: GuestModeStatusPayload | null, nowMs: number): number {
+  if (!status?.active || !status.untilTs) {
+    return 0;
+  }
+  const untilMs = new Date(status.untilTs).getTime();
+  if (!Number.isFinite(untilMs)) {
+    return status.remainingSeconds;
+  }
+  return Math.max(0, Math.floor((untilMs - nowMs) / 1000));
+}
+
 function emptyGuidedPoseCounts(): Record<GuidedPoseId, number> {
   return {
     center: 0,
@@ -381,6 +419,11 @@ export function Settings() {
   const [runtimeSaveMessages, setRuntimeSaveMessages] = useState<Record<string, string>>({});
   const [runtimeSavingKey, setRuntimeSavingKey] = useState<string | null>(null);
   const [runtimeSecretReplaceMode, setRuntimeSecretReplaceMode] = useState<Record<string, boolean>>({});
+  const [guestModeStatus, setGuestModeStatus] = useState<GuestModeStatusPayload | null>(null);
+  const [guestModeDraftHours, setGuestModeDraftHours] = useState('2');
+  const [guestModeBusy, setGuestModeBusy] = useState(false);
+  const [guestModeMessage, setGuestModeMessage] = useState('');
+  const [guestModeTick, setGuestModeTick] = useState(() => Date.now());
   const [showAddUserModal, setShowAddUserModal] = useState(false);
   const [newUserName, setNewUserName] = useState('');
   const [newUserRole, setNewUserRole] = useState('Family Member');
@@ -695,6 +738,12 @@ export function Settings() {
     if (liveResult.status === 'fulfilled') {
       setAuthorizedProfiles(liveResult.value.authorizedProfiles);
       setRuntimeSettings(liveResult.value.runtimeSettings);
+      setGuestModeStatus({
+        ok: true,
+        active: liveResult.value.guestMode,
+        untilTs: liveResult.value.guestModeUntilTs,
+        remainingSeconds: liveResult.value.guestModeRemainingSeconds,
+      });
       syncRuntimeDrafts(liveResult.value.runtimeSettings);
       setProfilesError('');
     } else {
@@ -742,6 +791,18 @@ export function Settings() {
       window.clearInterval(timer);
     };
   }, [showAddUserModal, loadSettings]);
+
+  useEffect(() => {
+    if (!guestModeStatus?.active) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      setGuestModeTick(Date.now());
+    }, 30000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [guestModeStatus?.active]);
 
   useEffect(() => {
     return () => {
@@ -1035,6 +1096,45 @@ export function Settings() {
     return source === 'true' || source === '1' || source === 'yes' || source === 'on' || source === 'enabled';
   };
 
+  const handleStartGuestMode = async () => {
+    if (guestModeBusy) {
+      return;
+    }
+    const durationHours = Math.max(1, Math.min(24, Math.round(toRuntimeNumber(guestModeDraftHours))));
+    setGuestModeBusy(true);
+    setGuestModeMessage('');
+    try {
+      const status = await updateGuestMode(durationHours);
+      setGuestModeStatus(status);
+      setGuestModeTick(Date.now());
+      setGuestModeMessage(`Guest Mode is active for ${durationHours} hour${durationHours === 1 ? '' : 's'}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to start Guest Mode.';
+      setGuestModeMessage(message);
+    } finally {
+      setGuestModeBusy(false);
+    }
+  };
+
+  const handleEndGuestMode = async () => {
+    if (guestModeBusy) {
+      return;
+    }
+    setGuestModeBusy(true);
+    setGuestModeMessage('');
+    try {
+      const status = await updateGuestMode(0);
+      setGuestModeStatus(status);
+      setGuestModeTick(Date.now());
+      setGuestModeMessage('Guest Mode ended. Unknown visitors will be treated normally again.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to end Guest Mode.';
+      setGuestModeMessage(message);
+    } finally {
+      setGuestModeBusy(false);
+    }
+  };
+
   const handleRuntimeDraftChange = (key: string, value: string) => {
     setRuntimeDrafts((previous) => ({
       ...previous,
@@ -1154,6 +1254,11 @@ export function Settings() {
   const onlineServiceCount = serviceStatuses.filter((service) => service.status === 'online').length;
   const onlineCameraCount = cameraFeeds.filter((cameraFeed) => cameraFeed.status === 'online').length;
   const latestBackupLabel = backupStatus?.latest?.name || 'No backup yet';
+  const guestModePresetIndex = nearestPresetIndex(GUEST_MODE_PRESETS, guestModeDraftHours);
+  const selectedGuestModePreset = GUEST_MODE_PRESETS[guestModePresetIndex];
+  const guestModeRemaining = guestModeRemainingSeconds(guestModeStatus, guestModeTick);
+  const guestModeActive = Boolean(guestModeStatus?.active && guestModeRemaining > 0);
+  const guestModeUntilLabel = formatGuestModeUntil(guestModeStatus?.untilTs || '');
 
   const handleChangePassword = async () => {
     if (!currentPassword || !newPassword) {
@@ -1947,6 +2052,84 @@ export function Settings() {
           </div>
 
           <div className="space-y-4">
+            <section className="rounded-xl border border-blue-200 bg-blue-50/80 p-3 text-gray-900 dark:border-blue-400/30 dark:bg-blue-400/10 dark:text-foreground">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h4 className="font-semibold text-gray-900 dark:text-foreground">Guest Mode</h4>
+                    <span className={`rounded-full px-2 py-0.5 text-xs ${guestModeActive ? 'bg-green-100 text-green-800 dark:bg-green-400/15 dark:text-green-200' : 'bg-gray-100 text-gray-700 dark:bg-background dark:text-foreground/75'}`}>
+                      {guestModeActive ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-sm text-gray-700 dark:text-foreground/80">
+                    Temporarily allow guests without creating unknown-person intruder alerts.
+                  </p>
+                  {guestModeActive ? (
+                    <p className="mt-1 text-xs text-gray-700 dark:text-foreground/75">
+                      Ends at {guestModeUntilLabel || 'scheduled time'} • {formatGuestModeRemaining(guestModeRemaining)}
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-xs text-gray-700 dark:text-foreground/75">
+                      Choose how long Guest Mode should stay active, then start it when guests arrive.
+                    </p>
+                  )}
+                </div>
+
+                <div className="w-full lg:max-w-md space-y-2">
+                  <div className="rounded-lg border border-blue-200 bg-white px-3 py-2.5 dark:border-blue-400/30 dark:bg-background/80">
+                    <Slider
+                      value={[guestModePresetIndex]}
+                      min={0}
+                      max={GUEST_MODE_PRESETS.length - 1}
+                      step={1}
+                      onValueChange={(values) => {
+                        const nextIndex = Math.max(0, Math.min(GUEST_MODE_PRESETS.length - 1, Math.round(values[0] ?? 0)));
+                        setGuestModeDraftHours(GUEST_MODE_PRESETS[nextIndex].value);
+                      }}
+                      disabled={guestModeBusy}
+                    />
+                    <div className="mt-2 grid gap-1" style={{ gridTemplateColumns: `repeat(${GUEST_MODE_PRESETS.length}, minmax(0, 1fr))` }}>
+                      {GUEST_MODE_PRESETS.map((preset, index) => (
+                        <button
+                          key={preset.label}
+                          type="button"
+                          onClick={() => setGuestModeDraftHours(preset.value)}
+                          disabled={guestModeBusy}
+                          className={`min-w-0 rounded-md px-1 py-0.5 text-center text-[10px] leading-tight transition-colors disabled:opacity-60 sm:text-[11px] ${index === guestModePresetIndex ? 'bg-primary/15 font-semibold text-foreground ring-1 ring-primary/30' : 'text-foreground/75 hover:bg-accent'}`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] text-gray-700 dark:text-foreground/75">
+                      Duration: <span className="font-medium text-gray-900 dark:text-foreground">{selectedGuestModePreset.helper}</span>
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => void handleStartGuestMode()}
+                        disabled={guestModeBusy}
+                        className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                      >
+                        {guestModeBusy ? 'Updating...' : guestModeActive ? 'Extend Guest Mode' : 'Start Guest Mode'}
+                      </button>
+                      {guestModeActive ? (
+                        <button
+                          onClick={() => void handleEndGuestMode()}
+                          disabled={guestModeBusy}
+                          className="px-3 py-1.5 text-sm border border-blue-200 bg-white text-blue-700 rounded-lg hover:bg-blue-50 transition-colors disabled:opacity-60 dark:border-blue-400/30 dark:bg-background dark:text-blue-200 dark:hover:bg-blue-400/10"
+                        >
+                          End now
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                  {guestModeMessage ? <p className="text-xs text-gray-800 dark:text-foreground/80">{guestModeMessage}</p> : null}
+                </div>
+              </div>
+            </section>
+
             {runtimeControlGroups.map(({ group, settings }) => (
               <section key={group} className="space-y-2.5">
                 <div>

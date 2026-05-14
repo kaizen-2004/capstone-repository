@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Calendar, Camera, CheckCircle2, Download, Filter, Search, X, Image as ImageIcon } from 'lucide-react';
+import { Calendar, Camera, CheckCircle2, Filter, Search, X, Image as ImageIcon } from 'lucide-react';
 import { fetchLiveEvents, fetchSettingsLive, submitSnapshotFeedback } from '../data/liveApi';
 import type { Alert, AuthorizedProfile, SeverityLevel, EventType } from '../data/types';
 import { StatusBadge } from '../components/StatusBadge';
@@ -50,27 +50,6 @@ const getSnapshotCardId = (snapshotPath: string) => {
   }
   return `snapshot-card-${(hash >>> 0).toString(36)}`;
 };
-
-function toCsvCell(value: unknown): string {
-  const raw = String(value ?? '');
-  if (/[",\n]/.test(raw)) {
-    return `"${raw.replace(/"/g, '""')}"`;
-  }
-  return raw;
-}
-
-function downloadCsv(fileName: string, rows: Array<Array<unknown>>): void {
-  const csv = rows.map((row) => row.map((cell) => toCsvCell(cell)).join(',')).join('\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = fileName;
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
-  URL.revokeObjectURL(url);
-}
 
 function overlayColor(overlay: NonNullable<Alert['faceOverlays']>[number]) {
   const kind = String(overlay.kind || '').toLowerCase();
@@ -486,19 +465,7 @@ export function EventsAlerts() {
     () =>
       events
         .filter((event) => event.id.startsWith('alert-') && !event.acknowledged)
-        .sort((a, b) => {
-          const severityRank: Record<SeverityLevel, number> = {
-            critical: 0,
-            warning: 1,
-            normal: 2,
-            info: 3,
-          };
-          const severityDiff = severityRank[a.severity] - severityRank[b.severity];
-          if (severityDiff !== 0) {
-            return severityDiff;
-          }
-          return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
-        }),
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()),
     [events],
   );
 
@@ -567,30 +534,6 @@ export function EventsAlerts() {
   }, [filteredEvents]);
 
   const visibleItemCount = snapshotGalleryEvents.length;
-
-  const handleExportSelectedEvent = (event: Alert) => {
-    const rows: Array<Array<unknown>> = [
-      ['Event Details Export'],
-      ['Exported At', new Date().toISOString()],
-      [],
-      ['Field', 'Value'],
-      ['ID', event.id],
-      ['Timestamp', event.timestamp],
-      ['Severity', event.severity],
-      ['Type', event.type],
-      ['Event Code', displayEventCode(event.eventCode)],
-      ['Title', event.title],
-      ['Description', event.description],
-      ['Location', event.location],
-      ['Source Node', event.sourceNode],
-      ['Acknowledged', event.acknowledged ? 'yes' : 'no'],
-      ['Response Time (ms)', event.responseTimeMs ?? ''],
-      ['Confidence (%)', event.confidence ?? ''],
-      ['Fusion Evidence', (event.fusionEvidence || []).join(' | ')],
-    ];
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    downloadCsv(`event-${event.id}-${stamp}.csv`, rows);
-  };
 
   const handleSnapshotFeedback = async (event: Alert, verdict: 'confirmed' | 'false_positive') => {
     const alertId = feedbackAlertId(event);
@@ -667,9 +610,9 @@ export function EventsAlerts() {
   return (
     <div className="p-3 sm:p-4 md:p-8 space-y-4 md:space-y-6 overflow-x-hidden">
       <div>
-        <h2 className="text-xl md:text-2xl font-semibold text-gray-900">Alerts & Snapshots</h2>
+        <h2 className="text-xl md:text-2xl font-semibold text-gray-900">Alerts</h2>
         <p className="text-gray-600 mt-1">
-          Review active alerts by their snapshot first, then browse captured evidence history.
+          Review recent events, active alerts, and captured snapshots.
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
           <span className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2.5 py-1 font-medium text-red-700">
@@ -912,9 +855,11 @@ export function EventsAlerts() {
                 </div>
                 <div className="bg-gray-900 aspect-video rounded-lg flex items-center justify-center">
                   {selectedEvent.snapshotPath && !snapshotLoadFailed ? (
-                    <SnapshotImageWithOverlay
-                      event={selectedEvent}
+                    <img
+                      src={selectedEvent.snapshotPath}
                       alt="Event snapshot"
+                      loading="lazy"
+                      className="h-full w-full object-contain"
                       onError={() => {
                         setSnapshotLoadFailed(true);
                       }}
@@ -1015,13 +960,6 @@ export function EventsAlerts() {
               </div>
 
               <div className="flex flex-wrap gap-3 pt-4 border-t border-gray-200">
-                <button
-                  onClick={() => handleExportSelectedEvent(selectedEvent)}
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
-                >
-                  <Download className="w-4 h-4" />
-                  Export Data
-                </button>
                 <button
                   onClick={handleOpenCameraFeed}
                   className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"

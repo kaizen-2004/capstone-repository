@@ -10,8 +10,8 @@ class AlertNotificationService {
   static const AndroidNotificationChannel _activeAlertChannel =
       AndroidNotificationChannel(
     'intruflare_active_alerts',
-    'Active Alerts',
-    description: 'Persistent safety and security alerts',
+    'Alerts',
+    description: 'Events and safety alerts',
     importance: Importance.high,
   );
 
@@ -29,8 +29,10 @@ class AlertNotificationService {
       return;
     }
 
-    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
-    const initializationSettings = InitializationSettings(android: androidSettings);
+    const androidSettings =
+        AndroidInitializationSettings('@mipmap/ic_launcher');
+    const initializationSettings =
+        InitializationSettings(android: androidSettings);
 
     await _plugin.initialize(
       initializationSettings,
@@ -83,6 +85,38 @@ class AlertNotificationService {
 
     await _plugin.show(
       activeAlertNotificationId,
+      title,
+      body,
+      NotificationDetails(android: details),
+      payload: 'alerts',
+    );
+  }
+
+  Future<void> showNormalEventNotification({
+    required String notificationKey,
+    required String title,
+    required String body,
+  }) async {
+    await initialize();
+
+    final details = AndroidNotificationDetails(
+      _activeAlertChannel.id,
+      _activeAlertChannel.name,
+      channelDescription: _activeAlertChannel.description,
+      importance: Importance.high,
+      priority: Priority.high,
+      category: AndroidNotificationCategory.status,
+      autoCancel: true,
+      onlyAlertOnce: true,
+      styleInformation: BigTextStyleInformation(body),
+      color: const Color(0xFF1E88E5),
+      ticker: 'IntruFlare event',
+    );
+
+    await _plugin.show(
+      activeAlertNotificationId +
+          1 +
+          (notificationKey.hashCode & 0x7fffffff) % 100000,
       title,
       body,
       NotificationDetails(android: details),

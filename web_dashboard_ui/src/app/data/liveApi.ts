@@ -44,8 +44,17 @@ export interface LiveNodesPayload {
 
 export interface LiveSettingsPayload {
   guestMode: boolean;
+  guestModeUntilTs: string;
+  guestModeRemainingSeconds: number;
   authorizedProfiles: AuthorizedProfile[];
   runtimeSettings: RuntimeSetting[];
+}
+
+export interface GuestModeStatusPayload {
+  ok: boolean;
+  active: boolean;
+  untilTs: string;
+  remainingSeconds: number;
 }
 
 export interface RuntimeSettingUpdatePayload {
@@ -714,9 +723,34 @@ export async function fetchSettingsLive(): Promise<LiveSettingsPayload> {
   const settingsRaw = Array.isArray(payload.runtime_settings) ? payload.runtime_settings : [];
   return {
     guestMode: Boolean(payload.guest_mode),
+    guestModeUntilTs: String(payload.guest_mode_until_ts ?? payload.guestModeUntilTs ?? ''),
+    guestModeRemainingSeconds: toInt(payload.guest_mode_remaining_seconds ?? payload.guestModeRemainingSeconds),
     authorizedProfiles: profilesRaw.map((row) => mapProfile(row as Json)),
     runtimeSettings: settingsRaw.map((row) => mapRuntimeSetting(row as Json)),
   };
+}
+
+function mapGuestModeStatus(payload: Json): GuestModeStatusPayload {
+  return {
+    ok: Boolean(payload.ok),
+    active: Boolean(payload.active),
+    untilTs: String(payload.until_ts ?? payload.untilTs ?? ''),
+    remainingSeconds: toInt(payload.remaining_seconds ?? payload.remainingSeconds),
+  };
+}
+
+export async function fetchGuestModeStatus(): Promise<GuestModeStatusPayload> {
+  const payload = await fetchJson<Json>('/api/ui/settings/guest-mode');
+  return mapGuestModeStatus(payload);
+}
+
+export async function updateGuestMode(durationHours: number): Promise<GuestModeStatusPayload> {
+  const payload = await fetchJson<Json>('/api/ui/settings/guest-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ duration_hours: durationHours }),
+  });
+  return mapGuestModeStatus(payload);
 }
 
 export async function updateRuntimeSetting(key: string, value: string): Promise<RuntimeSettingUpdatePayload> {

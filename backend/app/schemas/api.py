@@ -124,6 +124,10 @@ class RuntimeSettingUpdateRequest(BaseModel):
     value: str = Field(min_length=0, max_length=4096)
 
 
+class GuestModeUpdateRequest(BaseModel):
+    duration_hours: int = Field(default=0, ge=0, le=24)
+
+
 class AlertReviewUpdateRequest(BaseModel):
     review_status: str = Field(min_length=3, max_length=32)
     review_note: str = Field(default="", max_length=1000)

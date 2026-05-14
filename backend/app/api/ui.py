@@ -37,6 +37,7 @@ from ..schemas.api import (
     AssistantQueryRequest,
     BackupRestoreRequest,
     CameraControlRequest,
+    GuestModeUpdateRequest,
     RuntimeSettingUpdateRequest,
     SnapshotFeedbackRequest,
 )
@@ -50,6 +51,7 @@ DEBUG_OVERLAY_FAILURE_COOLDOWN_SECONDS = 10.0
 DEBUG_OVERLAY_MAX_CONSECUTIVE_FAILURES = 3
 DEBUG_OVERLAY_LOG_INTERVAL_SECONDS = 8.0
 TERMINAL_REVIEW_STATUSES = {"false_positive", "resolved", "archived"}
+GUEST_MODE_MAX_HOURS = 24
 
 ASSISTANT_NODE_LABELS: dict[str, str] = {
     "cam_indoor": "Indoor Camera",
@@ -714,6 +716,16 @@ def _parse_bool(value: str) -> bool:
     if normalized in {"0", "false", "no", "off", "disabled"}:
         return False
     raise ValueError("value must be true or false")
+
+
+def _guest_mode_payload() -> dict[str, Any]:
+    status = store.guest_mode_status()
+    return {
+        "ok": True,
+        "active": bool(status["active"]),
+        "until_ts": str(status["until_ts"]),
+        "remaining_seconds": int(status["remaining_seconds"]),
+    }
 
 
 def _runtime_default_value(
@@ -1531,8 +1543,11 @@ def ui_settings_live(request: Request) -> dict:
     get_current_user(request)
     settings: Settings = request.app.state.settings
     faces = store.list_faces()
+    guest_mode = _guest_mode_payload()
     return {
-        "guest_mode": False,
+        "guest_mode": guest_mode["active"],
+        "guest_mode_until_ts": guest_mode["until_ts"],
+        "guest_mode_remaining_seconds": guest_mode["remaining_seconds"],
         "authorized_profiles": [
             {
                 "id": f"auth-{int(row['id']):03d}",
@@ -1547,6 +1562,32 @@ def ui_settings_live(request: Request) -> dict:
         ],
         "runtime_settings": _runtime_settings(settings, request=request),
     }
+
+
+@router.get("/api/ui/settings/guest-mode")
+def ui_guest_mode_status(request: Request) -> dict:
+    get_current_user(request)
+    return _guest_mode_payload()
+
+
+@router.post("/api/ui/settings/guest-mode")
+def ui_guest_mode_update(payload: GuestModeUpdateRequest, request: Request) -> dict:
+    get_current_user(request)
+    duration_hours = max(0, min(GUEST_MODE_MAX_HOURS, int(payload.duration_hours)))
+    if duration_hours <= 0:
+        store.set_guest_mode_until("")
+        supervisor = getattr(request.app.state, "supervisor", None)
+        if supervisor is not None:
+            reset_guest_mode_presence_state = getattr(
+                supervisor, "reset_guest_mode_presence_state", None
+            )
+            if reset_guest_mode_presence_state is not None:
+                reset_guest_mode_presence_state()
+        return _guest_mode_payload()
+
+    until = datetime.now(timezone.utc) + timedelta(hours=duration_hours)
+    store.set_guest_mode_until(until.isoformat(timespec="seconds"))
+    return _guest_mode_payload()
 
 
 @router.post("/api/ui/settings/runtime")

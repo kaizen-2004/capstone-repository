@@ -16,7 +16,7 @@ import { fetchLiveEvents, fetchLiveNodes } from '../data/liveApi';
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Live Monitoring', href: '/live', icon: Video },
-  { name: 'Alerts & Snapshots', href: '/events', icon: Bell },
+  { name: 'Alerts', href: '/events', icon: Bell },
   { name: 'Sensors & Nodes', href: '/sensors', icon: Radio },
   { name: 'Statistics', href: '/statistics', icon: BarChart3 },
   { name: 'Settings', href: '/settings', icon: Settings },

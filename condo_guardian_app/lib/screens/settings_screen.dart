@@ -1,18 +1,24 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../core/network/api_client.dart';
 import '../core/network/backend_endpoint_resolver.dart';
 import '../core/storage/settings_store.dart';
+import '../services/backend_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
     required this.settingsStore,
+    required this.backendService,
     required this.activeBackendBaseUrl,
     required this.activeConnectionLabel,
     this.onSaved,
   });
 
   final SettingsStore settingsStore;
+  final BackendService backendService;
   final String activeBackendBaseUrl;
   final String activeConnectionLabel;
   final VoidCallback? onSaved;
@@ -22,9 +28,16 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  static const _guestModePresets = <int>[1, 2, 4, 8, 12, 24];
+
   late final TextEditingController _lanBaseUrlController;
   late final TextEditingController _tailscaleBaseUrlController;
   late final TextEditingController _pollingController;
+  GuestModeStatus? _guestModeStatus;
+  Timer? _guestModeTimer;
+  int _guestModePresetIndex = 1;
+  bool _guestModeBusy = false;
+  String? _guestModeMessage;
   String? _message;
   bool _isSuccess = false;
 
@@ -37,6 +50,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         TextEditingController(text: widget.settingsStore.tailscaleBaseUrl);
     _pollingController =
         TextEditingController(text: '${widget.settingsStore.pollingSeconds}');
+    unawaited(_loadGuestModeStatus());
   }
 
   @override
@@ -44,7 +58,189 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _lanBaseUrlController.dispose();
     _tailscaleBaseUrlController.dispose();
     _pollingController.dispose();
+    _guestModeTimer?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant SettingsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.backendService.apiClient.baseUrl !=
+            widget.backendService.apiClient.baseUrl ||
+        oldWidget.backendService.apiClient.token !=
+            widget.backendService.apiClient.token) {
+      unawaited(_loadGuestModeStatus());
+    }
+  }
+
+  Future<void> _loadGuestModeStatus() async {
+    try {
+      final service = await _resolveGuestModeBackendService();
+      final status = await service.fetchGuestModeStatus();
+      if (!mounted) {
+        return;
+      }
+      setState(() => _guestModeStatus = status);
+      _syncGuestModeTimer();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _guestModeMessage = 'Guest Mode unavailable: $error');
+    }
+  }
+
+  Future<BackendService> _resolveGuestModeBackendService() async {
+    final token = widget.settingsStore.authToken;
+    final activeBaseUrl = BackendEndpointResolver.normalizeBaseUrl(
+      widget.activeBackendBaseUrl,
+    );
+    if (activeBaseUrl.isNotEmpty) {
+      return BackendService(
+        ApiClient(
+          baseUrl: activeBaseUrl,
+          token: token,
+        ),
+      );
+    }
+
+    try {
+      final resolved = await BackendEndpointResolver.resolve(
+        widget.settingsStore,
+        token: token,
+      );
+      return BackendService(
+        ApiClient(
+          baseUrl: resolved.baseUrl,
+          token: token,
+        ),
+      );
+    } catch (_) {
+      return widget.backendService;
+    }
+  }
+
+  void _syncGuestModeTimer() {
+    _guestModeTimer?.cancel();
+    if (!(_guestModeStatus?.active ?? false)) {
+      return;
+    }
+    _guestModeTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  int get _guestModeHours => _guestModePresets[_guestModePresetIndex];
+
+  int get _guestModeRemainingSeconds {
+    final status = _guestModeStatus;
+    if (status == null || !status.active || status.untilTs.isEmpty) {
+      return status?.remainingSeconds ?? 0;
+    }
+    final until = DateTime.tryParse(status.untilTs)?.toLocal();
+    if (until == null) {
+      return status.remainingSeconds;
+    }
+    return until.difference(DateTime.now()).inSeconds.clamp(0, 1 << 31).toInt();
+  }
+
+  bool get _guestModeActive =>
+      (_guestModeStatus?.active ?? false) &&
+      (_guestModeRemainingSeconds > 0 ||
+          (_guestModeStatus?.untilTs ?? '').isEmpty);
+
+  String _formatGuestModeRemaining(int seconds) {
+    final safeSeconds = seconds < 0 ? 0 : seconds;
+    final hours = safeSeconds ~/ 3600;
+    final minutes = (safeSeconds % 3600) ~/ 60;
+    if (hours <= 0) {
+      return '${minutes < 1 ? 1 : minutes}m remaining';
+    }
+    return minutes > 0
+        ? '${hours}h ${minutes}m remaining'
+        : '${hours}h remaining';
+  }
+
+  String _formatGuestModeUntil(String untilTs) {
+    final until = DateTime.tryParse(untilTs)?.toLocal();
+    if (until == null) {
+      return '';
+    }
+    final hour = until.hour % 12 == 0 ? 12 : until.hour % 12;
+    final minute = until.minute.toString().padLeft(2, '0');
+    final meridiem = until.hour >= 12 ? 'PM' : 'AM';
+    return '$hour:$minute $meridiem';
+  }
+
+  Future<void> _startGuestMode() async {
+    if (_guestModeBusy) {
+      return;
+    }
+    setState(() {
+      _guestModeBusy = true;
+      _guestModeMessage = null;
+    });
+    try {
+      final service = await _resolveGuestModeBackendService();
+      final status = await service.updateGuestMode(_guestModeHours);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _guestModeStatus = status;
+        _guestModeMessage = status.active
+            ? 'Guest Mode is active for $_guestModeHours hour${_guestModeHours == 1 ? '' : 's'}.'
+            : 'Guest Mode update was sent, but the backend still reports inactive.';
+      });
+      widget.onSaved?.call();
+      _syncGuestModeTimer();
+      unawaited(_loadGuestModeStatus());
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _guestModeMessage = 'Unable to start Guest Mode: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _guestModeBusy = false);
+      }
+    }
+  }
+
+  Future<void> _endGuestMode() async {
+    if (_guestModeBusy) {
+      return;
+    }
+    setState(() {
+      _guestModeBusy = true;
+      _guestModeMessage = null;
+    });
+    try {
+      final service = await _resolveGuestModeBackendService();
+      final status = await service.updateGuestMode(0);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _guestModeStatus = status;
+        _guestModeMessage =
+            'Guest Mode ended. Unknown visitors will be treated normally again.';
+      });
+      widget.onSaved?.call();
+      _syncGuestModeTimer();
+      unawaited(_loadGuestModeStatus());
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _guestModeMessage = 'Unable to end Guest Mode: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _guestModeBusy = false);
+      }
+    }
   }
 
   Future<void> _save() async {
@@ -94,6 +290,171 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _buildGuestModeCard() {
+    final cs = Theme.of(context).colorScheme;
+    final remainingSeconds = _guestModeRemainingSeconds;
+    final untilLabel = _formatGuestModeUntil(_guestModeStatus?.untilTs ?? '');
+    final statusLabel = _guestModeActive ? 'Active' : 'Inactive';
+    final durationLabel =
+        '$_guestModeHours hour${_guestModeHours == 1 ? '' : 's'}';
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _guestModeActive
+            ? const Color(0xFF26A69A).withValues(alpha: 0.12)
+            : cs.primary.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: _guestModeActive
+              ? const Color(0xFF26A69A).withValues(alpha: 0.35)
+              : cs.primary.withValues(alpha: 0.24),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color:
+                      (_guestModeActive ? const Color(0xFF26A69A) : cs.primary)
+                          .withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  Icons.group_outlined,
+                  color:
+                      _guestModeActive ? const Color(0xFF26A69A) : cs.primary,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Guest Mode',
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleMedium
+                                ?.copyWith(fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                        Chip(
+                          visualDensity: VisualDensity.compact,
+                          label: Text(statusLabel),
+                          backgroundColor: _guestModeActive
+                              ? const Color(0xFF26A69A).withValues(alpha: 0.16)
+                              : cs.surfaceContainerHighest,
+                        ),
+                      ],
+                    ),
+                    Text(
+                      'Allow guests temporarily without creating unknown-person intruder alerts.',
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.copyWith(height: 1.35),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Slider(
+            value: _guestModePresetIndex.toDouble(),
+            min: 0,
+            max: (_guestModePresets.length - 1).toDouble(),
+            divisions: _guestModePresets.length - 1,
+            label: durationLabel,
+            onChanged: _guestModeBusy
+                ? null
+                : (value) {
+                    setState(() => _guestModePresetIndex = value.round());
+                  },
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: _guestModePresets
+                .map(
+                  (hours) => Text(
+                    '${hours}h',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: cs.onSurfaceVariant,
+                          fontWeight: hours == _guestModeHours
+                              ? FontWeight.w800
+                              : FontWeight.w500,
+                        ),
+                  ),
+                )
+                .toList(),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            _guestModeActive
+                ? 'Ends at ${untilLabel.isEmpty ? 'scheduled time' : untilLabel} • ${_formatGuestModeRemaining(remainingSeconds)}'
+                : 'Selected duration: $durationLabel',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color:
+                      _guestModeActive ? const Color(0xFF00796B) : cs.primary,
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _guestModeBusy ? null : _startGuestMode,
+                  icon: Icon(
+                    _guestModeActive
+                        ? Icons.more_time_rounded
+                        : Icons.play_circle_outline_rounded,
+                    size: 18,
+                  ),
+                  label: Text(
+                    _guestModeBusy
+                        ? 'Updating...'
+                        : _guestModeActive
+                            ? 'Extend'
+                            : 'Start',
+                  ),
+                ),
+              ),
+              if (_guestModeActive) ...[
+                const SizedBox(width: 10),
+                OutlinedButton(
+                  onPressed: _guestModeBusy ? null : _endGuestMode,
+                  child: const Text('End now'),
+                ),
+              ],
+            ],
+          ),
+          if (_guestModeMessage != null) ...[
+            const SizedBox(height: 10),
+            Text(
+              _guestModeMessage!,
+              style:
+                  Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.35),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -101,6 +462,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
       children: [
+        _buildGuestModeCard(),
         _sectionHeader('CONNECTION', icon: Icons.cloud_outlined),
         Container(
           padding: const EdgeInsets.all(14),

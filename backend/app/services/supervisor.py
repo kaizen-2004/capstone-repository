@@ -93,6 +93,7 @@ class Supervisor:
         self._unknown_visible_by_node: dict[str, bool] = {}
         self._unknown_miss_by_node: dict[str, int] = {}
         self._unknown_last_logged_at_by_node: dict[str, float] = {}
+        self._guest_mode_was_active = store.is_guest_mode_active()
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -107,15 +108,13 @@ class Supervisor:
         if self.camera_manager is None or self.face_service is None:
             return False
 
-        auth_raw = store.get_setting("AUTHORIZED_PRESENCE_LOGGING_ENABLED")
-        unknown_raw = store.get_setting("UNKNOWN_PRESENCE_LOGGING_ENABLED")
+        self._sync_guest_mode_transition()
 
+        auth_raw = store.get_setting("AUTHORIZED_PRESENCE_LOGGING_ENABLED")
         authorized_enabled = self._parse_bool(
             auth_raw, self.authorized_presence_logging_enabled
         )
-        unknown_enabled = self._parse_bool(
-            unknown_raw, self.unknown_presence_logging_enabled
-        )
+        unknown_enabled = True
 
         self.authorized_presence_logging_enabled = authorized_enabled
         self.unknown_presence_logging_enabled = unknown_enabled
@@ -123,6 +122,21 @@ class Supervisor:
             authorized_enabled or unknown_enabled
         )
         return self.face_presence_logging_enabled
+
+    def _reset_unknown_presence_tracking(self) -> None:
+        self._unknown_visible_by_node.clear()
+        self._unknown_miss_by_node.clear()
+        self._unknown_last_logged_at_by_node.clear()
+
+    def _sync_guest_mode_transition(self) -> None:
+        guest_mode_active = store.is_guest_mode_active()
+        if self._guest_mode_was_active and not guest_mode_active:
+            self._reset_unknown_presence_tracking()
+        self._guest_mode_was_active = guest_mode_active
+
+    def reset_guest_mode_presence_state(self) -> None:
+        self._reset_unknown_presence_tracking()
+        self._guest_mode_was_active = False
 
     def _fire_monitoring_enabled_runtime(self) -> bool:
         if self.camera_manager is None or self.fire_service is None:
@@ -469,7 +483,39 @@ class Supervisor:
                     primary_status = str(primary_unknown.get("face_status") or "").upper()
                     is_unclear = primary_status == "FACE_UNCLEAR"
 
-                    if self.unknown_presence_logging_enabled and (
+                    guest_mode_active = store.is_guest_mode_active()
+                    if guest_mode_active and (unknown_entered_view or unknown_cooldown_ready):
+                        try:
+                            snapshot_path = self.camera_manager.save_snapshot(
+                                node_id, frame, "guest_unknown_presence"
+                            )
+                        except Exception:
+                            snapshot_path = ""
+                        details = {
+                            "face": primary_unknown,
+                            "faces": verdicts,
+                            "detection_mode": "guest_unclear_presence_scan" if is_unclear else "guest_unknown_presence_scan",
+                            "guest_mode": True,
+                            "guest_mode_until_ts": store.guest_mode_status()["until_ts"],
+                            "presence_transition": "entered_fov",
+                            "snapshot_path": snapshot_path,
+                        }
+                        event_id = store.create_event(
+                            event_type="system",
+                            event_code="GUEST_ACTIVITY",
+                            source_node=node_id,
+                            location=location,
+                            severity="info",
+                            title="Guest activity observed",
+                            description="An unknown face was seen while Guest Mode was active. No intruder alert was created.",
+                            details=details,
+                        )
+                        store.log(
+                            "INFO",
+                            f"guest mode logged unknown presence node={node_id} event_id={event_id} snapshot={snapshot_path or 'none'}",
+                        )
+                        self._unknown_last_logged_at_by_node[node_id] = now_ts
+                    elif self.unknown_presence_logging_enabled and (
                         unknown_entered_view or unknown_cooldown_ready
                     ):
                         try:

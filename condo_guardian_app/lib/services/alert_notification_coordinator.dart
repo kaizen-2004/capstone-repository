@@ -28,6 +28,7 @@ class AlertNotificationCoordinator {
   bool _syncInProgress = false;
   final StreamController<int> _activeAlertCountController =
       StreamController<int>.broadcast();
+  final Set<String> _notifiedNormalEventIds = <String>{};
   int _activeAlertCount = 0;
   bool _activeAlertCountPublished = false;
 
@@ -71,10 +72,12 @@ class AlertNotificationCoordinator {
     }
     _syncInProgress = true;
     try {
-      final alerts = await _backendServiceFactory().fetchAlerts();
+      final backendService = _backendServiceFactory();
+      final alerts = await backendService.fetchAlerts();
       final active = alerts.where((item) => !item.acknowledged).toList();
       final activeCount = active.length;
       _publishActiveAlertCount(activeCount);
+      await _notifyLatestDoorStateEvent(backendService);
 
       if (active.isEmpty) {
         await _notificationService.clearActiveAlertNotification();
@@ -110,15 +113,49 @@ class AlertNotificationCoordinator {
 
   AlertItem _pickPrimaryAlert(List<AlertItem> alerts) {
     final sorted = List<AlertItem>.from(alerts)
-      ..sort((a, b) {
-        final severityCompare =
-            _severityRank(b.severity) - _severityRank(a.severity);
-        if (severityCompare != 0) {
-          return severityCompare;
-        }
-        return b.createdAt.compareTo(a.createdAt);
-      });
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return sorted.first;
+  }
+
+  Future<void> _notifyLatestDoorStateEvent(
+      BackendService backendService) async {
+    try {
+      final events = await backendService.fetchEvents();
+      final doorEvents = events.where((event) {
+        final eventCode = event.eventCode.toUpperCase();
+        return eventCode == 'DOOR_OPEN' || eventCode == 'DOOR_CLOSED';
+      }).toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+      if (doorEvents.isEmpty) {
+        return;
+      }
+
+      final latest = doorEvents.first;
+      if (_notifiedNormalEventIds.contains(latest.id)) {
+        return;
+      }
+
+      final maxAgeSeconds = _settingsStore.pollingSeconds * 2 < 30
+          ? 30
+          : _settingsStore.pollingSeconds * 2;
+      if (DateTime.now().difference(latest.createdAt).inSeconds >
+          maxAgeSeconds) {
+        return;
+      }
+
+      final body = latest.message.trim().isNotEmpty
+          ? latest.message.trim()
+          : 'Door state changed at ${latest.location}.';
+      await _notificationService.showNormalEventNotification(
+        notificationKey: latest.id,
+        title: latest.title,
+        body: body,
+      );
+      _notifiedNormalEventIds.add(latest.id);
+    } catch (_) {
+      // Normal event notifications should not block active alert refresh.
+    }
   }
 
   int _severityRank(String severityRaw) {

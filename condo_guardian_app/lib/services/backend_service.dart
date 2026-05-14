@@ -97,6 +97,36 @@ class SnapshotFeedbackResult {
   }
 }
 
+class GuestModeStatus {
+  GuestModeStatus({
+    required this.active,
+    required this.untilTs,
+    required this.remainingSeconds,
+  });
+
+  final bool active;
+  final String untilTs;
+  final int remainingSeconds;
+
+  factory GuestModeStatus.fromJson(Map<String, dynamic> json) {
+    final activeRaw = json['active'];
+    final untilRaw = json['until_ts'] ??
+        json['untilTs'] ??
+        json['guest_mode_until_ts'] ??
+        json['guestModeUntilTs'];
+    final remainingRaw = json['remaining_seconds'] ??
+        json['remainingSeconds'] ??
+        json['guest_mode_remaining_seconds'] ??
+        json['guestModeRemainingSeconds'];
+    return GuestModeStatus(
+      active:
+          activeRaw == true || activeRaw?.toString().toLowerCase() == 'true',
+      untilTs: untilRaw?.toString() ?? '',
+      remainingSeconds: int.tryParse(remainingRaw?.toString() ?? '') ?? 0,
+    );
+  }
+}
+
 class BackendService {
   BackendService(this.apiClient);
 
@@ -241,6 +271,19 @@ class BackendService {
         .map((item) => AlertItem.fromJson(item as Map<String, dynamic>))
         .toList();
     return _filterByLocalDay(items, localDate, (item) => item.createdAt);
+  }
+
+  Future<GuestModeStatus> fetchGuestModeStatus() async {
+    final json = await apiClient.getJson('api/ui/settings/guest-mode');
+    return GuestModeStatus.fromJson(json);
+  }
+
+  Future<GuestModeStatus> updateGuestMode(int durationHours) async {
+    final json = await apiClient.postJson(
+      'api/ui/settings/guest-mode',
+      <String, dynamic>{'duration_hours': durationHours},
+    );
+    return GuestModeStatus.fromJson(json);
   }
 
   Future<List<AlertItem>> fetchEvents({DateTime? localDate}) async {

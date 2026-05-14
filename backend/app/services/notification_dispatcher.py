@@ -90,6 +90,44 @@ class NotificationDispatcher:
             },
         }
 
+    def _build_event_push_payload(self, event: dict[str, Any]) -> dict[str, Any]:
+        details = _safe_json(event.get("details_json"))
+        event_id = int(event.get("id") or 0)
+        event_code = str(event.get("event_code") or "EVENT").strip().upper() or "EVENT"
+        title = str(details.get("title") or event.get("title") or "Event").strip()
+        if not title:
+            title = "Security event"
+
+        description = str(
+            details.get("description")
+            or event.get("description")
+            or "Please review the latest event."
+        ).strip() or "Please review the latest event."
+        location = str(details.get("location") or event.get("location") or "")
+        source_node = str(
+            details.get("source_node") or event.get("source_node") or "system"
+        )
+
+        if location:
+            body = f"{description} Location: {location}. Open Alerts to review."
+        else:
+            body = f"{description} Open Alerts to review."
+
+        return {
+            "title": title,
+            "body": body,
+            "url": "/dashboard/remote/mobile",
+            "tag": f"event-{event_id}",
+            "data": {
+                "event_id": event_id,
+                "event_code": event_code,
+                "severity": str(event.get("severity") or "info"),
+                "source_node": source_node,
+                "location": location,
+                "url": "/dashboard/remote/mobile",
+            },
+        }
+
     def _mobile_push_enabled(self) -> bool:
         return _parse_bool(store.get_setting("mobile_push_enabled"), default=True)
 
@@ -142,6 +180,16 @@ class NotificationDispatcher:
 
     def dispatch_alert(self, alert: dict[str, Any]) -> None:
         alert_id = int(alert.get("id") or 0) or None
+        payload = self._build_push_payload(alert)
+        self._dispatch_push_payload(payload, alert_id=alert_id)
+
+    def dispatch_event(self, event: dict[str, Any]) -> None:
+        payload = self._build_event_push_payload(event)
+        self._dispatch_push_payload(payload, alert_id=None)
+
+    def _dispatch_push_payload(
+        self, payload: dict[str, Any], *, alert_id: int | None
+    ) -> None:
         devices = store.list_mobile_devices(enabled_only=True)
         if not devices:
             store.create_notification_delivery_log(
@@ -160,8 +208,6 @@ class NotificationDispatcher:
                 alert_id=alert_id,
             )
             return
-
-        payload = self._build_push_payload(alert)
 
         for device in devices:
             user_id = int(device.get("user_id") or 0)
