@@ -1121,8 +1121,11 @@ def test_snapshot_feedback_intruder_false_positive_imports_and_retrains() -> Non
         assert response.status_code == 200
         payload = response.json()
         assert payload["ok"] is True
-        assert payload["train_ok"] is True
-        assert payload["train_message"] == "trained"
+        assert payload["train_ok"] is None
+        assert (
+            payload["train_message"]
+            == "False-positive sample saved. Run group face retraining when ready."
+        )
         assert fake_face_service.captured == [
             (face_name, f"snapshot_false_positive:alert_{alert_id}")
         ]
@@ -1224,7 +1227,10 @@ def test_mobile_status_nodes_sensors_and_assistant_routes() -> None:
         assistant_payload = assistant.json()
         assert assistant_payload["ok"] is True
         assert assistant_payload["question_id"] == "current_system_status"
-        assert isinstance(assistant_payload.get("answer"), str)
+        answer = assistant_payload.get("answer")
+        assert isinstance(answer, str)
+        assert "Suggested action:" in answer
+        assert len(answer) > 120
 
 
 def test_daily_summary_report_pdf_contract() -> None:

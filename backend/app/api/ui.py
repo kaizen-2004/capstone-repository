@@ -1309,9 +1309,24 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
             if str(row.get("status") or "").strip().lower() == "online"
         )
         total = len(node_rows)
+        alert_text = (
+            "no active alerts are waiting for review"
+            if not active_alerts
+            else f"{len(active_alerts)} active alert(s) need review"
+        )
+        node_text = (
+            f"{online} of {total} monitored nodes are online"
+            if total
+            else "no monitored nodes were reported by the backend"
+        )
         answer = (
-            f"The system is online. {online} of {total} monitored nodes are online, "
-            f"and there are {len(active_alerts)} active alerts."
+            "Current status: The backend is responding and the mobile assistant can read "
+            f"live monitoring data. Right now, {node_text}, and {alert_text}. "
+            "Context: node availability indicates whether the smoke, force, and camera "
+            "modules are still reporting into the dashboard. Active alerts are the items "
+            "that still require acknowledgement or review. Suggested action: if the node "
+            "count is incomplete, open Settings and test the connection; if alerts are "
+            "present, open Alerts first before relying on the all-clear state."
         )
     elif resolved_id == "last_alert_reason":
         if alerts:
@@ -1324,11 +1339,20 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
             )
             location_text = f" in {location}" if location else ""
             answer = (
-                f"The latest alert is '{title}' from {source_node}{location_text}. "
-                f"{detail}"
+                f"Latest alert: '{title}' was reported by {source_node}{location_text}. "
+                f"Reason: {detail} Context: this answer is based on the most recent "
+                "alert row stored by the backend, so it reflects the last recorded "
+                "system decision rather than a new camera analysis. Suggested action: "
+                "open the alert details, inspect the snapshot if available, then mark it "
+                "confirmed or false positive so the dashboard history stays accurate."
             )
         else:
-            answer = "No alerts have been recorded yet."
+            answer = (
+                "Latest alert: no alerts have been recorded yet. Context: the assistant "
+                "checked the stored alert history and did not find an item to summarize. "
+                "Suggested action: keep monitoring live camera and sensor status; if you "
+                "expected an alert, verify that nodes are online and backend ingestion is running."
+            )
     elif resolved_id == "which_node_detected_smoke":
         smoke_event = next(
             (
@@ -1340,13 +1364,23 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
             None,
         )
         if smoke_event is None:
-            answer = "No recent smoke detection is recorded."
+            answer = (
+                "Smoke detection: no recent smoke warning or high-smoke event is recorded. "
+                "Context: the assistant searched recent event history for SMOKE_WARNING "
+                "and SMOKE_HIGH event codes. Suggested action: if smoke is physically "
+                "present, treat this as a safety issue first, then check node power and "
+                "sensor connectivity after the area is safe."
+            )
         else:
             source_node = _assistant_node_label(smoke_event.get("source_node"))
             location = str(smoke_event.get("location") or "").strip()
             location_text = f" in {location}" if location else ""
             answer = (
-                f"The most recent smoke detection came from {source_node}{location_text}."
+                f"Smoke detection: the most recent smoke-related event came from "
+                f"{source_node}{location_text}. Context: this is taken from the latest "
+                "stored smoke event, not a fresh sensor poll. Suggested action: inspect "
+                "that node's area first, then check the sensor reading and acknowledge or "
+                "review any linked fire alert after confirming the situation."
             )
     elif resolved_id == "are_any_nodes_offline":
         offline_nodes = [
@@ -1355,13 +1389,25 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
             if str(row.get("status") or "").strip().lower() != "online"
         ]
         if not offline_nodes:
-            answer = "All monitored nodes are currently online."
+            answer = (
+                "Node status: all monitored nodes are currently online. Context: the "
+                "assistant checked the live node status list and did not find any node "
+                "reported as offline or degraded. Suggested action: continue monitoring; "
+                "if camera streams still fail despite online nodes, refresh the Monitor "
+                "screen because stream availability is tracked separately from node presence."
+            )
         else:
             labels = ", ".join(
                 _assistant_node_label(row.get("id") or "node")
                 for row in offline_nodes
             )
-            answer = f"These nodes are currently offline: {labels}."
+            answer = (
+                f"Node status: these nodes are currently offline or not reporting normally: "
+                f"{labels}. Context: offline nodes reduce coverage because their latest "
+                "sensor or camera data may be stale. Suggested action: check power, Wi-Fi "
+                "or network reachability for those nodes, then use Settings to test the "
+                "backend connection after the devices recover."
+            )
     elif resolved_id == "recent_intrusion_events":
         intrusion_rows = [
             row
@@ -1369,14 +1415,24 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
             if str(row.get("type") or "").strip().lower() == "intruder"
         ][:5]
         if not intrusion_rows:
-            answer = "No recent intrusion events are recorded."
+            answer = (
+                "Intrusion history: no recent intrusion events are recorded. Context: the "
+                "assistant searched recent events for intruder-type records and found none "
+                "in the current query window. Suggested action: keep the Monitor open if "
+                "you need live visual confirmation, and verify camera nodes are online if "
+                "you expected motion or unknown-face activity."
+            )
         else:
             first = intrusion_rows[0]
             source_node = _assistant_node_label(first.get("source_node"))
             title = _assistant_friendly_text(first.get("title") or "Intrusion event")
             answer = (
-                f"There are {len(intrusion_rows)} recent intrusion events. "
-                f"The latest is '{title}' from {source_node}."
+                f"Intrusion history: {len(intrusion_rows)} recent intrusion event(s) "
+                f"were found. The latest is '{title}' from {source_node}. Context: these "
+                "events usually come from unknown-face, unclear-face, or entry-related "
+                "detections stored by the backend. Suggested action: review the latest "
+                "snapshot, confirm whether the person is authorized, and use false-alarm "
+                "feedback when the detection should improve future recognition."
             )
     elif resolved_id == "explain_current_warning":
         warning_alert = next(
@@ -1388,7 +1444,13 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
             None,
         )
         if warning_alert is None:
-            answer = "There is no active warning alert right now."
+            answer = (
+                "Current warning: there is no active warning or critical alert right now. "
+                "Context: the assistant checked recent stored alerts for warning-level "
+                "or critical severity and did not find one requiring explanation. "
+                "Suggested action: use the Dashboard for overall status and keep Alerts "
+                "clear so new warnings remain easy to notice."
+            )
         else:
             latest = _alert_to_ui(warning_alert)
             title = _assistant_friendly_text(latest.get("title") or "Warning")
@@ -1397,11 +1459,20 @@ def assistant_query(payload: AssistantQueryRequest, request: Request) -> dict:
                 latest.get("description") or "Please open Alerts for details."
             )
             answer = (
-                f"Current warning is '{title}' from {source_node}. "
-                f"{detail}"
+                f"Current warning: '{title}' is reported by {source_node}. Reason: "
+                f"{detail} Context: warning and critical alerts indicate the system saw "
+                "a condition that may need human review, such as smoke, force, or unknown "
+                "person activity. Suggested action: inspect the linked alert, verify the "
+                "area if safe, then acknowledge or review the alert after deciding whether "
+                "it is confirmed or a false positive."
             )
     else:
-        answer = "Unsupported assistant question. Use a predefined question_id."
+        answer = (
+            "Unsupported assistant question. Context: the mobile assistant currently "
+            "supports predefined system, alert, smoke, node, intrusion, and warning "
+            "questions. Suggested action: choose one of the guided questions so the "
+            "assistant can provide a monitored-data answer."
+        )
 
     return {"ok": True, "question_id": resolved_id, "answer": answer}
 
