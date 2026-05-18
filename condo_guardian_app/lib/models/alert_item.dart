@@ -11,6 +11,7 @@ class AlertItem {
     this.acknowledged = false,
     this.eventId,
     this.relatedAlertId,
+    this.eventType = '',
     this.eventCode = '',
     this.sourceNode = '',
     this.location = '',
@@ -30,6 +31,7 @@ class AlertItem {
   final bool acknowledged;
   final int? eventId;
   final int? relatedAlertId;
+  final String eventType;
   final String eventCode;
   final String sourceNode;
   final String location;
@@ -43,6 +45,41 @@ class AlertItem {
   String get sourceNodeLabel => nodeDisplayName(sourceNode);
 
   bool get hasSnapshot => snapshotPath.trim().isNotEmpty;
+
+  bool get hasFeedbackReview {
+    switch (reviewStatus.toLowerCase()) {
+      case 'confirmed':
+      case 'false_positive':
+      case 'resolved':
+      case 'archived':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool get supportsIntruderFeedback {
+    final normalizedType = eventType.toLowerCase();
+    final normalizedCode = eventCode.toUpperCase();
+    return normalizedType == 'intruder' ||
+        <String>{
+          'INTRUDER',
+          'DOOR_TAMPER',
+          'AUTHORIZED_ENTRY',
+          'UNKNOWN',
+          'UNKNOWN_FACE',
+        }.contains(normalizedCode);
+  }
+
+  bool get supportsFireFeedback {
+    final normalizedType = eventType.toLowerCase();
+    final normalizedCode = eventCode.toUpperCase();
+    return normalizedType == 'fire' ||
+        <String>{'FIRE', 'SMOKE_WARNING'}.contains(normalizedCode);
+  }
+
+  bool get supportsSnapshotFeedback =>
+      supportsIntruderFeedback || supportsFireFeedback;
 
   bool get isTerminalReviewStatus {
     switch (reviewStatus.toLowerCase()) {
@@ -115,6 +152,7 @@ class AlertItem {
       eventId: _optionalInt(json['event_id'] ?? json['eventId']),
       relatedAlertId:
           _optionalInt(json['related_alert_id'] ?? json['relatedAlertId']),
+      eventType: json['type']?.toString() ?? '',
       eventCode:
           json['event_code']?.toString() ?? json['type']?.toString() ?? '',
       sourceNode: replaceKnownNodeIds(json['source_node']?.toString() ?? ''),

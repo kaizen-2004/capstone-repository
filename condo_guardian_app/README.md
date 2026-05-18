@@ -6,10 +6,9 @@ Flutter frontend scaffold for a condo intruder and fire monitoring system.
 - Home dashboard summary
 - Monitor screen using `WebView`
 - Alerts screen with polling-based refresh and alert acknowledgement
-- Node provisioning screen for ESP32-C3 setup AP mode
 - Face enrollment screen with mobile image capture and upload
 - Guided FAQ assistant screen
-- Settings screen for backend URL, dashboard URL, bearer token, and polling interval
+- Settings screen for LAN/Tailscale URLs, polling interval, notifications, and sign out
 
 ## Quick start
 1. Create a new Flutter project or open this folder as your Flutter app.
@@ -20,8 +19,7 @@ Flutter frontend scaffold for a condo intruder and fire monitoring system.
    ```
 3. Open **Settings** inside the app and configure:
    - Backend base URL
-   - Dashboard URL
-   - Bearer token (if your API requires it)
+   - Away/Tailscale backend URL
    - Alert polling interval
 
 ## Android package migration (safe rollout)
@@ -100,39 +98,6 @@ To keep existing installed users updatable while migrating to the new package na
 }
 ```
 
-## Provisioning contract
-The provisioning screen assumes the phone is already connected to the node setup AP.
-
-Suggested setup AP base URL:
-- `http://192.168.4.1`
-
-Suggested node endpoint:
-- `POST /configure`
-
-Suggested request body:
-```json
-{
-  "wifi_ssid": "CondoWiFi",
-  "wifi_password": "secret123",
-  "backend_host": "monitor-pc.tailnet.ts.net",
-  "backend_port": 8765,
-  "node_id": "door_force_01",
-  "node_role": "door_force",
-  "room_name": "Door Entrance Area"
-}
-```
-
-Allowed `node_role` values (MVP): `smoke_node1`, `smoke_node2`, `door_force`, `cam_door`.
-Allowed `room_name` values (MVP): `Living Room`, `Door Entrance Area`.
-
-Suggested success response:
-```json
-{
-  "success": true,
-  "message": "Configuration saved. Rebooting node."
-}
-```
-
 ## Enrollment contract
 The enrollment screen captures mobile photos and uploads them one at a time.
 
@@ -172,7 +137,7 @@ If you later want smoother UX, add a backend bootstrap flow that exchanges the a
 
 ## Important connection notes
 - The app uses `Authorization: Bearer <token>` for API calls if a token is saved in Settings.
-- The monitor screen loads whatever URL you place in **Dashboard URL**.
+- The monitor screen loads the backend mobile route at `/dashboard/remote/mobile`.
 - If you are using Tailscale, use a stable MagicDNS or tailnet hostname instead of a raw changing IP for the backend and dashboard URLs.
 - If your backend uses self-signed HTTPS, the WebView and HTTP client may need extra platform configuration.
 - The app is written as an Android-first MVP. iOS support may need additional camera and WebView permission work.

@@ -16,6 +16,10 @@ class HomeScreen extends StatefulWidget {
     required this.settingsStore,
     required this.activeBackendBaseUrl,
     required this.activeConnectionLabel,
+    required this.onOpenMonitor,
+    required this.onOpenAlerts,
+    required this.onOpenEnroll,
+    required this.onOpenSettings,
     this.activeAlertCount,
   });
 
@@ -24,6 +28,10 @@ class HomeScreen extends StatefulWidget {
   final String activeBackendBaseUrl;
   final String activeConnectionLabel;
   final int? activeAlertCount;
+  final VoidCallback onOpenMonitor;
+  final VoidCallback onOpenAlerts;
+  final VoidCallback onOpenEnroll;
+  final VoidCallback onOpenSettings;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -36,6 +44,7 @@ class _HomeScreenState extends State<HomeScreen>
   late Future<SystemSnapshot> _snapshotFuture;
   late final AnimationController _staggerCtrl;
   DateTime _reportDate = DateTime.now();
+  DateTime? _lastLoaded;
   bool _exportingReport = false;
 
   @override
@@ -65,7 +74,12 @@ class _HomeScreenState extends State<HomeScreen>
   Future<SystemSnapshot> _fetch() {
     _staggerCtrl.reset();
     final future = widget.backendService.fetchSystemSnapshot();
-    future.then((_) => _staggerCtrl.forward(), onError: (_) {});
+    future.then((_) {
+      if (mounted) {
+        setState(() => _lastLoaded = DateTime.now());
+      }
+      _staggerCtrl.forward();
+    }, onError: (_) {});
     return future;
   }
 
@@ -183,6 +197,11 @@ class _HomeScreenState extends State<HomeScreen>
             exportingReport: _exportingReport,
             onPickReportDate: _pickReportDate,
             onExportReport: _exportDailyReport,
+            lastLoaded: _lastLoaded,
+            onOpenMonitor: widget.onOpenMonitor,
+            onOpenAlerts: widget.onOpenAlerts,
+            onOpenEnroll: widget.onOpenEnroll,
+            onOpenSettings: widget.onOpenSettings,
           );
         },
       ),
@@ -270,6 +289,11 @@ class _DataView extends StatelessWidget {
     required this.exportingReport,
     required this.onPickReportDate,
     required this.onExportReport,
+    required this.lastLoaded,
+    required this.onOpenMonitor,
+    required this.onOpenAlerts,
+    required this.onOpenEnroll,
+    required this.onOpenSettings,
   });
 
   final SystemSnapshot data;
@@ -282,6 +306,11 @@ class _DataView extends StatelessWidget {
   final bool exportingReport;
   final Future<void> Function() onPickReportDate;
   final Future<void> Function() onExportReport;
+  final DateTime? lastLoaded;
+  final VoidCallback onOpenMonitor;
+  final VoidCallback onOpenAlerts;
+  final VoidCallback onOpenEnroll;
+  final VoidCallback onOpenSettings;
 
   Animation<double> _anim(double start, double end) => CurvedAnimation(
         parent: staggerCtrl,
@@ -305,6 +334,18 @@ class _DataView extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
       children: [
+        _AttentionPanel(
+          alertCount: alertCount,
+          systemState: data.systemState,
+          onlineNodes: onlineNodes,
+          totalNodes: data.nodes.length,
+          lastLoaded: lastLoaded,
+          onOpenAlerts: onOpenAlerts,
+          onOpenMonitor: onOpenMonitor,
+          onOpenEnroll: onOpenEnroll,
+          onOpenSettings: onOpenSettings,
+        ),
+        const SizedBox(height: 16),
         FadeTransition(
           opacity: _anim(0.0, 0.4),
           child: SlideTransition(
@@ -445,6 +486,139 @@ class _DataView extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _AttentionPanel extends StatelessWidget {
+  const _AttentionPanel({
+    required this.alertCount,
+    required this.systemState,
+    required this.onlineNodes,
+    required this.totalNodes,
+    required this.lastLoaded,
+    required this.onOpenAlerts,
+    required this.onOpenMonitor,
+    required this.onOpenEnroll,
+    required this.onOpenSettings,
+  });
+
+  final int alertCount;
+  final String systemState;
+  final int onlineNodes;
+  final int totalNodes;
+  final DateTime? lastLoaded;
+  final VoidCallback onOpenAlerts;
+  final VoidCallback onOpenMonitor;
+  final VoidCallback onOpenEnroll;
+  final VoidCallback onOpenSettings;
+
+  String _formatClock(DateTime value) {
+    final local = value.toLocal();
+    return '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final needsAttention = alertCount > 0 ||
+        (totalNodes > 0 && onlineNodes < totalNodes) ||
+        !['online', 'ok', 'normal'].contains(systemState.toLowerCase());
+    final accent =
+        needsAttention ? const Color(0xFFFFA726) : const Color(0xFF26A69A);
+    final title = needsAttention ? 'Action needed' : 'All clear';
+    final subtitle = alertCount > 0
+        ? '$alertCount active alert${alertCount == 1 ? '' : 's'} need review.'
+        : totalNodes > 0 && onlineNodes < totalNodes
+            ? '$onlineNodes of $totalNodes nodes are online.'
+            : 'No active alerts. Monitoring is running.';
+    final syncText = lastLoaded == null
+        ? 'Waiting for first refresh'
+        : 'Last refreshed ${_formatClock(lastLoaded!)}';
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: accent.withValues(alpha: 0.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(
+                  needsAttention
+                      ? Icons.priority_high_rounded
+                      : Icons.verified_user_outlined,
+                  color: accent,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(subtitle,
+                        style: Theme.of(context).textTheme.bodySmall),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            syncText,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: cs.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilledButton.tonalIcon(
+                onPressed: onOpenAlerts,
+                icon: const Icon(Icons.notifications_active_outlined, size: 18),
+                label: const Text('Review Alerts'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onOpenMonitor,
+                icon: const Icon(Icons.videocam_outlined, size: 18),
+                label: const Text('Open Monitor'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onOpenEnroll,
+                icon: const Icon(Icons.face_retouching_natural, size: 18),
+                label: const Text('Enroll Face'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onOpenSettings,
+                icon: const Icon(Icons.tune_rounded, size: 18),
+                label: const Text('Settings'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

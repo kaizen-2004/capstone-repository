@@ -34,10 +34,22 @@ class _EventsScreenState extends State<EventsScreen> {
   String? _busyAlertId;
   Timer? _timer;
   bool _refreshing = false;
+  bool _bulkFalseAlarmMode = false;
+  bool _bulkFeedbackPending = false;
+  bool _groupTraining = false;
+  bool _loadingFeedbackProfiles = false;
+  String _bulkFeedbackProfileName = '';
+  String _searchQuery = '';
+  String? _bulkFeedbackMessage;
+  String? _groupTrainMessage;
+  final Set<String> _bulkFalseAlarmIds = <String>{};
+  List<FaceProfile> _feedbackProfiles = const <FaceProfile>[];
+  late final TextEditingController _searchController;
 
   @override
   void initState() {
     super.initState();
+    _searchController = TextEditingController();
     if (widget.initialDate != null) {
       _selectedDate = DateTime(
         widget.initialDate!.year,
@@ -59,6 +71,7 @@ class _EventsScreenState extends State<EventsScreen> {
   @override
   void dispose() {
     _timer?.cancel();
+    _searchController.dispose();
     super.dispose();
   }
 
@@ -172,8 +185,409 @@ class _EventsScreenState extends State<EventsScreen> {
     }
   }
 
+  bool _isBulkEligibleEvent(AlertItem event) {
+    return event.relatedAlertId != null &&
+        event.hasSnapshot &&
+        event.supportsIntruderFeedback &&
+        !event.hasFeedbackReview;
+  }
+
+  List<AlertItem> _filteredEvents() {
+    final query = _searchQuery.toLowerCase().trim();
+    if (query.isEmpty) {
+      return _events;
+    }
+    return _events.where((event) {
+      return event.title.toLowerCase().contains(query) ||
+          event.message.toLowerCase().contains(query) ||
+          event.eventCode.toLowerCase().contains(query) ||
+          event.sourceNodeLabel.toLowerCase().contains(query) ||
+          event.location.toLowerCase().contains(query);
+    }).toList();
+  }
+
+  Widget _buildSearchCard(int visibleCount) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '$visibleCount event${visibleCount == 1 ? '' : 's'} shown',
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _searchController,
+            onChanged: (value) => setState(() => _searchQuery = value),
+            decoration: const InputDecoration(
+              labelText: 'Search events',
+              hintText: 'Title, code, location, source node',
+              prefixIcon: Icon(Icons.search_rounded, size: 20),
+            ),
+          ),
+          if (_searchQuery.trim().isNotEmpty) ...[
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: () {
+                _searchController.clear();
+                setState(() => _searchQuery = '');
+              },
+              icon: const Icon(Icons.clear_rounded, size: 18),
+              label: const Text('Clear search'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  List<_EventBulkFalseAlarmTarget> _bulkTargets() {
+    final targets = <_EventBulkFalseAlarmTarget>[];
+    final seenAlertIds = <int>{};
+    for (final event in _events) {
+      if (!_isBulkEligibleEvent(event)) {
+        continue;
+      }
+      final alertId = event.relatedAlertId;
+      if (alertId == null || !seenAlertIds.add(alertId)) {
+        continue;
+      }
+      targets.add(
+        _EventBulkFalseAlarmTarget(
+          key: event.id,
+          alertId: alertId,
+          title: event.title,
+        ),
+      );
+    }
+    return targets;
+  }
+
+  Future<void> _ensureFeedbackProfiles() async {
+    if (_feedbackProfiles.isNotEmpty || _loadingFeedbackProfiles) {
+      return;
+    }
+    setState(() {
+      _loadingFeedbackProfiles = true;
+      _bulkFeedbackMessage = null;
+    });
+    try {
+      final profiles = await widget.backendService.fetchFaceProfiles();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _feedbackProfiles = profiles;
+        _bulkFeedbackProfileName = profiles.isEmpty ? '' : profiles.first.name;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _bulkFeedbackMessage = 'Could not load authorized profiles: $error';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _loadingFeedbackProfiles = false);
+      }
+    }
+  }
+
+  void _toggleBulkMode() {
+    setState(() {
+      _bulkFalseAlarmMode = !_bulkFalseAlarmMode;
+      _bulkFeedbackMessage = null;
+      if (!_bulkFalseAlarmMode) {
+        _bulkFalseAlarmIds.clear();
+      }
+    });
+    if (_bulkFalseAlarmMode) {
+      unawaited(_ensureFeedbackProfiles());
+    }
+  }
+
+  void _toggleBulkSelection(AlertItem event) {
+    if (!_isBulkEligibleEvent(event)) {
+      setState(() {
+        _bulkFeedbackMessage =
+            'This event is not eligible for intruder false-alarm retraining.';
+      });
+      return;
+    }
+    setState(() {
+      _bulkFeedbackMessage = null;
+      if (_bulkFalseAlarmIds.contains(event.id)) {
+        _bulkFalseAlarmIds.remove(event.id);
+      } else {
+        _bulkFalseAlarmIds.add(event.id);
+      }
+    });
+  }
+
+  Future<void> _submitBulkFalseAlarms(
+    List<_EventBulkFalseAlarmTarget> selectedTargets,
+  ) async {
+    if (_bulkFeedbackPending) {
+      return;
+    }
+    if (selectedTargets.isEmpty) {
+      setState(() {
+        _bulkFeedbackMessage = 'Select at least one eligible intruder event.';
+      });
+      return;
+    }
+    final faceName = _bulkFeedbackProfileName.trim();
+    if (faceName.isEmpty) {
+      setState(() {
+        _bulkFeedbackMessage =
+            'Select the authorized person before marking false alarms.';
+      });
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Mark selected events as false alarms?'),
+            content: Text(
+              'This will import ${selectedTargets.length} linked alert snapshot(s) into $faceName for group face retraining.',
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Save False Alarms'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) {
+      return;
+    }
+
+    setState(() {
+      _bulkFeedbackPending = true;
+      _bulkFeedbackMessage =
+          'Saving ${selectedTargets.length} false alarm(s) for group retraining...';
+    });
+
+    var savedCount = 0;
+    String? failure;
+    final savedKeys = <String>{};
+    for (final target in selectedTargets) {
+      try {
+        await widget.backendService.submitSnapshotFeedback(
+          '${target.alertId}',
+          verdict: 'false_positive',
+          faceName: faceName,
+        );
+        savedCount += 1;
+        savedKeys.add(target.key);
+      } catch (error) {
+        failure = '$error';
+        break;
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _bulkFeedbackPending = false;
+      _bulkFalseAlarmIds.removeAll(savedKeys);
+      _bulkFeedbackMessage = failure == null
+          ? '$savedCount false alarm${savedCount == 1 ? '' : 's'} saved for $faceName. Retrain once after reviewing all false alarms.'
+          : savedCount > 0
+              ? '$savedCount false alarm${savedCount == 1 ? '' : 's'} saved before an error: $failure'
+              : 'Could not save selected false alarms: $failure';
+    });
+    await _loadEvents(silent: true);
+    widget.onAlertResolved?.call();
+  }
+
+  Future<void> _runGroupRetrain() async {
+    if (_groupTraining) {
+      return;
+    }
+    setState(() {
+      _groupTraining = true;
+      _groupTrainMessage = 'Retraining face model from saved samples...';
+    });
+    try {
+      final result = await widget.backendService.trainFaceModel();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _groupTrainMessage = result.ok
+            ? 'Group retrain complete. ${result.message}'.trim()
+            : 'Group retrain failed. ${result.message}'.trim();
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _groupTrainMessage = 'Group retrain failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _groupTraining = false);
+      }
+    }
+  }
+
+  Widget _buildFalseAlarmReviewPanel({
+    required List<_EventBulkFalseAlarmTarget> eligibleTargets,
+    required List<_EventBulkFalseAlarmTarget> selectedTargets,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    final selectedProfileName = _feedbackProfiles
+            .any((profile) => profile.name == _bulkFeedbackProfileName)
+        ? _bulkFeedbackProfileName
+        : (_feedbackProfiles.isEmpty ? '' : _feedbackProfiles.first.name);
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFA726).withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(16),
+        border:
+            Border.all(color: const Color(0xFFFFA726).withValues(alpha: 0.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Intruder False Alarm Review',
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: const Color(0xFFFFA726),
+                  fontWeight: FontWeight.w800,
+                ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '${selectedTargets.length} selected of ${eligibleTargets.length} eligible linked intruder event${eligibleTargets.length == 1 ? '' : 's'}.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          if (_bulkFalseAlarmMode) ...[
+            const SizedBox(height: 12),
+            if (_loadingFeedbackProfiles)
+              const LinearProgressIndicator(minHeight: 2)
+            else if (_feedbackProfiles.isEmpty)
+              Text(
+                'No authorized profiles loaded.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: cs.error,
+                    ),
+              )
+            else
+              DropdownButtonFormField<String>(
+                key: ValueKey<String>(selectedProfileName),
+                initialValue: selectedProfileName,
+                decoration: const InputDecoration(
+                  labelText: 'Authorized person',
+                  prefixIcon: Icon(Icons.person_search_outlined, size: 20),
+                ),
+                items: _feedbackProfiles
+                    .map(
+                      (profile) => DropdownMenuItem<String>(
+                        value: profile.name,
+                        child: Text(profile.displayLabel),
+                      ),
+                    )
+                    .toList(),
+                onChanged: _bulkFeedbackPending
+                    ? null
+                    : (value) => setState(
+                          () => _bulkFeedbackProfileName = value ?? '',
+                        ),
+              ),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: _bulkFeedbackPending ? null : _toggleBulkMode,
+                icon: Icon(
+                  _bulkFalseAlarmMode
+                      ? Icons.close_rounded
+                      : Icons.checklist_rounded,
+                  size: 18,
+                ),
+                label: Text(
+                  _bulkFalseAlarmMode
+                      ? 'Stop Selecting'
+                      : 'Select Intruder Events',
+                ),
+              ),
+              if (_bulkFalseAlarmMode)
+                FilledButton.icon(
+                  onPressed: _bulkFeedbackPending || selectedTargets.isEmpty
+                      ? null
+                      : () => _submitBulkFalseAlarms(selectedTargets),
+                  icon:
+                      const Icon(Icons.report_gmailerrorred_rounded, size: 18),
+                  label: Text(
+                    _bulkFeedbackPending
+                        ? 'Saving...'
+                        : 'Mark Selected False Alarm',
+                  ),
+                ),
+              OutlinedButton.icon(
+                onPressed: _groupTraining ? null : _runGroupRetrain,
+                icon: const Icon(Icons.psychology_alt_outlined, size: 18),
+                label: Text(
+                  _groupTraining ? 'Retraining...' : 'Group Retrain Face Model',
+                ),
+              ),
+            ],
+          ),
+          if (_bulkFeedbackMessage != null) ...[
+            const SizedBox(height: 10),
+            Text(
+              _bulkFeedbackMessage!,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: const Color(0xFF9A5A00),
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+          ],
+          if (_groupTrainMessage != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _groupTrainMessage!,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: cs.primary,
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final visibleEvents = _filteredEvents();
+    final bulkTargets = _bulkTargets();
+    final selectedBulkTargets = bulkTargets
+        .where((target) => _bulkFalseAlarmIds.contains(target.key))
+        .toList();
+
     return Scaffold(
       appBar: AppBar(title: const Text('Events')),
       body: _loading
@@ -204,31 +618,84 @@ class _EventsScreenState extends State<EventsScreen> {
                   ? const Center(child: Text('No events at the moment.'))
                   : RefreshIndicator(
                       onRefresh: _loadEvents,
-                      child: ListView.builder(
+                      child: ListView(
                         padding: const EdgeInsets.all(16),
-                        itemCount: _events.length,
-                        itemBuilder: (context, index) {
-                          final event = _events[index];
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
-                            child: _EventCard(
-                              event: event,
-                              severityColor: _severityColor(event.severity),
-                              timeLabel: _formatDate(event.createdAt),
-                              snapshotUrl: event.hasSnapshot
-                                  ? _absoluteSnapshotUrl(event.snapshotPath)
-                                  : null,
-                              imageHeaders: _imageHeaders,
-                              busy: event.relatedAlertId != null &&
-                                  _busyAlertId == '${event.relatedAlertId}',
-                              onResolveLinkedAlert: event.relatedAlertId == null
-                                  ? null
-                                  : () => _resolveLinkedAlert(event),
-                            ),
-                          );
-                        },
+                        children: [
+                          _buildSearchCard(visibleEvents.length),
+                          const SizedBox(height: 12),
+                          _buildFalseAlarmReviewPanel(
+                            eligibleTargets: bulkTargets,
+                            selectedTargets: selectedBulkTargets,
+                          ),
+                          const SizedBox(height: 12),
+                          if (visibleEvents.isEmpty)
+                            const _NoMatchingEventsCard()
+                          else
+                            ...visibleEvents.map((event) {
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 12),
+                                child: _EventCard(
+                                  event: event,
+                                  severityColor: _severityColor(event.severity),
+                                  timeLabel: _formatDate(event.createdAt),
+                                  snapshotUrl: event.hasSnapshot
+                                      ? _absoluteSnapshotUrl(event.snapshotPath)
+                                      : null,
+                                  imageHeaders: _imageHeaders,
+                                  busy: event.relatedAlertId != null &&
+                                      _busyAlertId == '${event.relatedAlertId}',
+                                  onResolveLinkedAlert:
+                                      event.relatedAlertId == null
+                                          ? null
+                                          : () => _resolveLinkedAlert(event),
+                                  selectable: _bulkFalseAlarmMode,
+                                  selected:
+                                      _bulkFalseAlarmIds.contains(event.id),
+                                  bulkEligible: _isBulkEligibleEvent(event),
+                                  onToggleSelected: () =>
+                                      _toggleBulkSelection(event),
+                                ),
+                              );
+                            }),
+                        ],
                       ),
                     ),
+    );
+  }
+}
+
+class _EventBulkFalseAlarmTarget {
+  const _EventBulkFalseAlarmTarget({
+    required this.key,
+    required this.alertId,
+    required this.title,
+  });
+
+  final String key;
+  final int alertId;
+  final String title;
+}
+
+class _NoMatchingEventsCard extends StatelessWidget {
+  const _NoMatchingEventsCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: const Row(
+        children: [
+          Icon(Icons.search_off_rounded),
+          SizedBox(width: 10),
+          Expanded(child: Text('No events match the current search.')),
+        ],
+      ),
     );
   }
 }
@@ -240,6 +707,10 @@ class _EventCard extends StatelessWidget {
     required this.timeLabel,
     required this.busy,
     required this.onResolveLinkedAlert,
+    this.selectable = false,
+    this.selected = false,
+    this.bulkEligible = false,
+    this.onToggleSelected,
     this.snapshotUrl,
     this.imageHeaders,
   });
@@ -249,6 +720,10 @@ class _EventCard extends StatelessWidget {
   final String timeLabel;
   final bool busy;
   final VoidCallback? onResolveLinkedAlert;
+  final bool selectable;
+  final bool selected;
+  final bool bulkEligible;
+  final VoidCallback? onToggleSelected;
   final String? snapshotUrl;
   final Map<String, String>? imageHeaders;
 
@@ -299,6 +774,16 @@ class _EventCard extends StatelessWidget {
                         label: 'Snapshot',
                         color: const Color(0xFF1E88E5),
                       ),
+                    if (selectable)
+                      _EventPill(
+                        label: bulkEligible
+                            ? (selected ? 'Selected' : 'Selectable')
+                            : 'Not Eligible',
+                        color: bulkEligible
+                            ? const Color(0xFFFFA726)
+                            : cs.onSurfaceVariant,
+                        filled: selected,
+                      ),
                   ],
                 ),
                 const SizedBox(height: 10),
@@ -348,10 +833,39 @@ class _EventCard extends StatelessWidget {
                 ),
                 if (onResolveLinkedAlert != null) ...[
                   const SizedBox(height: 12),
-                  FilledButton.tonalIcon(
-                    onPressed: busy ? null : onResolveLinkedAlert,
-                    icon: const Icon(Icons.task_alt_rounded, size: 17),
-                    label: const Text('Resolve linked alert'),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      if (selectable)
+                        OutlinedButton.icon(
+                          onPressed: bulkEligible ? onToggleSelected : null,
+                          icon: Icon(
+                            selected
+                                ? Icons.check_box_rounded
+                                : Icons.check_box_outline_blank_rounded,
+                            size: 17,
+                          ),
+                          label: Text(selected ? 'Selected' : 'Select'),
+                        ),
+                      FilledButton.tonalIcon(
+                        onPressed: busy ? null : onResolveLinkedAlert,
+                        icon: const Icon(Icons.task_alt_rounded, size: 17),
+                        label: const Text('Resolve linked alert'),
+                      ),
+                    ],
+                  ),
+                ] else if (selectable) ...[
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: bulkEligible ? onToggleSelected : null,
+                    icon: Icon(
+                      selected
+                          ? Icons.check_box_rounded
+                          : Icons.check_box_outline_blank_rounded,
+                      size: 17,
+                    ),
+                    label: Text(selected ? 'Selected' : 'Select'),
                   ),
                 ],
               ],

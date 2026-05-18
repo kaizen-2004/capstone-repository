@@ -6,6 +6,7 @@ import '../core/network/api_client.dart';
 import '../core/network/backend_endpoint_resolver.dart';
 import '../core/storage/settings_store.dart';
 import '../services/backend_service.dart';
+import '../services/alert_notification_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -15,6 +16,7 @@ class SettingsScreen extends StatefulWidget {
     required this.activeBackendBaseUrl,
     required this.activeConnectionLabel,
     this.onSaved,
+    this.onSignedOut,
   });
 
   final SettingsStore settingsStore;
@@ -22,6 +24,7 @@ class SettingsScreen extends StatefulWidget {
   final String activeBackendBaseUrl;
   final String activeConnectionLabel;
   final VoidCallback? onSaved;
+  final Future<void> Function()? onSignedOut;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -29,17 +32,24 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   static const _guestModePresets = <int>[1, 2, 4, 8, 12, 24];
+  static const _pollingPresets = <int>[5, 10, 30, 60];
 
   late final TextEditingController _lanBaseUrlController;
   late final TextEditingController _tailscaleBaseUrlController;
   late final TextEditingController _pollingController;
+  final AlertNotificationService _notificationService =
+      AlertNotificationService();
   GuestModeStatus? _guestModeStatus;
   Timer? _guestModeTimer;
   int _guestModePresetIndex = 1;
   bool _guestModeBusy = false;
   String? _guestModeMessage;
+  String? _connectionMessage;
+  String? _notificationMessage;
   String? _message;
   bool _isSuccess = false;
+  bool _checkingConnection = false;
+  bool _notificationBusy = false;
 
   @override
   void initState() {
@@ -59,6 +69,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _tailscaleBaseUrlController.dispose();
     _pollingController.dispose();
     _guestModeTimer?.cancel();
+    _notificationService.dispose();
     super.dispose();
   }
 
@@ -254,6 +265,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     await widget.settingsStore
         .setPollingSeconds(int.tryParse(_pollingController.text.trim()) ?? 10);
+    _pollingController.text = '${widget.settingsStore.pollingSeconds}';
     widget.onSaved?.call();
     if (!mounted) {
       return;
@@ -262,6 +274,108 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _message = 'Settings saved. Connections refreshed.';
       _isSuccess = true;
     });
+  }
+
+  Future<void> _testConnection() async {
+    if (_checkingConnection) {
+      return;
+    }
+    setState(() {
+      _checkingConnection = true;
+      _connectionMessage = null;
+    });
+    await widget.settingsStore.setConnectionProfiles(
+      lanBaseUrl: BackendEndpointResolver.normalizeBaseUrl(
+        _lanBaseUrlController.text,
+      ),
+      tailscaleBaseUrl: BackendEndpointResolver.normalizeBaseUrl(
+        _tailscaleBaseUrlController.text,
+      ),
+    );
+    try {
+      final resolved = await BackendEndpointResolver.resolve(
+        widget.settingsStore,
+        token: widget.settingsStore.authToken,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _connectionMessage = 'Connection OK via ${resolved.label}.';
+      });
+      widget.onSaved?.call();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _connectionMessage =
+            'Backend unreachable. Check Wi-Fi, Tailscale, and backend status. $error';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _checkingConnection = false);
+      }
+    }
+  }
+
+  Future<void> _requestNotifications() async {
+    if (_notificationBusy) {
+      return;
+    }
+    setState(() {
+      _notificationBusy = true;
+      _notificationMessage = null;
+    });
+    try {
+      await _notificationService.requestPermission();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _notificationMessage =
+            'Notification permission requested. Active alerts stay visible until acknowledged.';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _notificationMessage = 'Could not request notifications: $error';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _notificationBusy = false);
+      }
+    }
+  }
+
+  Future<void> _signOut() async {
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Sign out?'),
+            content: const Text(
+              'You will need to sign in again before viewing alerts and monitor data.',
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Sign Out'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) {
+      return;
+    }
+    await widget.settingsStore.setAuthToken('');
+    await widget.onSignedOut?.call();
   }
 
   Widget _sectionHeader(String label, {IconData? icon}) {
@@ -516,6 +630,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
           'The app always tries LAN first and switches to Tailscale only when LAN is unreachable.',
           style: Theme.of(context).textTheme.bodySmall,
         ),
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          onPressed: _checkingConnection ? null : _testConnection,
+          icon: _checkingConnection
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.network_check_rounded, size: 18),
+          label: Text(_checkingConnection ? 'Testing...' : 'Test Connection'),
+        ),
+        if (_connectionMessage != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            _connectionMessage!,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: _connectionMessage!.startsWith('Connection OK')
+                      ? const Color(0xFF26A69A)
+                      : cs.error,
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+        ],
         _sectionHeader('POLLING', icon: Icons.timer_outlined),
         TextField(
           controller: _pollingController,
@@ -525,6 +663,68 @@ class _SettingsScreenState extends State<SettingsScreen> {
             labelText: 'Alert polling interval (seconds)',
             prefixIcon: Icon(Icons.update_rounded, size: 20),
             suffixText: 'sec',
+          ),
+        ),
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: _pollingPresets
+              .map(
+                (seconds) => ChoiceChip(
+                  label: Text('${seconds}s'),
+                  selected: _pollingController.text.trim() == '$seconds',
+                  onSelected: (_) => setState(
+                    () => _pollingController.text = '$seconds',
+                  ),
+                ),
+              )
+              .toList(),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Allowed range: ${SettingsStore.minPollingSeconds}-${SettingsStore.maxPollingSeconds} seconds.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        _sectionHeader('NOTIFICATIONS', icon: Icons.notifications_outlined),
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: cs.outlineVariant),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Persistent alert notifications',
+                style: Theme.of(context)
+                    .textTheme
+                    .labelLarge
+                    ?.copyWith(fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Critical alerts remain visible until you acknowledge or resolve them.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: _notificationBusy ? null : _requestNotifications,
+                icon: const Icon(Icons.notifications_active_outlined, size: 18),
+                label: Text(
+                  _notificationBusy ? 'Requesting...' : 'Enable Notifications',
+                ),
+              ),
+              if (_notificationMessage != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _notificationMessage!,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ],
           ),
         ),
         const SizedBox(height: 28),
@@ -574,6 +774,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
         ],
+        const SizedBox(height: 20),
+        OutlinedButton.icon(
+          onPressed: _signOut,
+          icon: const Icon(Icons.logout_rounded, size: 18),
+          label: const Text('Sign Out'),
+        ),
         const SizedBox(height: 32),
         Center(
           child: Column(

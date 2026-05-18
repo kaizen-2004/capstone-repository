@@ -44,6 +44,15 @@ class _AlertsScreenState extends State<AlertsScreen> {
   String _historySearchQuery = '';
   String _selectedSeverity = 'all';
   String _selectedType = 'all';
+  bool _bulkFalseAlarmMode = false;
+  bool _bulkFeedbackPending = false;
+  bool _groupTraining = false;
+  bool _loadingFeedbackProfiles = false;
+  String _bulkFeedbackProfileName = '';
+  String? _bulkFeedbackMessage;
+  String? _groupTrainMessage;
+  final Set<String> _bulkFalseAlarmKeys = <String>{};
+  List<FaceProfile> _feedbackProfiles = const <FaceProfile>[];
   late final TextEditingController _historySearchController;
 
   @override
@@ -182,6 +191,248 @@ class _AlertsScreenState extends State<AlertsScreen> {
     );
   }
 
+  String _alertBulkKey(AlertItem alert) => 'alert:${alert.id}';
+
+  String _snapshotBulkKey(SnapshotItem snapshot) =>
+      'snapshot:${snapshot.actionableAlertId ?? snapshot.id}:${snapshot.snapshotPath}';
+
+  bool _isBulkEligibleAlert(AlertItem alert) {
+    return alert.supportsIntruderFeedback &&
+        alert.hasSnapshot &&
+        !alert.hasFeedbackReview;
+  }
+
+  bool _isBulkEligibleSnapshot(SnapshotItem snapshot) {
+    return snapshot.supportsIntruderFeedback &&
+        snapshot.snapshotPath.trim().isNotEmpty &&
+        snapshot.actionableAlertId != null &&
+        !snapshot.hasFeedbackReview;
+  }
+
+  List<_BulkFalseAlarmTarget> _bulkTargets(
+    List<AlertItem> activeAlerts,
+    List<SnapshotItem> history,
+  ) {
+    final targets = <_BulkFalseAlarmTarget>[];
+    final seenAlertIds = <int>{};
+
+    for (final alert in activeAlerts) {
+      if (!_isBulkEligibleAlert(alert)) {
+        continue;
+      }
+      final alertId = int.tryParse(alert.id);
+      if (alertId == null || !seenAlertIds.add(alertId)) {
+        continue;
+      }
+      targets.add(
+        _BulkFalseAlarmTarget(
+          key: _alertBulkKey(alert),
+          alertId: alertId,
+          title: alert.title,
+          sourceLabel: alert.sourceNodeLabel,
+        ),
+      );
+    }
+
+    for (final snapshot in history) {
+      if (!_isBulkEligibleSnapshot(snapshot)) {
+        continue;
+      }
+      final alertId = snapshot.actionableAlertId;
+      if (alertId == null || !seenAlertIds.add(alertId)) {
+        continue;
+      }
+      targets.add(
+        _BulkFalseAlarmTarget(
+          key: _snapshotBulkKey(snapshot),
+          alertId: alertId,
+          title: _displaySnapshotTitle(snapshot),
+          sourceLabel: snapshot.sourceNodeLabel,
+        ),
+      );
+    }
+
+    return targets;
+  }
+
+  Future<void> _ensureFeedbackProfiles() async {
+    if (_feedbackProfiles.isNotEmpty || _loadingFeedbackProfiles) {
+      return;
+    }
+    setState(() {
+      _loadingFeedbackProfiles = true;
+      _bulkFeedbackMessage = null;
+    });
+    try {
+      final profiles = await widget.backendService.fetchFaceProfiles();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _feedbackProfiles = profiles;
+        _bulkFeedbackProfileName = profiles.isEmpty ? '' : profiles.first.name;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _bulkFeedbackMessage = 'Could not load authorized profiles: $error';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _loadingFeedbackProfiles = false);
+      }
+    }
+  }
+
+  void _toggleBulkMode() {
+    setState(() {
+      _bulkFalseAlarmMode = !_bulkFalseAlarmMode;
+      _bulkFeedbackMessage = null;
+      if (!_bulkFalseAlarmMode) {
+        _bulkFalseAlarmKeys.clear();
+      }
+    });
+    if (_bulkFalseAlarmMode) {
+      unawaited(_ensureFeedbackProfiles());
+    }
+  }
+
+  void _toggleBulkSelection(String key, bool eligible) {
+    if (!eligible) {
+      setState(() {
+        _bulkFeedbackMessage =
+            'This item is not eligible for intruder false-alarm retraining.';
+      });
+      return;
+    }
+    setState(() {
+      _bulkFeedbackMessage = null;
+      if (_bulkFalseAlarmKeys.contains(key)) {
+        _bulkFalseAlarmKeys.remove(key);
+      } else {
+        _bulkFalseAlarmKeys.add(key);
+      }
+    });
+  }
+
+  Future<void> _submitBulkFalseAlarms(
+    List<_BulkFalseAlarmTarget> selectedTargets,
+  ) async {
+    if (_bulkFeedbackPending) {
+      return;
+    }
+    if (selectedTargets.isEmpty) {
+      setState(() {
+        _bulkFeedbackMessage =
+            'Select at least one eligible intruder snapshot.';
+      });
+      return;
+    }
+    final faceName = _bulkFeedbackProfileName.trim();
+    if (faceName.isEmpty) {
+      setState(() {
+        _bulkFeedbackMessage =
+            'Select the authorized person before marking false alarms.';
+      });
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Mark selected as false alarms?'),
+            content: Text(
+              'This will import ${selectedTargets.length} snapshot(s) into $faceName for group face retraining.',
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Save False Alarms'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) {
+      return;
+    }
+
+    setState(() {
+      _bulkFeedbackPending = true;
+      _bulkFeedbackMessage =
+          'Saving ${selectedTargets.length} false alarm(s) for group retraining...';
+    });
+
+    var savedCount = 0;
+    String? failure;
+    final savedKeys = <String>{};
+    for (final target in selectedTargets) {
+      try {
+        await widget.backendService.submitSnapshotFeedback(
+          '${target.alertId}',
+          verdict: 'false_positive',
+          faceName: faceName,
+        );
+        savedCount += 1;
+        savedKeys.add(target.key);
+      } catch (error) {
+        failure = '$error';
+        break;
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _bulkFeedbackPending = false;
+      _bulkFalseAlarmKeys.removeAll(savedKeys);
+      _bulkFeedbackMessage = failure == null
+          ? '$savedCount false alarm${savedCount == 1 ? '' : 's'} saved for $faceName. Retrain once after reviewing all false alarms.'
+          : savedCount > 0
+              ? '$savedCount false alarm${savedCount == 1 ? '' : 's'} saved before an error: $failure'
+              : 'Could not save selected false alarms: $failure';
+    });
+    await _loadAlerts(silent: true);
+    widget.onAlertAcknowledged?.call();
+  }
+
+  Future<void> _runGroupRetrain() async {
+    if (_groupTraining) {
+      return;
+    }
+    setState(() {
+      _groupTraining = true;
+      _groupTrainMessage = 'Retraining face model from saved samples...';
+    });
+    try {
+      final result = await widget.backendService.trainFaceModel();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _groupTrainMessage = result.ok
+            ? 'Group retrain complete. ${result.message}'.trim()
+            : 'Group retrain failed. ${result.message}'.trim();
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _groupTrainMessage = 'Group retrain failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _groupTraining = false);
+      }
+    }
+  }
+
   String _absoluteSnapshotUrl(String snapshotPath) {
     final baseUrl = widget.backendService.apiClient.baseUrl;
     final normalizedBase = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
@@ -302,6 +553,166 @@ class _AlertsScreenState extends State<AlertsScreen> {
               ),
             ],
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFalseAlarmReviewPanel({
+    required List<_BulkFalseAlarmTarget> eligibleTargets,
+    required List<_BulkFalseAlarmTarget> selectedTargets,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    final selectedProfileName = _feedbackProfiles
+            .any((profile) => profile.name == _bulkFeedbackProfileName)
+        ? _bulkFeedbackProfileName
+        : (_feedbackProfiles.isEmpty ? '' : _feedbackProfiles.first.name);
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFA726).withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(18),
+        border:
+            Border.all(color: const Color(0xFFFFA726).withValues(alpha: 0.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.model_training_rounded,
+                  size: 18, color: Color(0xFFFFA726)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Intruder False Alarm Review',
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                            color: const Color(0xFFFFA726),
+                            fontWeight: FontWeight.w800,
+                          ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${selectedTargets.length} selected of ${eligibleTargets.length} eligible intruder snapshot${eligibleTargets.length == 1 ? '' : 's'}. Save false alarms first, then retrain once as a group.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (_bulkFalseAlarmMode) ...[
+            const SizedBox(height: 12),
+            if (_loadingFeedbackProfiles)
+              const LinearProgressIndicator(minHeight: 2)
+            else if (_feedbackProfiles.isEmpty)
+              Text(
+                'No authorized profiles loaded. Enroll a face profile before marking intruder false alarms.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: cs.error,
+                    ),
+              )
+            else
+              DropdownButtonFormField<String>(
+                key: ValueKey<String>(selectedProfileName),
+                initialValue: selectedProfileName,
+                decoration: const InputDecoration(
+                  labelText: 'Authorized person',
+                  prefixIcon: Icon(Icons.person_search_outlined, size: 20),
+                ),
+                items: _feedbackProfiles
+                    .map(
+                      (profile) => DropdownMenuItem<String>(
+                        value: profile.name,
+                        child: Text(profile.displayLabel),
+                      ),
+                    )
+                    .toList(),
+                onChanged: _bulkFeedbackPending
+                    ? null
+                    : (value) => setState(
+                          () => _bulkFeedbackProfileName = value ?? '',
+                        ),
+              ),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: _bulkFeedbackPending ? null : _toggleBulkMode,
+                icon: Icon(
+                  _bulkFalseAlarmMode
+                      ? Icons.close_rounded
+                      : Icons.checklist_rounded,
+                  size: 18,
+                ),
+                label: Text(
+                  _bulkFalseAlarmMode
+                      ? 'Stop Selecting'
+                      : 'Select Intruder Alerts',
+                ),
+              ),
+              if (_bulkFalseAlarmMode)
+                FilledButton.icon(
+                  onPressed: _bulkFeedbackPending || selectedTargets.isEmpty
+                      ? null
+                      : () => _submitBulkFalseAlarms(selectedTargets),
+                  icon: _bulkFeedbackPending
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.report_gmailerrorred_rounded,
+                          size: 18),
+                  label: Text(
+                    _bulkFeedbackPending
+                        ? 'Saving...'
+                        : 'Mark Selected False Alarm',
+                  ),
+                ),
+              OutlinedButton.icon(
+                onPressed: _groupTraining ? null : _runGroupRetrain,
+                icon: _groupTraining
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.psychology_alt_outlined, size: 18),
+                label: Text(
+                  _groupTraining ? 'Retraining...' : 'Group Retrain Face Model',
+                ),
+              ),
+            ],
+          ),
+          if (_bulkFeedbackMessage != null) ...[
+            const SizedBox(height: 10),
+            Text(
+              _bulkFeedbackMessage!,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: const Color(0xFF9A5A00),
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+          ],
+          if (_groupTrainMessage != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _groupTrainMessage!,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: cs.primary,
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+          ],
         ],
       ),
     );
@@ -614,6 +1025,10 @@ class _AlertsScreenState extends State<AlertsScreen> {
 
     final active = _activeAlerts;
     final history = _snapshotHistory(active);
+    final bulkTargets = _bulkTargets(active, history);
+    final selectedBulkTargets = bulkTargets
+        .where((target) => _bulkFalseAlarmKeys.contains(target.key))
+        .toList();
 
     if (active.isEmpty && history.isEmpty && !_hasHistoryFilters) {
       return RefreshIndicator(
@@ -624,6 +1039,11 @@ class _AlertsScreenState extends State<AlertsScreen> {
             _buildAutoRefreshStatus(),
             const SizedBox(height: 12),
             _buildQuickActions(),
+            const SizedBox(height: 12),
+            _buildFalseAlarmReviewPanel(
+              eligibleTargets: bulkTargets,
+              selectedTargets: selectedBulkTargets,
+            ),
             const SizedBox(height: 96),
             const _EmptyState(),
           ],
@@ -639,6 +1059,11 @@ class _AlertsScreenState extends State<AlertsScreen> {
           _buildAutoRefreshStatus(),
           const SizedBox(height: 12),
           _buildQuickActions(),
+          const SizedBox(height: 12),
+          _buildFalseAlarmReviewPanel(
+            eligibleTargets: bulkTargets,
+            selectedTargets: selectedBulkTargets,
+          ),
           const SizedBox(height: 18),
           _SectionLabel(
               label: 'Active Alerts', count: active.length, isActive: true),
@@ -659,6 +1084,13 @@ class _AlertsScreenState extends State<AlertsScreen> {
                   imageHeaders: _imageHeaders,
                   busy: _busyAlertId == alert.id,
                   onAcknowledge: () => _acknowledge(alert.id),
+                  selectable: _bulkFalseAlarmMode,
+                  selected: _bulkFalseAlarmKeys.contains(_alertBulkKey(alert)),
+                  bulkEligible: _isBulkEligibleAlert(alert),
+                  onToggleSelected: () => _toggleBulkSelection(
+                    _alertBulkKey(alert),
+                    _isBulkEligibleAlert(alert),
+                  ),
                 ),
               ),
             ),
@@ -684,6 +1116,14 @@ class _AlertsScreenState extends State<AlertsScreen> {
                   timeLabel: _formatDate(snapshot.capturedAt),
                   snapshotUrl: _absoluteSnapshotUrl(snapshot.snapshotPath),
                   imageHeaders: _imageHeaders,
+                  selectable: _bulkFalseAlarmMode,
+                  selected:
+                      _bulkFalseAlarmKeys.contains(_snapshotBulkKey(snapshot)),
+                  bulkEligible: _isBulkEligibleSnapshot(snapshot),
+                  onToggleSelected: () => _toggleBulkSelection(
+                    _snapshotBulkKey(snapshot),
+                    _isBulkEligibleSnapshot(snapshot),
+                  ),
                 ),
               ),
             ),
@@ -731,6 +1171,20 @@ class _DateFilterBar extends StatelessWidget {
       ],
     );
   }
+}
+
+class _BulkFalseAlarmTarget {
+  const _BulkFalseAlarmTarget({
+    required this.key,
+    required this.alertId,
+    required this.title,
+    required this.sourceLabel,
+  });
+
+  final String key;
+  final int alertId;
+  final String title;
+  final String sourceLabel;
 }
 
 class _SectionLabel extends StatelessWidget {
@@ -883,6 +1337,10 @@ class _SnapshotHistoryCard extends StatelessWidget {
     required this.timeLabel,
     required this.snapshotUrl,
     required this.imageHeaders,
+    this.selectable = false,
+    this.selected = false,
+    this.bulkEligible = false,
+    this.onToggleSelected,
   });
 
   final SnapshotItem snapshot;
@@ -891,6 +1349,10 @@ class _SnapshotHistoryCard extends StatelessWidget {
   final String timeLabel;
   final String snapshotUrl;
   final Map<String, String>? imageHeaders;
+  final bool selectable;
+  final bool selected;
+  final bool bulkEligible;
+  final VoidCallback? onToggleSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -937,6 +1399,16 @@ class _SnapshotHistoryCard extends StatelessWidget {
                       _StatusPill(
                         label: snapshot.linkedRecordLabel,
                         color: const Color(0xFF7E57C2),
+                      ),
+                    if (selectable)
+                      _StatusPill(
+                        label: bulkEligible
+                            ? (selected ? 'Selected' : 'Selectable')
+                            : 'Not Eligible',
+                        color: bulkEligible
+                            ? const Color(0xFFFFA726)
+                            : cs.onSurfaceVariant,
+                        filled: selected,
                       ),
                   ],
                 ),
@@ -985,6 +1457,20 @@ class _SnapshotHistoryCard extends StatelessWidget {
                     ),
                   ],
                 ),
+                if (selectable) ...[
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: bulkEligible ? onToggleSelected : null,
+                    icon: Icon(
+                      selected
+                          ? Icons.check_box_rounded
+                          : Icons.check_box_outline_blank_rounded,
+                      size: 18,
+                    ),
+                    label:
+                        Text(selected ? 'Selected' : 'Select for false alarm'),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1001,6 +1487,10 @@ class _ActiveAlertCard extends StatelessWidget {
     required this.timeLabel,
     required this.busy,
     required this.onAcknowledge,
+    this.selectable = false,
+    this.selected = false,
+    this.bulkEligible = false,
+    this.onToggleSelected,
     this.snapshotUrl,
     this.imageHeaders,
   });
@@ -1010,6 +1500,10 @@ class _ActiveAlertCard extends StatelessWidget {
   final String timeLabel;
   final bool busy;
   final VoidCallback onAcknowledge;
+  final bool selectable;
+  final bool selected;
+  final bool bulkEligible;
+  final VoidCallback? onToggleSelected;
   final String? snapshotUrl;
   final Map<String, String>? imageHeaders;
 
@@ -1064,6 +1558,16 @@ class _ActiveAlertCard extends StatelessWidget {
                       _StatusPill(
                         label: 'Linked Event #${alert.eventId}',
                         color: const Color(0xFF7E57C2),
+                      ),
+                    if (selectable)
+                      _StatusPill(
+                        label: bulkEligible
+                            ? (selected ? 'Selected' : 'Selectable')
+                            : 'Not Eligible',
+                        color: bulkEligible
+                            ? const Color(0xFFFFA726)
+                            : cs.onSurfaceVariant,
+                        filled: selected,
                       ),
                   ],
                 ),
@@ -1125,10 +1629,27 @@ class _ActiveAlertCard extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 12),
-                FilledButton.icon(
-                  onPressed: busy ? null : onAcknowledge,
-                  icon: const Icon(Icons.done_rounded, size: 17),
-                  label: Text(busy ? 'Acknowledging...' : 'Acknowledge'),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    if (selectable)
+                      OutlinedButton.icon(
+                        onPressed: bulkEligible ? onToggleSelected : null,
+                        icon: Icon(
+                          selected
+                              ? Icons.check_box_rounded
+                              : Icons.check_box_outline_blank_rounded,
+                          size: 17,
+                        ),
+                        label: Text(selected ? 'Selected' : 'Select'),
+                      ),
+                    FilledButton.icon(
+                      onPressed: busy ? null : onAcknowledge,
+                      icon: const Icon(Icons.done_rounded, size: 17),
+                      label: Text(busy ? 'Acknowledging...' : 'Acknowledge'),
+                    ),
+                  ],
                 ),
               ],
             ),

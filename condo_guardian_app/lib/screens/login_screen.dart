@@ -116,7 +116,7 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
       setState(() {
-        final text = 'Failed: ${error.message}';
+        final text = 'Failed: ${_friendlyConnectionMessage(error)}';
         if (tailscale) {
           _tailscaleTestMessage = text;
         } else {
@@ -219,7 +219,7 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
       setState(() {
-        _error = error.message;
+        _error = _friendlyConnectionMessage(error);
       });
     } catch (_) {
       if (!mounted) {
@@ -236,6 +236,30 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  String _friendlyConnectionMessage(Object error) {
+    final raw = error is ApiException ? error.message : '$error';
+    final lower = raw.toLowerCase();
+    if (error is ApiException && error.statusCode == 401) {
+      return 'Username or password is incorrect.';
+    }
+    if (lower.contains('no configured backend') ||
+        lower.contains('valid url')) {
+      return 'Add a Local or Tailscale backend URL first.';
+    }
+    if (lower.contains('failed host lookup') ||
+        lower.contains('connection refused') ||
+        lower.contains('unreachable')) {
+      return 'Backend unreachable. Check Wi-Fi, Tailscale, and that the backend is running.';
+    }
+    if (lower.contains('timed out') || lower.contains('timeout')) {
+      return 'Connection timed out. Try the other backend URL or check network access.';
+    }
+    if (lower.contains('unable to sign in to any configured endpoint')) {
+      return 'Unable to sign in to the configured backend URLs. Check credentials and connection settings.';
+    }
+    return raw;
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -244,209 +268,218 @@ class _LoginScreenState extends State<LoginScreen> {
 
     return Scaffold(
       body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Container(
-                            width: 46,
-                            height: 46,
-                            decoration: BoxDecoration(
-                              color: cs.primary.withValues(alpha: 0.12),
-                              borderRadius: BorderRadius.circular(14),
+        child: SingleChildScrollView(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              width: 46,
+                              height: 46,
+                              decoration: BoxDecoration(
+                                color: cs.primary.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              clipBehavior: Clip.antiAlias,
+                              child: const Image(
+                                image: AssetImage('assets/logo.png'),
+                                fit: BoxFit.cover,
+                              ),
                             ),
-                            clipBehavior: Clip.antiAlias,
-                            child: const Image(
-                              image: AssetImage('assets/logo.png'),
-                              fit: BoxFit.cover,
-                            ),
-                          ),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Sign In',
-                                  style: Theme.of(context).textTheme.titleLarge,
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  'Authenticate once to unlock the monitoring app.',
-                                  style: Theme.of(context).textTheme.bodySmall,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 20),
-                      TextField(
-                        controller: _lanBaseUrlController,
-                        keyboardType: TextInputType.url,
-                        textInputAction: TextInputAction.next,
-                        decoration: const InputDecoration(
-                          labelText: 'Local Backend URL',
-                          hintText: 'http://192.168.x.x:8765',
-                          prefixIcon: Icon(Icons.router_outlined, size: 20),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: OutlinedButton.icon(
-                          onPressed: _testingLan
-                              ? null
-                              : () => _testConnection(tailscale: false),
-                          icon: _testingLan
-                              ? const SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Sign In',
+                                    style:
+                                        Theme.of(context).textTheme.titleLarge,
                                   ),
-                                )
-                              : const Icon(Icons.wifi_tethering_rounded,
-                                  size: 16),
-                          label: Text(_testingLan
-                              ? 'Testing...'
-                              : 'Test Local Connection'),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    'Authenticate once to unlock the monitoring app.',
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
-                      ),
-                      if (_lanTestMessage != null)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 4),
-                          child: Text(
-                            _lanTestMessage!,
-                            style: Theme.of(context)
-                                .textTheme
-                                .bodySmall
-                                ?.copyWith(
-                                  color: lanOk ? Colors.green[700] : cs.error,
-                                  fontWeight:
-                                      lanOk ? FontWeight.w600 : FontWeight.w500,
-                                ),
+                        const SizedBox(height: 20),
+                        TextField(
+                          controller: _lanBaseUrlController,
+                          keyboardType: TextInputType.url,
+                          textInputAction: TextInputAction.next,
+                          decoration: const InputDecoration(
+                            labelText: 'Local Backend URL',
+                            hintText: 'http://192.168.x.x:8765',
+                            prefixIcon: Icon(Icons.router_outlined, size: 20),
                           ),
                         ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _tailscaleBaseUrlController,
-                        keyboardType: TextInputType.url,
-                        textInputAction: TextInputAction.next,
-                        decoration: const InputDecoration(
-                          labelText: 'Tailscale Backend URL',
-                          hintText: 'http://100.x.x.x:8765',
-                          prefixIcon: Icon(Icons.vpn_lock_outlined, size: 20),
+                        const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: OutlinedButton.icon(
+                            onPressed: _testingLan
+                                ? null
+                                : () => _testConnection(tailscale: false),
+                            icon: _testingLan
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.wifi_tethering_rounded,
+                                    size: 16),
+                            label: Text(_testingLan
+                                ? 'Testing...'
+                                : 'Test Local Connection'),
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: OutlinedButton.icon(
-                          onPressed: _testingTailscale
-                              ? null
-                              : () => _testConnection(tailscale: true),
-                          icon: _testingTailscale
-                              ? const SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
+                        if (_lanTestMessage != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              _lanTestMessage!,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    color: lanOk ? Colors.green[700] : cs.error,
+                                    fontWeight: lanOk
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
                                   ),
-                                )
-                              : const Icon(Icons.network_check_rounded,
-                                  size: 16),
-                          label: Text(_testingTailscale
-                              ? 'Testing...'
-                              : 'Test Tailscale Connection'),
+                            ),
+                          ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: _tailscaleBaseUrlController,
+                          keyboardType: TextInputType.url,
+                          textInputAction: TextInputAction.next,
+                          decoration: const InputDecoration(
+                            labelText: 'Tailscale Backend URL',
+                            hintText: 'http://100.x.x.x:8765',
+                            prefixIcon: Icon(Icons.vpn_lock_outlined, size: 20),
+                          ),
                         ),
-                      ),
-                      if (_tailscaleTestMessage != null)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 4),
-                          child: Text(
-                            _tailscaleTestMessage!,
+                        const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: OutlinedButton.icon(
+                            onPressed: _testingTailscale
+                                ? null
+                                : () => _testConnection(tailscale: true),
+                            icon: _testingTailscale
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.network_check_rounded,
+                                    size: 16),
+                            label: Text(_testingTailscale
+                                ? 'Testing...'
+                                : 'Test Tailscale Connection'),
+                          ),
+                        ),
+                        if (_tailscaleTestMessage != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              _tailscaleTestMessage!,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    color: tailscaleOk
+                                        ? Colors.green[700]
+                                        : cs.error,
+                                    fontWeight: tailscaleOk
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
+                                  ),
+                            ),
+                          ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: _usernameController,
+                          textInputAction: TextInputAction.next,
+                          decoration: const InputDecoration(
+                            labelText: 'Username',
+                            prefixIcon:
+                                Icon(Icons.person_outline_rounded, size: 20),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: _passwordController,
+                          obscureText: _obscurePassword,
+                          textInputAction: TextInputAction.done,
+                          onSubmitted: (_) => _submitting ? null : _submit(),
+                          decoration: InputDecoration(
+                            labelText: 'Password',
+                            prefixIcon: const Icon(Icons.lock_outline_rounded,
+                                size: 20),
+                            suffixIcon: IconButton(
+                              icon: Icon(
+                                _obscurePassword
+                                    ? Icons.visibility_outlined
+                                    : Icons.visibility_off_outlined,
+                                size: 20,
+                                color: cs.onSurfaceVariant,
+                              ),
+                              onPressed: () => setState(
+                                () => _obscurePassword = !_obscurePassword,
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (_error != null) ...[
+                          const SizedBox(height: 12),
+                          Text(
+                            _error!,
                             style:
                                 Theme.of(context).textTheme.bodySmall?.copyWith(
-                                      color: tailscaleOk
-                                          ? Colors.green[700]
-                                          : cs.error,
-                                      fontWeight: tailscaleOk
-                                          ? FontWeight.w600
-                                          : FontWeight.w500,
+                                      color: cs.error,
                                     ),
                           ),
-                        ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _usernameController,
-                        textInputAction: TextInputAction.next,
-                        decoration: const InputDecoration(
-                          labelText: 'Username',
-                          prefixIcon:
-                              Icon(Icons.person_outline_rounded, size: 20),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _passwordController,
-                        obscureText: _obscurePassword,
-                        textInputAction: TextInputAction.done,
-                        onSubmitted: (_) => _submitting ? null : _submit(),
-                        decoration: InputDecoration(
-                          labelText: 'Password',
-                          prefixIcon:
-                              const Icon(Icons.lock_outline_rounded, size: 20),
-                          suffixIcon: IconButton(
-                            icon: Icon(
-                              _obscurePassword
-                                  ? Icons.visibility_outlined
-                                  : Icons.visibility_off_outlined,
-                              size: 20,
-                              color: cs.onSurfaceVariant,
-                            ),
-                            onPressed: () => setState(
-                              () => _obscurePassword = !_obscurePassword,
-                            ),
-                          ),
-                        ),
-                      ),
-                      if (_error != null) ...[
-                        const SizedBox(height: 12),
-                        Text(
-                          _error!,
-                          style:
-                              Theme.of(context).textTheme.bodySmall?.copyWith(
-                                    color: cs.error,
+                        ],
+                        const SizedBox(height: 18),
+                        FilledButton.icon(
+                          onPressed: _submitting ? null : _submit,
+                          icon: _submitting
+                              ? SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: cs.onPrimary,
                                   ),
+                                )
+                              : const Icon(Icons.login_rounded, size: 18),
+                          label:
+                              Text(_submitting ? 'Signing in...' : 'Sign In'),
                         ),
                       ],
-                      const SizedBox(height: 18),
-                      FilledButton.icon(
-                        onPressed: _submitting ? null : _submit,
-                        icon: _submitting
-                            ? SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: cs.onPrimary,
-                                ),
-                              )
-                            : const Icon(Icons.login_rounded, size: 18),
-                        label: Text(_submitting ? 'Signing in...' : 'Sign In'),
-                      ),
-                    ],
+                    ),
                   ),
                 ),
               ),

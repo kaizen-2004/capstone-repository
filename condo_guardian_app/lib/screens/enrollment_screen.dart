@@ -379,6 +379,13 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
             ? (_selectedProfileId ?? '')
             : '';
     final hasExistingProfile = selectedProfileId.isNotEmpty;
+    final currentStep = _uploading
+        ? 3
+        : _isSuccess
+            ? 4
+            : _images.length >= _requiredSamples
+                ? 2
+                : 1;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
@@ -404,6 +411,8 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
             ],
           ),
         ),
+        const SizedBox(height: 14),
+        _EnrollmentStepChips(currentStep: currentStep),
         const SizedBox(height: 20),
         Row(
           children: [
@@ -729,6 +738,45 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
   }
 }
 
+class _EnrollmentStepChips extends StatelessWidget {
+  const _EnrollmentStepChips({required this.currentStep});
+
+  final int currentStep;
+
+  static const _steps = <String>[
+    'Profile',
+    'Capture',
+    'Review',
+    'Upload',
+    'Complete',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: _steps.asMap().entries.map((entry) {
+        final index = entry.key;
+        final active = index <= currentStep;
+        return Chip(
+          visualDensity: VisualDensity.compact,
+          avatar: CircleAvatar(
+            backgroundColor: active ? cs.primary : cs.outlineVariant,
+            foregroundColor: active ? cs.onPrimary : cs.onSurfaceVariant,
+            child: Text('${index + 1}'),
+          ),
+          label: Text(entry.value),
+          backgroundColor: active
+              ? cs.primary.withValues(alpha: 0.12)
+              : cs.surfaceContainerHighest,
+        );
+      }).toList(),
+    );
+  }
+}
+
 class _ImageThumb extends StatelessWidget {
   const _ImageThumb({
     required this.index,
@@ -756,7 +804,8 @@ class _ImageThumb extends StatelessWidget {
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(12),
               border: failed
-                  ? Border.all(color: Theme.of(context).colorScheme.error, width: 3)
+                  ? Border.all(
+                      color: Theme.of(context).colorScheme.error, width: 3)
                   : null,
             ),
             child: ClipRRect(
@@ -1111,9 +1160,10 @@ class _InAppCaptureScreenState extends State<_InAppCaptureScreen>
     }
 
     setState(() => _countdownValue = null);
-    await _speakText('capture');
+    await _speakText('Capture');
     await HapticFeedback.mediumImpact();
-    return true;
+    await Future<void>.delayed(const Duration(milliseconds: 650));
+    return mounted && _batchRunning;
   }
 
   Future<bool> _captureImage({bool fromBatch = false}) async {
@@ -1196,6 +1246,44 @@ class _InAppCaptureScreenState extends State<_InAppCaptureScreen>
     Navigator.of(context).pop(List<XFile>.from(_captured));
   }
 
+  double _previewAspectRatio(BuildContext context) {
+    final controller = _controller;
+    final previewSize = controller?.value.previewSize;
+    if (previewSize == null ||
+        previewSize.width <= 0 ||
+        previewSize.height <= 0) {
+      return controller?.value.aspectRatio ?? 3 / 4;
+    }
+
+    final portrait = MediaQuery.orientationOf(context) == Orientation.portrait;
+    final width = portrait ? previewSize.height : previewSize.width;
+    final height = portrait ? previewSize.width : previewSize.height;
+    if (width <= 0 || height <= 0) {
+      return controller?.value.aspectRatio ?? 3 / 4;
+    }
+    return width / height;
+  }
+
+  Widget _buildCameraPreviewFrame(BuildContext context) {
+    final controller = _controller!;
+    final aspectRatio = _previewAspectRatio(context);
+    final previewHeight = 1000 / aspectRatio;
+
+    return ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: FittedBox(
+          fit: BoxFit.contain,
+          child: SizedBox(
+            width: 1000,
+            height: previewHeight,
+            child: CameraPreview(controller),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -1263,285 +1351,305 @@ class _InAppCaptureScreenState extends State<_InAppCaptureScreen>
                       ),
                     ),
                   )
-                : Column(
-                    children: [
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(16),
-                            child: Stack(
-                              fit: StackFit.expand,
+                : LayoutBuilder(
+                    builder: (context, constraints) {
+                      final previewHeight = (constraints.maxHeight * 0.38)
+                          .clamp(220.0, 340.0)
+                          .toDouble();
+
+                      return Column(
+                        children: [
+                          SizedBox(
+                            height: previewHeight,
+                            child: Padding(
+                              padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(16),
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    _buildCameraPreviewFrame(context),
+                                    Positioned(
+                                      top: 10,
+                                      left: 10,
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: Colors.black54,
+                                          borderRadius:
+                                              BorderRadius.circular(20),
+                                        ),
+                                        child: Text(
+                                          'Session ${_captured.length} | Total $totalCount',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    Positioned(
+                                      top: 10,
+                                      right: 10,
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: Colors.black54,
+                                          borderRadius:
+                                              BorderRadius.circular(20),
+                                        ),
+                                        child: Text(
+                                          _batchRunning
+                                              ? 'Batch $_batchCapturedCount/$_batchTarget'
+                                              : (remaining == 0
+                                                  ? 'Batch ready'
+                                                  : '$remaining to batch-ready'),
+                                          style: TextStyle(
+                                            color: _batchRunning
+                                                ? cs.primary
+                                                : (remaining == 0
+                                                    ? const Color(0xFF26A69A)
+                                                    : Colors.white),
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    if (_countdownValue != null)
+                                      Center(
+                                        child: Container(
+                                          width: 124,
+                                          height: 124,
+                                          decoration: BoxDecoration(
+                                            color: Colors.black54,
+                                            shape: BoxShape.circle,
+                                            border: Border.all(
+                                              color: Colors.white70,
+                                              width: 2,
+                                            ),
+                                          ),
+                                          alignment: Alignment.center,
+                                          child: Text(
+                                            '$_countdownValue',
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 52,
+                                              fontWeight: FontWeight.w800,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: ListView(
+                              padding: EdgeInsets.zero,
                               children: [
-                                ColoredBox(
-                                  color: Colors.black,
-                                  child: Center(
-                                    child: AspectRatio(
-                                      aspectRatio:
-                                          _controller!.value.aspectRatio,
-                                      child: CameraPreview(_controller!),
-                                    ),
-                                  ),
-                                ),
-                                Positioned(
-                                  top: 10,
-                                  left: 10,
+                                Padding(
+                                  padding:
+                                      const EdgeInsets.fromLTRB(12, 0, 12, 8),
                                   child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 10,
-                                      vertical: 6,
-                                    ),
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.all(12),
                                     decoration: BoxDecoration(
-                                      color: Colors.black54,
-                                      borderRadius: BorderRadius.circular(20),
+                                      color: Colors.white10,
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(color: Colors.white24),
                                     ),
-                                    child: Text(
-                                      'Session ${_captured.length} | Total $totalCount',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w700,
-                                      ),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        const Text(
+                                          'Auto-Capture Timer',
+                                          style: TextStyle(
+                                            color: Colors.white70,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            letterSpacing: 1.1,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Wrap(
+                                          spacing: 8,
+                                          runSpacing: 8,
+                                          children: _timerOptions
+                                              .map(
+                                                (value) => ChoiceChip(
+                                                  label: Text(
+                                                    value == 0
+                                                        ? 'No Timer'
+                                                        : '${value}s',
+                                                  ),
+                                                  selected: _countdownSeconds ==
+                                                      value,
+                                                  onSelected: controlsDisabled
+                                                      ? null
+                                                      : (_) => setState(
+                                                            () =>
+                                                                _countdownSeconds =
+                                                                    value,
+                                                          ),
+                                                ),
+                                              )
+                                              .toList(),
+                                        ),
+                                        const SizedBox(height: 12),
+                                        const Text(
+                                          'One-Tap Batch (Stop at N shots)',
+                                          style: TextStyle(
+                                            color: Colors.white70,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            letterSpacing: 1.1,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Wrap(
+                                          spacing: 8,
+                                          runSpacing: 8,
+                                          children: [
+                                            ..._batchTargetOptions.map(
+                                              (value) => ChoiceChip(
+                                                label: Text('$value shots'),
+                                                selected: _batchTarget == value,
+                                                onSelected: controlsDisabled
+                                                    ? null
+                                                    : (_) => setState(() =>
+                                                        _batchTarget = value),
+                                              ),
+                                            ),
+                                            ChoiceChip(
+                                              label: Text(
+                                                _batchTargetOptions
+                                                        .contains(_batchTarget)
+                                                    ? 'Custom'
+                                                    : '$_batchTarget shots',
+                                              ),
+                                              selected: !_batchTargetOptions
+                                                  .contains(_batchTarget),
+                                              onSelected: controlsDisabled
+                                                  ? null
+                                                  : (_) =>
+                                                      _chooseCustomBatchTarget(),
+                                            ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 10),
+                                        FilledButton.tonalIcon(
+                                          onPressed: controlsDisabled
+                                              ? null
+                                              : (_batchRunning
+                                                  ? _stopBatchCapture
+                                                  : _startBatchCapture),
+                                          icon: Icon(
+                                            _batchRunning
+                                                ? Icons.stop_circle_outlined
+                                                : Icons.timer_outlined,
+                                            size: 18,
+                                          ),
+                                          label: Text(
+                                            _batchRunning
+                                                ? 'Stop Batch ($_batchCapturedCount/$_batchTarget)'
+                                                : 'Start One-Tap Batch',
+                                          ),
+                                        ),
+                                        const SizedBox(height: 6),
+                                        const Text(
+                                          'Voice countdown and haptic ticks are enabled during batch capture.',
+                                          style: TextStyle(
+                                            color: Colors.white60,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                   ),
                                 ),
-                                Positioned(
-                                  top: 10,
-                                  right: 10,
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 10,
-                                      vertical: 6,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black54,
-                                      borderRadius: BorderRadius.circular(20),
-                                    ),
-                                    child: Text(
-                                      _batchRunning
-                                          ? 'Batch $_batchCapturedCount/$_batchTarget'
-                                          : (remaining == 0
-                                              ? 'Batch ready'
-                                              : '$remaining to batch-ready'),
-                                      style: TextStyle(
-                                        color: _batchRunning
-                                            ? cs.primary
-                                            : (remaining == 0
-                                                ? const Color(0xFF26A69A)
-                                                : Colors.white),
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w700,
+                                if (_captured.isNotEmpty)
+                                  SizedBox(
+                                    height: 72,
+                                    child: ListView.separated(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 12),
+                                      scrollDirection: Axis.horizontal,
+                                      itemBuilder: (_, index) => _CapturedThumb(
+                                        file: _captured[index],
+                                        index: index,
                                       ),
+                                      separatorBuilder: (_, __) =>
+                                          const SizedBox(width: 8),
+                                      itemCount: _captured.length,
                                     ),
                                   ),
-                                ),
-                                if (_countdownValue != null)
-                                  Center(
-                                    child: Container(
-                                      width: 124,
-                                      height: 124,
-                                      decoration: BoxDecoration(
-                                        color: Colors.black54,
-                                        shape: BoxShape.circle,
-                                        border: Border.all(
-                                          color: Colors.white70,
-                                          width: 2,
+                                const SizedBox(height: 8),
+                                Padding(
+                                  padding:
+                                      const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                                  child: Row(
+                                    children: [
+                                      IconButton.filledTonal(
+                                        onPressed: _cameras.length > 1 &&
+                                                !_capturing &&
+                                                !_batchRunning
+                                            ? _switchCamera
+                                            : null,
+                                        icon: const Icon(
+                                            Icons.flip_camera_android_rounded),
+                                      ),
+                                      const Spacer(),
+                                      GestureDetector(
+                                        onTap: (_capturing || _batchRunning)
+                                            ? null
+                                            : () => _captureImage(),
+                                        child: Container(
+                                          width: 76,
+                                          height: 76,
+                                          padding: const EdgeInsets.all(4),
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            border: Border.all(
+                                              color: Colors.white,
+                                              width: 3,
+                                            ),
+                                          ),
+                                          child: Container(
+                                            decoration: BoxDecoration(
+                                              shape: BoxShape.circle,
+                                              color: _capturing
+                                                  ? Colors.white54
+                                                  : cs.primary,
+                                            ),
+                                          ),
                                         ),
                                       ),
-                                      alignment: Alignment.center,
-                                      child: Text(
-                                        '$_countdownValue',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 52,
-                                          fontWeight: FontWeight.w800,
-                                        ),
+                                      const Spacer(),
+                                      IconButton.filledTonal(
+                                        onPressed: _captured.isEmpty
+                                            ? null
+                                            : () => _done(),
+                                        icon: const Icon(Icons.check_rounded),
                                       ),
-                                    ),
+                                    ],
                                   ),
+                                ),
                               ],
                             ),
                           ),
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                        child: Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: Colors.white10,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.white24),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Auto-Capture Timer',
-                                style: TextStyle(
-                                  color: Colors.white70,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: 1.1,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              Wrap(
-                                spacing: 8,
-                                runSpacing: 8,
-                                children: _timerOptions
-                                    .map(
-                                      (value) => ChoiceChip(
-                                        label: Text(
-                                          value == 0 ? 'No Timer' : '${value}s',
-                                        ),
-                                        selected: _countdownSeconds == value,
-                                        onSelected: controlsDisabled
-                                            ? null
-                                            : (_) => setState(
-                                                  () =>
-                                                      _countdownSeconds = value,
-                                                ),
-                                      ),
-                                    )
-                                    .toList(),
-                              ),
-                              const SizedBox(height: 12),
-                              const Text(
-                                'One-Tap Batch (Stop at N shots)',
-                                style: TextStyle(
-                                  color: Colors.white70,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: 1.1,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              Wrap(
-                                spacing: 8,
-                                runSpacing: 8,
-                                children: [
-                                  ..._batchTargetOptions.map(
-                                    (value) => ChoiceChip(
-                                      label: Text('$value shots'),
-                                      selected: _batchTarget == value,
-                                      onSelected: controlsDisabled
-                                          ? null
-                                          : (_) => setState(
-                                              () => _batchTarget = value),
-                                    ),
-                                  ),
-                                  ChoiceChip(
-                                    label: Text(
-                                      _batchTargetOptions.contains(_batchTarget)
-                                          ? 'Custom'
-                                          : '$_batchTarget shots',
-                                    ),
-                                    selected: !_batchTargetOptions
-                                        .contains(_batchTarget),
-                                    onSelected: controlsDisabled
-                                        ? null
-                                        : (_) => _chooseCustomBatchTarget(),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 10),
-                              FilledButton.tonalIcon(
-                                onPressed: controlsDisabled
-                                    ? null
-                                    : (_batchRunning
-                                        ? _stopBatchCapture
-                                        : _startBatchCapture),
-                                icon: Icon(
-                                  _batchRunning
-                                      ? Icons.stop_circle_outlined
-                                      : Icons.timer_outlined,
-                                  size: 18,
-                                ),
-                                label: Text(
-                                  _batchRunning
-                                      ? 'Stop Batch ($_batchCapturedCount/$_batchTarget)'
-                                      : 'Start One-Tap Batch',
-                                ),
-                              ),
-                              const SizedBox(height: 6),
-                              const Text(
-                                'Voice countdown and haptic ticks are enabled during batch capture.',
-                                style: TextStyle(
-                                  color: Colors.white60,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      if (_captured.isNotEmpty)
-                        SizedBox(
-                          height: 72,
-                          child: ListView.separated(
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
-                            scrollDirection: Axis.horizontal,
-                            itemBuilder: (_, index) => _CapturedThumb(
-                              file: _captured[index],
-                              index: index,
-                            ),
-                            separatorBuilder: (_, __) =>
-                                const SizedBox(width: 8),
-                            itemCount: _captured.length,
-                          ),
-                        ),
-                      const SizedBox(height: 8),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
-                        child: Row(
-                          children: [
-                            IconButton.filledTonal(
-                              onPressed: _cameras.length > 1 &&
-                                      !_capturing &&
-                                      !_batchRunning
-                                  ? _switchCamera
-                                  : null,
-                              icon:
-                                  const Icon(Icons.flip_camera_android_rounded),
-                            ),
-                            const Spacer(),
-                            GestureDetector(
-                              onTap: (_capturing || _batchRunning)
-                                  ? null
-                                  : () => _captureImage(),
-                              child: Container(
-                                width: 76,
-                                height: 76,
-                                padding: const EdgeInsets.all(4),
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: Colors.white,
-                                    width: 3,
-                                  ),
-                                ),
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    color: _capturing
-                                        ? Colors.white54
-                                        : cs.primary,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const Spacer(),
-                            IconButton.filledTonal(
-                              onPressed:
-                                  _captured.isEmpty ? null : () => _done(),
-                              icon: const Icon(Icons.check_rounded),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                        ],
+                      );
+                    },
                   ),
       ),
     );

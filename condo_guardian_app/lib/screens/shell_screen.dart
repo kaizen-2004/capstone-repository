@@ -226,10 +226,16 @@ class _ShellScreenState extends State<ShellScreen>
           activeAlertCount: _activeAlertCount,
           activeBackendBaseUrl: _activeBackendBaseUrl,
           activeConnectionLabel: _activeConnectionLabel,
+          onOpenMonitor: () => unawaited(_onDestinationSelected(1)),
+          onOpenAlerts: () => unawaited(_onDestinationSelected(2)),
+          onOpenEnroll: () => unawaited(_onDestinationSelected(3)),
+          onOpenSettings: () => unawaited(_onDestinationSelected(5)),
         ),
         MonitorScreen(
           backendBaseUrl: _activeBackendBaseUrl,
           authToken: widget.settingsStore.authToken,
+          activeConnectionLabel: _activeConnectionLabel,
+          onOpenSettings: () => unawaited(_onDestinationSelected(5)),
         ),
         AlertsScreen(
           backendService: _backendService,
@@ -247,6 +253,7 @@ class _ShellScreenState extends State<ShellScreen>
           activeBackendBaseUrl: _activeBackendBaseUrl,
           activeConnectionLabel: _activeConnectionLabel,
           onSaved: _handleSettingsSaved,
+          onSignedOut: _invalidateSession,
         ),
       ];
 

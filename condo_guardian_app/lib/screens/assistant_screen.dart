@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../services/backend_service.dart';
@@ -42,6 +44,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
   String? _selectedId;
   bool _loading = false;
   String _answer = '';
+  bool _answerIsError = false;
 
   Future<void> _submit(String id) async {
     setState(() {
@@ -53,13 +56,16 @@ class _AssistantScreenState extends State<AssistantScreen> {
       if (mounted) {
         setState(() {
           _answer = answer;
+          _answerIsError = false;
           _loading = false;
         });
       }
     } catch (error) {
       if (mounted) {
         setState(() {
-          _answer = '$error';
+          _answer =
+              'Could not get an answer right now. Check backend connectivity and try again. $error';
+          _answerIsError = true;
           _loading = false;
         });
       }
@@ -102,12 +108,12 @@ class _AssistantScreenState extends State<AssistantScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'AI Assistant',
+                      'System Assistant',
                       style: tt.titleLarge?.copyWith(fontSize: 15),
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      'Select a guided question to get an answer.',
+                      'Guided help for alerts, nodes, and current system status.',
                       style: tt.bodySmall,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
@@ -120,7 +126,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
         ),
         const SizedBox(height: 20),
         Text(
-          'QUESTIONS',
+          'GUIDED QUESTIONS',
           style: TextStyle(
             fontSize: 10,
             fontWeight: FontWeight.w700,
@@ -151,8 +157,10 @@ class _AssistantScreenState extends State<AssistantScreen> {
               : _loading
                   ? _LoadingAnswer()
                   : _AnswerCard(
+                      key: ValueKey('$_selectedId|$_answer|$_answerIsError'),
                       question: _questions[_selectedId!]!.label,
                       answer: _answer,
+                      isError: _answerIsError,
                     ),
         ),
       ],
@@ -313,10 +321,16 @@ class _LoadingAnswer extends StatelessWidget {
 }
 
 class _AnswerCard extends StatelessWidget {
-  const _AnswerCard({required this.question, required this.answer});
+  const _AnswerCard({
+    super.key,
+    required this.question,
+    required this.answer,
+    required this.isError,
+  });
 
   final String question;
   final String answer;
+  final bool isError;
 
   @override
   Widget build(BuildContext context) {
@@ -327,7 +341,9 @@ class _AnswerCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: cs.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: cs.primary.withValues(alpha: 0.25)),
+        border: Border.all(
+          color: (isError ? cs.error : cs.primary).withValues(alpha: 0.25),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -365,16 +381,24 @@ class _AnswerCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Icon(
-                  Icons.smart_toy_rounded,
+                  isError
+                      ? Icons.error_outline_rounded
+                      : Icons.smart_toy_rounded,
                   size: 16,
-                  color: cs.primary.withValues(alpha: 0.7),
+                  color:
+                      (isError ? cs.error : cs.primary).withValues(alpha: 0.7),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
-                    answer,
-                    style: tt.bodyMedium?.copyWith(height: 1.6),
-                  ),
+                  child: isError
+                      ? Text(
+                          answer,
+                          style: tt.bodyMedium?.copyWith(height: 1.6),
+                        )
+                      : _TypewriterAnswerText(
+                          text: answer,
+                          style: tt.bodyMedium?.copyWith(height: 1.6),
+                        ),
                 ),
               ],
             ),
@@ -382,5 +406,80 @@ class _AnswerCard extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+class _TypewriterAnswerText extends StatefulWidget {
+  const _TypewriterAnswerText({required this.text, required this.style});
+
+  final String text;
+  final TextStyle? style;
+
+  @override
+  State<_TypewriterAnswerText> createState() => _TypewriterAnswerTextState();
+}
+
+class _TypewriterAnswerTextState extends State<_TypewriterAnswerText> {
+  Timer? _timer;
+  List<String> _words = const [];
+  int _visibleWordCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _restart();
+  }
+
+  @override
+  void didUpdateWidget(covariant _TypewriterAnswerText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.text != widget.text) {
+      _restart();
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _restart() {
+    _timer?.cancel();
+    _words = widget.text.trim().isEmpty
+        ? const []
+        : widget.text.trim().split(RegExp(r'\s+'));
+    _visibleWordCount = 0;
+
+    if (_words.isEmpty) {
+      return;
+    }
+
+    _timer = Timer.periodic(const Duration(milliseconds: 42), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        final next = _visibleWordCount + 1;
+        _visibleWordCount = next > _words.length ? _words.length : next;
+      });
+      if (_visibleWordCount >= _words.length) {
+        timer.cancel();
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleText = _words.take(_visibleWordCount).join(' ');
+    final isComplete = _visibleWordCount >= _words.length;
+    final displayText = _words.isEmpty
+        ? 'No response received.'
+        : isComplete
+            ? visibleText
+            : '$visibleText |';
+
+    return Text(displayText, style: widget.style);
   }
 }

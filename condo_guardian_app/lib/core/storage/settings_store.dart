@@ -11,6 +11,8 @@ class SettingsStore {
   static const _authTokenKey = 'auth_token';
   static const _usernameKey = 'username';
   static const _pollingSecondsKey = 'polling_seconds';
+  static const minPollingSeconds = 5;
+  static const maxPollingSeconds = 300;
 
   final SharedPreferences _prefs;
 
@@ -104,9 +106,15 @@ class SettingsStore {
     await _prefs.setString(_usernameKey, value.trim());
   }
 
-  int get pollingSeconds => _prefs.getInt(_pollingSecondsKey) ?? 10;
+  int get pollingSeconds => _clampPollingSeconds(
+        _prefs.getInt(_pollingSecondsKey) ?? 10,
+      );
 
   Future<void> setPollingSeconds(int value) async {
-    await _prefs.setInt(_pollingSecondsKey, value);
+    await _prefs.setInt(_pollingSecondsKey, _clampPollingSeconds(value));
+  }
+
+  int _clampPollingSeconds(int value) {
+    return value.clamp(minPollingSeconds, maxPollingSeconds).toInt();
   }
 }

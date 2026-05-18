@@ -127,6 +127,20 @@ class GuestModeStatus {
   }
 }
 
+class FaceTrainingResult {
+  FaceTrainingResult({required this.ok, required this.message});
+
+  final bool ok;
+  final String message;
+
+  factory FaceTrainingResult.fromJson(Map<String, dynamic> json) {
+    return FaceTrainingResult(
+      ok: json['ok'] == true,
+      message: json['message']?.toString() ?? '',
+    );
+  }
+}
+
 class BackendService {
   BackendService(this.apiClient);
 
@@ -376,6 +390,14 @@ class BackendService {
       },
     );
     return SnapshotFeedbackResult.fromJson(json);
+  }
+
+  Future<FaceTrainingResult> trainFaceModel() async {
+    final json = await apiClient.postJson(
+      'api/training/face/train',
+      <String, dynamic>{},
+    );
+    return FaceTrainingResult.fromJson(json);
   }
 
   Future<List<FaceProfile>> fetchFaceProfiles() async {

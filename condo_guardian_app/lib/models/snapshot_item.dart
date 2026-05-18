@@ -73,6 +73,7 @@ class SnapshotItem {
     required this.severity,
     required this.snapshotPath,
     required this.capturedAt,
+    required this.eventType,
     required this.eventCode,
     required this.faceOverlays,
     required this.recordType,
@@ -91,6 +92,7 @@ class SnapshotItem {
   final String severity;
   final String snapshotPath;
   final DateTime capturedAt;
+  final String eventType;
   final String eventCode;
   final List<FaceOverlay> faceOverlays;
   final String recordType;
@@ -148,27 +150,27 @@ class SnapshotItem {
   }
 
   bool get supportsIntruderFeedback {
-    switch (eventCode.toUpperCase()) {
-      case 'INTRUDER':
-      case 'DOOR_TAMPER':
-      case 'AUTHORIZED_ENTRY':
-        return true;
-      default:
-        return false;
-    }
+    final normalizedType = eventType.toLowerCase();
+    final normalizedCode = eventCode.toUpperCase();
+    return normalizedType == 'intruder' ||
+        <String>{
+          'INTRUDER',
+          'DOOR_TAMPER',
+          'AUTHORIZED_ENTRY',
+          'UNKNOWN',
+          'UNKNOWN_FACE',
+        }.contains(normalizedCode);
   }
 
   bool get supportsFireFeedback {
-    switch (eventCode.toUpperCase()) {
-      case 'FIRE':
-      case 'SMOKE_WARNING':
-        return true;
-      default:
-        return false;
-    }
+    final normalizedType = eventType.toLowerCase();
+    final normalizedCode = eventCode.toUpperCase();
+    return normalizedType == 'fire' ||
+        <String>{'FIRE', 'SMOKE_WARNING'}.contains(normalizedCode);
   }
 
-  bool get supportsSnapshotFeedback => supportsIntruderFeedback || supportsFireFeedback;
+  bool get supportsSnapshotFeedback =>
+      supportsIntruderFeedback || supportsFireFeedback;
 
   bool get isPersonSnapshot {
     final normalizedEventCode = eventCode.toUpperCase();
@@ -218,6 +220,7 @@ class SnapshotItem {
       severity: json['severity']?.toString() ?? 'info',
       snapshotPath: json['snapshot_path']?.toString() ?? '',
       capturedAt: DateTime.tryParse(timestampRaw) ?? DateTime.now(),
+      eventType: json['type']?.toString() ?? '',
       eventCode: json['event_code']?.toString() ?? '',
       faceOverlays: overlays,
       recordType: normalizedRecordType,

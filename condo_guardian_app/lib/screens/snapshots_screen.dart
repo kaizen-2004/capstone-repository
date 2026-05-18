@@ -37,6 +37,7 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
   String _searchQuery = '';
   String _selectedType = 'all';
   String _selectedReview = 'all';
+  bool _groupTraining = false;
 
   @override
   void initState() {
@@ -110,6 +111,138 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
     final time =
         '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
     return '$date $time';
+  }
+
+  String _snapshotType(SnapshotItem snapshot) {
+    final code = snapshot.eventCode.toUpperCase();
+    final text = '${snapshot.title} ${snapshot.message}'.toLowerCase();
+    if (code.contains('FIRE') ||
+        code.contains('SMOKE') ||
+        text.contains('fire') ||
+        text.contains('smoke')) {
+      return 'fire';
+    }
+    if (code.contains('AUTHORIZED')) {
+      return 'authorized';
+    }
+    if (snapshot.supportsIntruderFeedback ||
+        text.contains('intruder') ||
+        text.contains('non-authorized')) {
+      return 'intruder';
+    }
+    return 'system';
+  }
+
+  List<SnapshotItem> _filteredSnapshots() {
+    final query = _searchQuery.toLowerCase().trim();
+    return _snapshots.where((snapshot) {
+      final matchesSearch = query.isEmpty ||
+          snapshot.title.toLowerCase().contains(query) ||
+          snapshot.message.toLowerCase().contains(query) ||
+          snapshot.eventCode.toLowerCase().contains(query) ||
+          snapshot.sourceNodeLabel.toLowerCase().contains(query) ||
+          snapshot.location.toLowerCase().contains(query) ||
+          snapshot.recordLabel.toLowerCase().contains(query);
+      final matchesType =
+          _selectedType == 'all' || _snapshotType(snapshot) == _selectedType;
+      final matchesReview = _selectedReview == 'all' ||
+          snapshot.reviewStatus.toLowerCase() == _selectedReview;
+      return matchesSearch && matchesType && matchesReview;
+    }).toList();
+  }
+
+  Widget _buildFilters(int visibleCount) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '$visibleCount snapshot${visibleCount == 1 ? '' : 's'} shown',
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _searchController,
+            onChanged: (value) => setState(() => _searchQuery = value),
+            decoration: const InputDecoration(
+              labelText: 'Search snapshots',
+              hintText: 'Title, code, location, source node',
+              prefixIcon: Icon(Icons.search_rounded, size: 20),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  initialValue: _selectedType,
+                  decoration: const InputDecoration(labelText: 'Type'),
+                  items: const <DropdownMenuItem<String>>[
+                    DropdownMenuItem(value: 'all', child: Text('All')),
+                    DropdownMenuItem(
+                        value: 'intruder', child: Text('Intruder')),
+                    DropdownMenuItem(value: 'fire', child: Text('Fire')),
+                    DropdownMenuItem(
+                        value: 'authorized', child: Text('Authorized')),
+                    DropdownMenuItem(value: 'system', child: Text('System')),
+                  ],
+                  onChanged: (value) => setState(
+                    () => _selectedType = value ?? 'all',
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  initialValue: _selectedReview,
+                  decoration: const InputDecoration(labelText: 'Review'),
+                  items: const <DropdownMenuItem<String>>[
+                    DropdownMenuItem(value: 'all', child: Text('All')),
+                    DropdownMenuItem(
+                        value: 'needs_review', child: Text('Needs Review')),
+                    DropdownMenuItem(
+                        value: 'confirmed', child: Text('Confirmed')),
+                    DropdownMenuItem(
+                        value: 'false_positive', child: Text('False Positive')),
+                    DropdownMenuItem(
+                        value: 'resolved', child: Text('Resolved')),
+                    DropdownMenuItem(
+                        value: 'archived', child: Text('Archived')),
+                  ],
+                  onChanged: (value) => setState(
+                    () => _selectedReview = value ?? 'all',
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (_searchQuery.trim().isNotEmpty ||
+              _selectedType != 'all' ||
+              _selectedReview != 'all') ...[
+            const SizedBox(height: 10),
+            TextButton.icon(
+              onPressed: () {
+                _searchController.clear();
+                setState(() {
+                  _searchQuery = '';
+                  _selectedType = 'all';
+                  _selectedReview = 'all';
+                });
+              },
+              icon: const Icon(Icons.clear_rounded, size: 18),
+              label: const Text('Clear filters'),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 
   String _formatReviewStatusLabel(String value) {
@@ -334,7 +467,8 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                               (profile) => RadioListTile<FaceProfile>(
                                 value: profile,
                                 title: Text(profile.name),
-                                subtitle: Text('${profile.sampleCount} samples'),
+                                subtitle:
+                                    Text('${profile.sampleCount} samples'),
                               ),
                             )
                             .toList(),
@@ -378,7 +512,8 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
     } else if (verdict == 'false_positive' && !snapshot.supportsFireFeedback) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('False-alarm learning is only available for intruder and fire snapshots.'),
+          content: Text(
+              'False-alarm learning is only available for intruder and fire snapshots.'),
         ),
       );
       return;
@@ -428,12 +563,13 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
       final message = verdict == 'confirmed'
           ? 'Snapshot confirmed.'
           : snapshot.supportsIntruderFeedback
-              ? 'False alarm saved and face model retrained.'
+              ? 'False alarm saved for group retraining.'
               : 'False alarm saved as fire hard-negative sample.';
       final trainMessage = result.trainMessage.trim();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(trainMessage.isEmpty ? message : '$message $trainMessage'),
+          content:
+              Text(trainMessage.isEmpty ? message : '$message $trainMessage'),
         ),
       );
     } catch (error) {
@@ -450,10 +586,56 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
     }
   }
 
+  Future<void> _runGroupRetrain() async {
+    if (_groupTraining) {
+      return;
+    }
+    setState(() => _groupTraining = true);
+    try {
+      final result = await widget.backendService.trainFaceModel();
+      if (!mounted) {
+        return;
+      }
+      final message = result.ok
+          ? 'Group retrain complete. ${result.message}'.trim()
+          : 'Group retrain failed. ${result.message}'.trim();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Group retrain failed: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _groupTraining = false);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final visibleSnapshots = _filteredSnapshots();
     return Scaffold(
-      appBar: AppBar(title: const Text('Snapshots')),
+      appBar: AppBar(
+        title: const Text('Snapshots'),
+        actions: [
+          TextButton.icon(
+            onPressed: _groupTraining ? null : _runGroupRetrain,
+            icon: _groupTraining
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.psychology_alt_outlined, size: 18),
+            label: Text(_groupTraining ? 'Retraining...' : 'Retrain'),
+          ),
+        ],
+      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
@@ -485,9 +667,23 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                       onRefresh: _loadSnapshots,
                       child: ListView.builder(
                         padding: const EdgeInsets.all(16),
-                        itemCount: _snapshots.length,
+                        itemCount: visibleSnapshots.length + 1,
                         itemBuilder: (context, index) {
-                          final snapshot = _snapshots[index];
+                          if (index == 0) {
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: Column(
+                                children: [
+                                  _buildFilters(visibleSnapshots.length),
+                                  if (visibleSnapshots.isEmpty) ...[
+                                    const SizedBox(height: 12),
+                                    const _NoMatchingSnapshotsCard(),
+                                  ],
+                                ],
+                              ),
+                            );
+                          }
+                          final snapshot = visibleSnapshots[index - 1];
                           final url =
                               _absoluteSnapshotUrl(snapshot.snapshotPath);
                           final canReview =
@@ -593,13 +789,13 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                                     children: <Widget>[
                                       if (canSubmitFeedback)
                                         FilledButton.icon(
-                                          onPressed:
-                                              _busySnapshotId == snapshot.id
-                                                  ? null
-                                                  : () => _submitSnapshotFeedback(
-                                                        snapshot,
-                                                        'confirmed',
-                                                      ),
+                                          onPressed: _busySnapshotId ==
+                                                  snapshot.id
+                                              ? null
+                                              : () => _submitSnapshotFeedback(
+                                                    snapshot,
+                                                    'confirmed',
+                                                  ),
                                           icon: const Icon(
                                             Icons.verified_outlined,
                                             size: 18,
@@ -608,13 +804,13 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
                                         ),
                                       if (canSubmitFeedback)
                                         FilledButton.tonalIcon(
-                                          onPressed:
-                                              _busySnapshotId == snapshot.id
-                                                  ? null
-                                                  : () => _submitSnapshotFeedback(
-                                                        snapshot,
-                                                        'false_positive',
-                                                      ),
+                                          onPressed: _busySnapshotId ==
+                                                  snapshot.id
+                                              ? null
+                                              : () => _submitSnapshotFeedback(
+                                                    snapshot,
+                                                    'false_positive',
+                                                  ),
                                           icon: const Icon(
                                             Icons.report_gmailerrorred_rounded,
                                             size: 18,
@@ -694,6 +890,30 @@ class _SnapshotStatusPill extends StatelessWidget {
           fontWeight: FontWeight.w800,
           letterSpacing: 0.2,
         ),
+      ),
+    );
+  }
+}
+
+class _NoMatchingSnapshotsCard extends StatelessWidget {
+  const _NoMatchingSnapshotsCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: const Row(
+        children: [
+          Icon(Icons.search_off_rounded),
+          SizedBox(width: 10),
+          Expanded(child: Text('No snapshots match the current filters.')),
+        ],
       ),
     );
   }
