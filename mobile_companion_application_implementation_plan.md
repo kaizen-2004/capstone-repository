@@ -6,7 +6,7 @@ Develop a mobile companion application for the condo intruder and fire monitorin
 secure access to the monitoring dashboard
 live camera preview and sensor readings
 alert notifications
-node provisioning and reconfiguration
+mobile alert review and authorized-face enrollment
 an in-app AI assistant using guided FAQ-style queries for event explanations and system queries
 Expected Final Output
 
@@ -78,12 +78,12 @@ finalize app modules:
 Home
 Monitor
 Alerts
-Provision Nodes
+Settings
 Assistant
 Settings
 define what remains in WebView and what becomes native
 define app-backend communication
-define app-to-node provisioning communication
+define mobile-to-backend monitoring communication
 define minimum demo scenarios
 Output
 finalized architecture
@@ -194,16 +194,7 @@ local configuration API/page
 save configuration and reboot
 Tasks on App Side
 
-Create provisioning screen allowing:
-
-SSID entry
-password entry
-backend host/IP entry
-port entry
-node ID entry
-node type/room selection
-
-Send configuration to node and display success/failure.
+Node provisioning is no longer part of the mobile app scope. Node setup and recovery are handled through firmware/setup tooling outside the companion app.
 
 Output
 
@@ -250,7 +241,7 @@ normal monitoring
 intrusion alert scenario
 smoke/fire alert scenario
 node offline scenario
-provisioning scenario
+alert review and false-alarm retraining scenario
 assistant FAQ responses
 
 Improve:
@@ -284,4 +275,4 @@ Wi-Fi
 Tailscale + stable hostname for backend access
 Final System Scope Statement
 
-The companion mobile application will be implemented in phases to provide integrated monitoring, alert notification, node provisioning, and AI-assisted system interaction. Core monitoring and configuration features will be completed first through an MVP, while guided FAQ-based intelligent assistance will provide a controlled and reliable event interpretation layer suitable for thesis demonstration.
+The companion mobile application will be implemented in phases to provide integrated monitoring, alert notification, authorized-face enrollment, false-alarm review, and AI-assisted system interaction. Core monitoring and review features will be completed first through an MVP, while guided FAQ-based intelligent assistance will provide a controlled and reliable event interpretation layer suitable for thesis demonstration.

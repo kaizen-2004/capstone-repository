@@ -43,7 +43,7 @@ This is the edit-safety reference for minimal-diff, contract-preserving changes.
 |---|---|---|
 | `backend/` | FastAPI core, event orchestration, storage, camera/sensor services | `backend/app/main.py`, `backend/run_backend.py` |
 | `web_dashboard_ui/` | React dashboard and mobile remote web view | `web_dashboard_ui/src/main.tsx`, `web_dashboard_ui/src/app/routes.ts` |
-| `condo_guardian_app/` | Flutter mobile companion (monitoring, alerts, enrollment, provisioning) | `condo_guardian_app/lib/main.dart`, `condo_guardian_app/lib/app.dart` |
+| `condo_guardian_app/` | Flutter mobile companion (monitoring, alerts, enrollment, assistant) | `condo_guardian_app/lib/main.dart`, `condo_guardian_app/lib/app.dart` |
 | `firmware/` | ESP32 HTTP nodes and camera firmware | `firmware/http/*/*.ino`, `firmware/http/common/network_config.h` |
 | `scripts/` | local preview and validation helpers | `scripts/preview_full_system.sh` |
 | `docs/` | context, process, deployment/instruction references | `docs/context/CURRENT_STATUS.md`, `docs/context/SESSION_BOOTSTRAP.md` |
@@ -193,8 +193,6 @@ This is the edit-safety reference for minimal-diff, contract-preserving changes.
   - `condo_guardian_app/lib/screens/enrollment_screen.dart`
 - Assistant query:
   - `condo_guardian_app/lib/screens/assistant_screen.dart`
-- Node provisioning:
-  - `condo_guardian_app/lib/screens/provisioning_screen.dart`
 - App settings:
   - `condo_guardian_app/lib/screens/settings_screen.dart`
 
@@ -208,8 +206,6 @@ This is the edit-safety reference for minimal-diff, contract-preserving changes.
 - Alert notifications:
   - `condo_guardian_app/lib/services/alert_notification_service.dart`
   - `condo_guardian_app/lib/services/alert_notification_coordinator.dart`
-- Provisioning submitter:
-  - `condo_guardian_app/lib/services/provisioning_service.dart`
 - DTO models:
   - `condo_guardian_app/lib/models/*.dart`
 
@@ -298,7 +294,7 @@ This is the edit-safety reference for minimal-diff, contract-preserving changes.
 | `/api/alerts` | `backend/app/api/ui.py` | web alerts, Flutter alerts + notification coordinator |
 | `/api/assistant/query` | `backend/app/api/ui.py` | Flutter assistant (and optional web assistant usage) |
 | `/api/enroll/*` | `backend/app/api/faces.py` | web settings enrollment, Flutter enrollment |
-| `POST /configure` | node firmware HTTP handler | Flutter provisioning service |
+| `POST /configure` | node firmware HTTP handler | Firmware/node setup tooling |
 
 ---
 
@@ -325,7 +321,7 @@ This is the edit-safety reference for minimal-diff, contract-preserving changes.
 - Device ingest or node-heartbeat behavior: `backend/app/api/devices.py`
 - Camera stream URL/override logic: `backend/app/services/camera_http_control.py`
 - Mobile remote UX-only changes: `web_dashboard_ui/src/app/pages/MobileRemote.tsx`, `web_dashboard_ui/src/styles/theme.css`
-- Flutter monitor/provisioning UX: `condo_guardian_app/lib/screens/monitor_screen.dart`, `condo_guardian_app/lib/screens/provisioning_screen.dart`
+- Flutter monitor UX: `condo_guardian_app/lib/screens/monitor_screen.dart`
 
 ---
 
