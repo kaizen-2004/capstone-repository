@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
+import webbrowser
 from pathlib import Path
 
 import uvicorn
@@ -33,16 +36,34 @@ def _configure_windows_event_loop() -> None:
         pass
 
 
+def _open_dashboard_later(port: int) -> None:
+    if os.environ.get("CONDO_GUARDIAN_NO_BROWSER") == "1":
+        return
+    if os.environ.get("BACKEND_NO_BROWSER") == "1":
+        return
+
+    explicit_url = os.environ.get("BACKEND_OPEN_URL", "").strip()
+    url = explicit_url or f"http://127.0.0.1:{port}/dashboard"
+
+    def _open() -> None:
+        time.sleep(2)
+        webbrowser.open(url)
+
+    threading.Thread(target=_open, daemon=True).start()
+
+
 if __name__ == "__main__":
     _configure_windows_event_loop()
     _ensure_project_root_on_path()
     from backend.app.core.config import load_env_file
 
     load_env_file()
+    port = int(os.environ.get("BACKEND_PORT", "8765"))
+    _open_dashboard_later(port)
     uvicorn.run(
         "backend.app.main:app",
         host=os.environ.get("BACKEND_HOST", "0.0.0.0"),
-        port=int(os.environ.get("BACKEND_PORT", "8765")),
+        port=port,
         reload=False,
         access_log=_env_bool("BACKEND_ACCESS_LOG", False),
     )

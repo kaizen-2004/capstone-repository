@@ -370,6 +370,12 @@ def _alert_to_ui(row: dict[str, Any]) -> dict[str, Any]:
         "snapshot_path": snapshot_url,
         "face_overlays": _face_overlays_from_details(details),
         "snapshot_overlays": _snapshot_overlays_from_details(details),
+        "decision_state": str(details.get("decision_state") or ""),
+        "decision_votes": details.get("decision_votes") or {},
+        "decision_consensus": str(details.get("decision_consensus") or ""),
+        "decision_samples": details.get("decision_samples") or [],
+        "consensus_frames": _optional_int(details.get("consensus_frames")),
+        "consensus_required": _optional_int(details.get("consensus_required")),
     }
 
 
@@ -388,6 +394,73 @@ def _snapshot_target_path(snapshot_path: str, snapshot_root: Path) -> Path | Non
     if target != snapshot_root and snapshot_root not in target.parents:
         return None
     return target
+
+
+def _snapshot_roots(settings: Settings) -> list[Path]:
+    roots: list[Path] = []
+    for root in (
+        Path(settings.snapshot_root),
+        Path(settings.storage_root) / "snapshots",
+        Path(settings.backend_root) / "storage" / "snapshots",
+        Path(settings.project_root) / "backend" / "storage" / "snapshots",
+    ):
+        resolved = root.resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def _snapshot_path_values(*values: Any) -> list[str]:
+    candidates: list[str] = []
+    for value in values:
+        raw_value = str(value or "").strip()
+        if not raw_value:
+            continue
+
+        parsed = urlparse(raw_value)
+        if parsed.scheme and parsed.path:
+            raw_value = parsed.path
+
+        normalized = raw_value.replace("\\", "/")
+        for candidate in (raw_value, normalized):
+            candidate = candidate.strip()
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
+            marker = "snapshots/"
+            marker_index = candidate.find(marker)
+            if marker_index >= 0:
+                suffix_candidate = candidate[marker_index + len(marker) :].strip("/")
+                if suffix_candidate and suffix_candidate not in candidates:
+                    candidates.append(suffix_candidate)
+    return candidates
+
+
+def _path_within_root(path: Path, root: Path) -> bool:
+    resolved_root = root.resolve()
+    resolved_path = path.resolve()
+    return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
+def _resolve_snapshot_file(settings: Settings, *values: Any) -> Path | None:
+    roots = _snapshot_roots(settings)
+    for value in _snapshot_path_values(*values):
+        raw_path = Path(value)
+        if raw_path.is_absolute():
+            resolved = raw_path.resolve()
+            if (
+                any(_path_within_root(resolved, root) for root in roots)
+                and resolved.exists()
+                and resolved.is_file()
+            ):
+                return resolved
+            continue
+
+        for root in roots:
+            target = _snapshot_target_path(value, root)
+            if target is not None and target.exists() and target.is_file():
+                return target
+    return None
 
 
 def _snapshot_training_file_name(alert_id: int, source_path: Path) -> str:
@@ -472,6 +545,12 @@ def _event_to_ui(row: dict[str, Any]) -> dict[str, Any]:
         "snapshot_path": snapshot_url,
         "face_overlays": _face_overlays_from_details(details),
         "snapshot_overlays": _snapshot_overlays_from_details(details),
+        "decision_state": str(details.get("decision_state") or ""),
+        "decision_votes": details.get("decision_votes") or {},
+        "decision_consensus": str(details.get("decision_consensus") or ""),
+        "decision_samples": details.get("decision_samples") or [],
+        "consensus_frames": _optional_int(details.get("consensus_frames")),
+        "consensus_required": _optional_int(details.get("consensus_required")),
     }
 
 
@@ -1853,11 +1932,18 @@ def submit_snapshot_feedback(
 
     if verdict == "false_positive":
         settings: Settings = request.app.state.settings
-        snapshot_root = Path(settings.snapshot_root).resolve()
+        details = _safe_json(row.get("details_json"))
         snapshot_path = str(row.get("snapshot_path") or "")
-        source_path = _snapshot_target_path(snapshot_path, snapshot_root)
-        if source_path is None or not source_path.exists() or not source_path.is_file():
-            raise HTTPException(status_code=404, detail="snapshot file not found")
+        source_path = _resolve_snapshot_file(
+            settings,
+            snapshot_path,
+            details.get("snapshot_path"),
+        )
+        if source_path is None:
+            raise HTTPException(
+                status_code=404,
+                detail="snapshot file not found; false-alarm training requires an existing alert snapshot",
+            )
 
         category = _alert_feedback_category(str(row.get("type") or ""))
         if category == "intruder":
@@ -1878,9 +1964,12 @@ def submit_snapshot_feedback(
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            train_ok, train_message = request.app.state.face_service.train()
+            train_message = "False-positive sample saved. Run group face retraining when ready."
             if not note:
-                note = f"False alarm. Imported snapshot into face profile: {face['name']}."
+                note = (
+                    f"False alarm. Imported snapshot into face profile: {face['name']}. "
+                    "Pending group face retraining."
+                )
         elif category == "fire":
             target_dir = (
                 Path(settings.storage_root)

@@ -360,6 +360,158 @@ class EventEngine:
             },
         )
 
+    def _pick_intruder_face_result(
+        self, frame: Any
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        face_results = self.face_service.classify_faces_with_bbox(frame, max_faces=5)
+        if not face_results:
+            return self.face_service.classify_frame_with_bbox(frame), []
+
+        unknown_faces = [
+            verdict
+            for verdict in face_results
+            if str(verdict.get("face_status") or "").upper() == "UNKNOWN_FACE"
+            or (
+                str(verdict.get("result") or "").lower() == "unknown"
+                and bool(verdict.get("face_present"))
+                and str(verdict.get("face_status") or "").upper()
+                not in {"FACE_UNCLEAR", "NO_FACE"}
+            )
+        ]
+        unclear_faces = [
+            verdict
+            for verdict in face_results
+            if str(verdict.get("face_status") or "").upper() == "FACE_UNCLEAR"
+            and bool(verdict.get("face_present"))
+        ]
+        authorized_faces = [
+            verdict
+            for verdict in face_results
+            if str(verdict.get("result") or "").lower() == "authorized"
+        ]
+
+        if unknown_faces:
+            return unknown_faces[0], face_results
+        if unclear_faces:
+            return unclear_faces[0], face_results
+        if authorized_faces:
+            return authorized_faces[0], face_results
+        return face_results[0], face_results
+
+    @staticmethod
+    def _intruder_decision_state(face_result: dict[str, Any]) -> str:
+        if str(face_result.get("result") or "").lower() == "authorized":
+            return "authorized"
+
+        face_status = str(face_result.get("face_status") or "").upper()
+        if face_status == "FACE_UNCLEAR":
+            return "face_unclear"
+        if face_status == "NO_FACE" or not bool(face_result.get("face_present")):
+            return "no_face"
+        return "unknown_face"
+
+    def _classify_intruder_frame(self, frame: Any) -> dict[str, Any]:
+        face_result, face_results = self._pick_intruder_face_result(frame)
+        decision_state = self._intruder_decision_state(face_result)
+        return {
+            "decision_state": decision_state,
+            "face": face_result,
+            "faces": face_results,
+            "frame": frame,
+        }
+
+    @staticmethod
+    def _intruder_decision_summary(
+        samples: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        summary = []
+        for index, sample in enumerate(samples, start=1):
+            face = sample.get("face") if isinstance(sample.get("face"), dict) else {}
+            summary.append(
+                {
+                    "frame": index,
+                    "decision_state": str(sample.get("decision_state") or ""),
+                    "face_status": str(face.get("face_status") or ""),
+                    "result": str(face.get("result") or ""),
+                    "confidence": face.get("confidence", 0.0),
+                }
+            )
+        return summary
+
+    def _select_intruder_consensus(
+        self, samples: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        if not samples:
+            face_result = {
+                "result": "unknown",
+                "classification": "NO-FACE",
+                "confidence": 0.0,
+                "face_present": False,
+                "reason": "no_frame",
+                "face_status": "NO_FACE",
+            }
+            return {
+                "decision_state": "no_face",
+                "face": face_result,
+                "faces": [],
+                "frame": None,
+                "decision_samples": [],
+                "decision_votes": {"no_face": 0},
+                "decision_consensus": "no_frame",
+            }
+
+        votes: dict[str, int] = {}
+        for sample in samples:
+            state = str(sample.get("decision_state") or "no_face")
+            votes[state] = votes.get(state, 0) + 1
+
+        if votes.get("authorized", 0) > 0:
+            selected_state = "authorized"
+            consensus = "authorized_seen"
+        elif votes.get("unknown_face", 0) >= 2:
+            selected_state = "unknown_face"
+            consensus = "majority"
+        elif votes.get("face_unclear", 0) >= 2:
+            selected_state = "face_unclear"
+            consensus = "majority"
+        elif votes.get("no_face", 0) >= 2:
+            selected_state = "no_face"
+            consensus = "majority"
+        elif votes.get("unknown_face", 0) > 0 or votes.get("face_unclear", 0) > 0:
+            selected_state = "face_unclear"
+            consensus = "mixed_unclear_review"
+        else:
+            selected_state = "no_face"
+            consensus = "fallback"
+
+        selected_sample = next(
+            (
+                sample
+                for sample in samples
+                if str(sample.get("decision_state") or "") == selected_state
+            ),
+            None,
+        )
+        if selected_sample is None and selected_state == "face_unclear":
+            selected_sample = next(
+                (
+                    sample
+                    for sample in samples
+                    if str(sample.get("decision_state") or "")
+                    in {"unknown_face", "face_unclear"}
+                ),
+                samples[0],
+            )
+        if selected_sample is None:
+            selected_sample = samples[0]
+        return {
+            **selected_sample,
+            "decision_state": selected_state,
+            "decision_samples": self._intruder_decision_summary(samples),
+            "decision_votes": votes,
+            "decision_consensus": consensus,
+        }
+
     def _handle_intruder_trigger(
         self, event_id: int, node_id: str, location: str, details: dict[str, Any]
     ) -> int | None:
@@ -390,63 +542,54 @@ class EventEngine:
             primary_node = "cam_indoor"
             frame = self.camera_manager.snapshot_frame("cam_indoor")
 
-        face_result = {
-            "result": "unknown",
-            "classification": "NO-FACE",
-            "confidence": 0.0,
-            "face_present": False,
-            "reason": "no_frame",
-        }
-        face_results: list[dict[str, Any]] = []
-        snapshot_path = ""
+        decision_samples: list[dict[str, Any]] = []
         if frame is not None:
-            face_results = self.face_service.classify_faces_with_bbox(frame, max_faces=5)
-            if face_results:
-                unknown_faces = [
-                    verdict
-                    for verdict in face_results
-                    if str(verdict.get("face_status") or "").upper() == "UNKNOWN_FACE"
-                    or (
-                        str(verdict.get("result") or "").lower() == "unknown"
-                        and bool(verdict.get("face_present"))
-                        and str(verdict.get("face_status") or "").upper()
-                        not in {"FACE_UNCLEAR", "NO_FACE"}
-                    )
-                ]
-                unclear_faces = [
-                    verdict
-                    for verdict in face_results
-                    if str(verdict.get("face_status") or "").upper() == "FACE_UNCLEAR"
-                    and bool(verdict.get("face_present"))
-                ]
-                authorized_faces = [
-                    verdict
-                    for verdict in face_results
-                    if str(verdict.get("result") or "").lower() == "authorized"
-                ]
+            decision_samples.append(self._classify_intruder_frame(frame))
+            while (
+                len(decision_samples) < 3
+                and not any(
+                    str(sample.get("decision_state") or "") == "authorized"
+                    for sample in decision_samples
+                )
+            ):
+                time.sleep(0.15)
+                next_frame = self.camera_manager.snapshot_frame(primary_node)
+                if next_frame is None:
+                    break
+                decision_samples.append(self._classify_intruder_frame(next_frame))
 
-                if unknown_faces:
-                    face_result = unknown_faces[0]
-                elif unclear_faces:
-                    face_result = unclear_faces[0]
-                elif authorized_faces:
-                    face_result = authorized_faces[0]
-                else:
-                    face_result = face_results[0]
-            else:
-                face_result = self.face_service.classify_frame_with_bbox(frame)
-
-            prefix = (
-                "authorized" if face_result.get("result") == "authorized" else "unknown"
-            )
+        decision = self._select_intruder_consensus(decision_samples)
+        decision_state = str(decision.get("decision_state") or "no_face")
+        face_result = (
+            decision.get("face") if isinstance(decision.get("face"), dict) else {}
+        )
+        face_results = (
+            decision.get("faces") if isinstance(decision.get("faces"), list) else []
+        )
+        snapshot_frame = decision.get("frame")
+        snapshot_path = ""
+        if snapshot_frame is not None:
+            prefix = f"intruder_{decision_state}"
             try:
                 snapshot_path = self.camera_manager.save_snapshot(
-                    primary_node, frame, f"intruder_{prefix}"
+                    primary_node, snapshot_frame, prefix
                 )
             except Exception:
                 snapshot_path = ""
 
-        if face_result.get("result") == "authorized":
+        decision_details = {
+            **details,
+            "decision_state": decision_state,
+            "decision_votes": decision.get("decision_votes", {}),
+            "decision_consensus": decision.get("decision_consensus", ""),
+            "decision_samples": decision.get("decision_samples", []),
+            "consensus_frames": len(decision_samples),
+            "consensus_required": 2,
+            "face": face_result,
+            "faces": face_results,
+        }
+
+        if decision_state == "authorized":
             store.create_event(
                 event_type="authorized",
                 event_code="AUTHORIZED",
@@ -455,7 +598,7 @@ class EventEngine:
                 severity="normal",
                 title="Recognized person detected",
                 description="A recognized person was seen near the entry.",
-                details={"face": face_result, "faces": face_results, **details},
+                details=decision_details,
             )
             return self._create_alert(
                 event_id,
@@ -466,7 +609,7 @@ class EventEngine:
                 source_node=node_id,
                 location=location or ROOM_DOOR,
                 snapshot_path=snapshot_path,
-                details={"face": face_result, "faces": face_results, **details},
+                details=decision_details,
                 requires_ack=False,
                 dispatch_notification=True,
             )
@@ -477,12 +620,10 @@ class EventEngine:
                 node_id=node_id,
                 location=location or ROOM_DOOR,
                 snapshot_path=snapshot_path,
-                details={"face": face_result, "faces": face_results, **details},
+                details=decision_details,
             )
 
-        face_status = str(face_result.get("face_status") or "").upper()
-
-        if face_status == "FACE_UNCLEAR":
+        if decision_state == "face_unclear":
             return self._create_alert(
                 event_id,
                 alert_type="INTRUDER",
@@ -492,11 +633,11 @@ class EventEngine:
                 source_node=node_id,
                 location=location or ROOM_DOOR,
                 snapshot_path=snapshot_path,
-                details={"face": face_result, "faces": face_results, **details},
+                details=decision_details,
                 requires_ack=True,
             )
 
-        if not bool(face_result.get("face_present")):
+        if decision_state == "no_face":
             return self._create_alert(
                 event_id,
                 alert_type="INTRUDER",
@@ -506,7 +647,7 @@ class EventEngine:
                 source_node=node_id,
                 location=location or ROOM_DOOR,
                 snapshot_path=snapshot_path,
-                details={"face": face_result, "faces": face_results, **details},
+                details=decision_details,
                 requires_ack=True,
             )
 
@@ -519,7 +660,7 @@ class EventEngine:
             source_node=node_id,
             location=location or ROOM_DOOR,
             snapshot_path=snapshot_path,
-            details={"face": face_result, "faces": face_results, **details},
+            details=decision_details,
             requires_ack=True,
         )
 

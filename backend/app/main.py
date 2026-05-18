@@ -52,6 +52,14 @@ def configure_packaged_runtime_paths() -> None:
         return
 
     app_data_dir = get_app_data_dir()
+    bundled_models_dir = resource_path("models")
+    bundled_fire_model = (
+        bundled_models_dir / "fire" / "yolov8s_fire_smoke_hardneg.onnx"
+    )
+    bundled_face_model_root = bundled_models_dir / "insightface"
+    bundled_face_required_model = (
+        bundled_face_model_root / "models" / "buffalo_l" / "w600k_r50.onnx"
+    )
 
     def _set_default_path(name: str, path: Path) -> None:
         if not os.getenv(name, "").strip():
@@ -67,11 +75,15 @@ def configure_packaged_runtime_paths() -> None:
     _set_default_path("MODELS_ROOT", storage_root / "models")
     _set_default_path(
         "FACE_INSIGHTFACE_MODEL_ROOT",
-        storage_root / "models" / "insightface",
+        bundled_face_model_root
+        if bundled_face_required_model.exists()
+        else storage_root / "models" / "insightface",
     )
     _set_default_path(
         "FIRE_MODEL_PATH",
-        storage_root / "models" / "fire" / "yolov8s_fire_smoke_hardneg.onnx",
+        bundled_fire_model
+        if bundled_fire_model.exists()
+        else storage_root / "models" / "fire" / "yolov8s_fire_smoke_hardneg.onnx",
     )
 
 
