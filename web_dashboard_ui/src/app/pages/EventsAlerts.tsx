@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Calendar, Camera, CheckCircle2, Filter, Search, X, Image as ImageIcon } from 'lucide-react';
-import { fetchLiveEvents, fetchSettingsLive, submitSnapshotFeedback } from '../data/liveApi';
-import type { Alert, AuthorizedProfile, SeverityLevel, EventType } from '../data/types';
+import { fetchLiveEvents, fetchLiveNodes, fetchSettingsLive, submitSnapshotFeedback, trainFaceModel } from '../data/liveApi';
+import type { Alert, AuthorizedProfile, CameraFeed, SeverityLevel, EventType } from '../data/types';
 import { StatusBadge } from '../components/StatusBadge';
 
 type TimeRange = '24h' | '7d' | '30d' | 'all';
+type DecisionFilter = 'all' | 'unknown_face' | 'face_unclear' | 'no_face' | 'authorized';
+type ReviewFilter = 'all' | 'needs_review' | 'confirmed' | 'false_positive' | 'resolved' | 'archived';
 
 const DEFAULT_TIME_RANGE: TimeRange = '7d';
 const TIME_RANGE_DAYS: Record<Exclude<TimeRange, 'all'>, number> = {
@@ -16,6 +18,21 @@ const TIME_RANGE_DAYS: Record<Exclude<TimeRange, 'all'>, number> = {
 
 const displayEventCode = (eventCode: string) =>
   eventCode === 'UNKNOWN' ? 'NON-AUTHORIZED' : eventCode;
+
+const formatLabel = (value: string) => value.replace(/_/g, ' ') || '-';
+
+const formatFrameAge = (ageMs?: number | null) => {
+  if (ageMs == null || !Number.isFinite(ageMs)) {
+    return 'unknown';
+  }
+  if (ageMs < 1000) {
+    return `${Math.max(0, Math.round(ageMs))} ms`;
+  }
+  return `${(ageMs / 1000).toFixed(1)} s`;
+};
+
+const cameraSnapshotReady = (feed: CameraFeed) =>
+  feed.status === 'online' && Boolean(feed.framePath) && (feed.frameAgeMs == null || feed.frameAgeMs < 5000);
 
 const isIntruderFeedbackEvent = (event: Alert) => {
   const eventCode = event.eventCode.toUpperCase();
@@ -42,6 +59,9 @@ const canSubmitSnapshotFeedback = (event: Alert) =>
   feedbackAlertId(event) !== null &&
   !hasFeedbackReview(event) &&
   (isIntruderFeedbackEvent(event) || isFireFeedbackEvent(event));
+
+const canBulkFalseAlarm = (event: Alert) =>
+  canSubmitSnapshotFeedback(event) && isIntruderFeedbackEvent(event) && Boolean(event.snapshotPath);
 
 const getSnapshotCardId = (snapshotPath: string) => {
   let hash = 0;
@@ -173,10 +193,18 @@ function SnapshotGalleryCard({
   event,
   highlighted,
   onOpen,
+  selectable = false,
+  selected = false,
+  bulkEligible = false,
+  onToggleSelected,
 }: {
   event: Alert;
   highlighted: boolean;
   onOpen: (event: Alert) => void;
+  selectable?: boolean;
+  selected?: boolean;
+  bulkEligible?: boolean;
+  onToggleSelected?: (event: Alert) => void;
 }) {
   const [imageFailed, setImageFailed] = useState(false);
   const snapshotPath = event.snapshotPath || '';
@@ -192,9 +220,17 @@ function SnapshotGalleryCard({
     <button
       id={getSnapshotCardId(snapshotPath)}
       type="button"
-      onClick={() => onOpen(event)}
+      onClick={() => {
+        if (selectable && bulkEligible && onToggleSelected) {
+          onToggleSelected(event);
+          return;
+        }
+        onOpen(event);
+      }}
       className={`group overflow-hidden rounded-xl border bg-white text-left shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-        highlighted
+        selected
+          ? 'border-amber-500 ring-4 ring-amber-100'
+          : highlighted
           ? 'border-blue-500 ring-4 ring-blue-200'
           : 'border-gray-200 hover:-translate-y-0.5 hover:shadow-md'
       }`}
@@ -219,6 +255,11 @@ function SnapshotGalleryCard({
           </span>
           <StatusBadge severity={event.severity} label={event.severity.toUpperCase()} size="sm" />
         </div>
+        {selectable ? (
+          <div className="absolute right-3 top-3 rounded-full bg-white/95 px-2 py-1 text-xs font-semibold shadow">
+            {bulkEligible ? (selected ? 'Selected' : 'Select') : 'Not eligible'}
+          </div>
+        ) : null}
       </div>
 
       <div className="space-y-3 p-4">
@@ -255,11 +296,19 @@ function ActiveAlertSnapshotCard({
   ackPending,
   onAcknowledge,
   onOpen,
+  selectable = false,
+  selected = false,
+  bulkEligible = false,
+  onToggleSelected,
 }: {
   alert: Alert;
   ackPending: boolean;
   onAcknowledge: (alert: Alert) => void;
   onOpen: (alert: Alert) => void;
+  selectable?: boolean;
+  selected?: boolean;
+  bulkEligible?: boolean;
+  onToggleSelected?: (alert: Alert) => void;
 }) {
   const [imageFailed, setImageFailed] = useState(false);
   const snapshotPath = alert.snapshotPath || '';
@@ -274,7 +323,13 @@ function ActiveAlertSnapshotCard({
     <article className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
       <button
         type="button"
-        onClick={() => onOpen(alert)}
+        onClick={() => {
+          if (selectable && bulkEligible && onToggleSelected) {
+            onToggleSelected(alert);
+            return;
+          }
+          onOpen(alert);
+        }}
         className="relative block aspect-video w-full bg-gray-900 text-left focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
       >
         {snapshotPath && !imageFailed ? (
@@ -296,6 +351,11 @@ function ActiveAlertSnapshotCard({
             {displayEventCode(alert.eventCode)}
           </span>
         </div>
+        {selectable ? (
+          <div className="absolute right-3 top-3 rounded-full bg-white/95 px-2 py-1 text-xs font-semibold shadow">
+            {bulkEligible ? (selected ? 'Selected' : 'Select') : 'Not eligible'}
+          </div>
+        ) : null}
       </button>
 
       <div className="space-y-4 p-4">
@@ -318,15 +378,27 @@ function ActiveAlertSnapshotCard({
 
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <span className="text-xs text-gray-500">Open the snapshot for details if needed.</span>
-          <button
-            type="button"
-            onClick={() => onAcknowledge(alert)}
-            disabled={ackPending}
-            className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <CheckCircle2 className="h-4 w-4" />
-            {ackPending ? 'Acknowledging...' : 'Acknowledge'}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            {selectable ? (
+              <button
+                type="button"
+                onClick={() => onToggleSelected?.(alert)}
+                disabled={!bulkEligible}
+                className="inline-flex items-center justify-center rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {selected ? 'Unselect' : 'Select'}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => onAcknowledge(alert)}
+              disabled={ackPending}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <CheckCircle2 className="h-4 w-4" />
+              {ackPending ? 'Acknowledging...' : 'Acknowledge'}
+            </button>
+          </div>
         </div>
       </div>
     </article>
@@ -339,15 +411,25 @@ export function EventsAlerts() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSeverity, setSelectedSeverity] = useState<SeverityLevel | 'all'>('all');
   const [selectedType, setSelectedType] = useState<EventType | 'all'>('all');
+  const [selectedDecision, setSelectedDecision] = useState<DecisionFilter>('all');
+  const [selectedReview, setSelectedReview] = useState<ReviewFilter>('all');
   const [selectedTimeRange, setSelectedTimeRange] = useState<TimeRange>(DEFAULT_TIME_RANGE);
   const [historyFiltersOpen, setHistoryFiltersOpen] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<Alert | null>(null);
+  const [cameraFeeds, setCameraFeeds] = useState<CameraFeed[]>([]);
   const [snapshotLoadFailed, setSnapshotLoadFailed] = useState(false);
   const [ackPendingId, setAckPendingId] = useState<string | null>(null);
   const [feedbackPendingId, setFeedbackPendingId] = useState<string | null>(null);
   const [feedbackProfiles, setFeedbackProfiles] = useState<AuthorizedProfile[]>([]);
   const [feedbackProfileName, setFeedbackProfileName] = useState('');
   const [feedbackMessage, setFeedbackMessage] = useState('');
+  const [groupTrainMessage, setGroupTrainMessage] = useState('');
+  const [groupTraining, setGroupTraining] = useState(false);
+  const [bulkFalseAlarmMode, setBulkFalseAlarmMode] = useState(false);
+  const [bulkFalseAlarmIds, setBulkFalseAlarmIds] = useState<Set<string>>(() => new Set());
+  const [bulkFeedbackProfileName, setBulkFeedbackProfileName] = useState('');
+  const [bulkFeedbackPending, setBulkFeedbackPending] = useState(false);
+  const [bulkFeedbackMessage, setBulkFeedbackMessage] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
 
@@ -387,7 +469,10 @@ export function EventsAlerts() {
     const load = async () => {
       controller = new AbortController();
       try {
-        const payload = await fetchLiveEvents(500, controller.signal);
+        const [payload, nodesPayload] = await Promise.all([
+          fetchLiveEvents(500, controller.signal),
+          fetchLiveNodes(controller.signal),
+        ]);
         if (cancelled) {
           return;
         }
@@ -396,6 +481,7 @@ export function EventsAlerts() {
             (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
           ),
         );
+        setCameraFeeds(nodesPayload.cameraFeeds);
         setLoadError('');
       } catch (error) {
         if (cancelled) {
@@ -436,7 +522,11 @@ export function EventsAlerts() {
     let cancelled = false;
     setFeedbackProfiles([]);
     setFeedbackProfileName('');
-    if (!selectedEvent || !canSubmitSnapshotFeedback(selectedEvent) || !isIntruderFeedbackEvent(selectedEvent)) {
+    setBulkFeedbackProfileName('');
+    if (
+      !bulkFalseAlarmMode &&
+      (!selectedEvent || !canSubmitSnapshotFeedback(selectedEvent) || !isIntruderFeedbackEvent(selectedEvent))
+    ) {
       return;
     }
 
@@ -447,6 +537,7 @@ export function EventsAlerts() {
         }
         setFeedbackProfiles(payload.authorizedProfiles);
         setFeedbackProfileName(payload.authorizedProfiles[0]?.label || '');
+        setBulkFeedbackProfileName(payload.authorizedProfiles[0]?.label || '');
       })
       .catch((error) => {
         if (cancelled) {
@@ -459,7 +550,7 @@ export function EventsAlerts() {
     return () => {
       cancelled = true;
     };
-  }, [selectedEvent]);
+  }, [selectedEvent, bulkFalseAlarmMode]);
 
   const activeAlerts = useMemo(
     () =>
@@ -497,17 +588,21 @@ export function EventsAlerts() {
           event.sourceNode.toLowerCase().includes(keyword);
         const matchesSeverity = selectedSeverity === 'all' || event.severity === selectedSeverity;
         const matchesType = selectedType === 'all' || event.type === selectedType;
+        const matchesDecision = selectedDecision === 'all' || event.decisionState === selectedDecision;
+        const matchesReview = selectedReview === 'all' || event.reviewStatus === selectedReview;
         const eventTimeMs = new Date(event.timestamp).getTime();
         const matchesTime = days == null || (Number.isFinite(eventTimeMs) && eventTimeMs >= cutoffMs);
-        return matchesSearch && matchesSeverity && matchesType && matchesTime;
+        return matchesSearch && matchesSeverity && matchesType && matchesDecision && matchesReview && matchesTime;
       });
     },
-    [events, searchQuery, selectedSeverity, selectedType, selectedTimeRange, activeAlertIds, activeSnapshotPaths],
+    [events, searchQuery, selectedSeverity, selectedType, selectedDecision, selectedReview, selectedTimeRange, activeAlertIds, activeSnapshotPaths],
   );
   const hasActiveFilters =
     searchQuery.trim().length > 0 ||
     selectedSeverity !== 'all' ||
     selectedType !== 'all' ||
+    selectedDecision !== 'all' ||
+    selectedReview !== 'all' ||
     selectedTimeRange !== DEFAULT_TIME_RANGE;
 
   const snapshotGalleryEvents = useMemo(() => {
@@ -533,12 +628,141 @@ export function EventsAlerts() {
     return Array.from(bySnapshotPath.values());
   }, [filteredEvents]);
 
+  const bulkEligibleEvents = useMemo(() => {
+    const byId = new Map<string, Alert>();
+    for (const event of [...activeAlerts, ...snapshotGalleryEvents]) {
+      if (canBulkFalseAlarm(event)) {
+        byId.set(event.id, event);
+      }
+    }
+    return Array.from(byId.values());
+  }, [activeAlerts, snapshotGalleryEvents]);
+
+  const bulkEligibleIds = useMemo(
+    () => new Set(bulkEligibleEvents.map((event) => event.id)),
+    [bulkEligibleEvents],
+  );
+
+  const bulkSelectedEvents = useMemo(
+    () => bulkEligibleEvents.filter((event) => bulkFalseAlarmIds.has(event.id)),
+    [bulkEligibleEvents, bulkFalseAlarmIds],
+  );
+
+  useEffect(() => {
+    setBulkFalseAlarmIds((prev) => {
+      const next = new Set(Array.from(prev).filter((id) => bulkEligibleIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [bulkEligibleIds]);
+
   const visibleItemCount = snapshotGalleryEvents.length;
+  const selectedFalseAlarmSnapshotUnavailable = Boolean(
+    selectedEvent && (!selectedEvent.snapshotPath || snapshotLoadFailed),
+  );
+
+  const toggleBulkFalseAlarmSelection = (event: Alert) => {
+    if (!canBulkFalseAlarm(event)) {
+      return;
+    }
+    setBulkFeedbackMessage('');
+    setBulkFalseAlarmIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(event.id)) {
+        next.delete(event.id);
+      } else {
+        next.add(event.id);
+      }
+      return next;
+    });
+  };
+
+  const handleBulkSnapshotFeedback = async () => {
+    if (bulkFeedbackPending) {
+      return;
+    }
+    if (bulkSelectedEvents.length === 0) {
+      setBulkFeedbackMessage('Select at least one eligible intruder alert first.');
+      return;
+    }
+
+    const faceName = bulkFeedbackProfileName.trim();
+    if (!faceName) {
+      setBulkFeedbackMessage('Select the authorized person before marking selected intruder alerts as false alarms.');
+      return;
+    }
+
+    setBulkFeedbackPending(true);
+    setBulkFeedbackMessage(`Saving ${bulkSelectedEvents.length} false alarm${bulkSelectedEvents.length === 1 ? '' : 's'} for group retraining...`);
+    let savedCount = 0;
+    let failedMessage = '';
+    const savedIds = new Set<string>();
+
+    for (const event of bulkSelectedEvents) {
+      const alertId = feedbackAlertId(event);
+      if (alertId === null) {
+        failedMessage = 'One selected item does not have a linked alert record.';
+        break;
+      }
+
+      try {
+        const response = await submitSnapshotFeedback(alertId, {
+          verdict: 'false_positive',
+          faceName,
+        });
+        savedCount += 1;
+        savedIds.add(event.id);
+        setEvents((prev) =>
+          prev.map((item) => {
+            if (item.id === response.alert.id) {
+              return response.alert;
+            }
+            if (item.id === event.id || feedbackAlertId(item) === alertId) {
+              return {
+                ...item,
+                reviewStatus: response.alert.reviewStatus,
+                reviewNote: response.alert.reviewNote,
+                reviewedBy: response.alert.reviewedBy,
+                reviewedTs: response.alert.reviewedTs,
+              };
+            }
+            return item;
+          }),
+        );
+      } catch (error) {
+        failedMessage = error instanceof Error ? error.message : 'Unable to submit selected false alarms.';
+        break;
+      }
+    }
+
+    setBulkFalseAlarmIds((prev) => new Set(Array.from(prev).filter((id) => !savedIds.has(id))));
+    setBulkFeedbackPending(false);
+    if (failedMessage) {
+      setBulkFeedbackMessage(
+        savedCount > 0
+          ? `${savedCount} false alarm${savedCount === 1 ? '' : 's'} saved before an error: ${failedMessage}`
+          : failedMessage,
+      );
+      return;
+    }
+    setBulkFeedbackMessage(
+      `${savedCount} false alarm${savedCount === 1 ? '' : 's'} saved for ${faceName}. Run Group Retrain Face Model after reviewing your false alarms.`,
+    );
+  };
 
   const handleSnapshotFeedback = async (event: Alert, verdict: 'confirmed' | 'false_positive') => {
     const alertId = feedbackAlertId(event);
     if (alertId === null) {
       setFeedbackMessage('Snapshot feedback requires a linked alert record.');
+      return;
+    }
+
+    if (verdict === 'false_positive' && !event.snapshotPath) {
+      setFeedbackMessage('False-alarm training requires an alert snapshot, but this alert has no snapshot attached.');
+      return;
+    }
+
+    if (verdict === 'false_positive' && selectedEvent?.id === event.id && snapshotLoadFailed) {
+      setFeedbackMessage('False-alarm training requires a snapshot file that can still be loaded.');
       return;
     }
 
@@ -583,7 +807,9 @@ export function EventsAlerts() {
       if (verdict === 'confirmed') {
         setFeedbackMessage('Snapshot confirmed.');
       } else if (isIntruderFeedbackEvent(event)) {
-        setFeedbackMessage(`False alarm saved and face model retrained. ${response.trainMessage}`.trim());
+        setFeedbackMessage(
+          `False alarm saved for group retraining. ${response.trainMessage || 'Run Group Retrain Face Model after reviewing your false alarms.'}`.trim(),
+        );
       } else {
         setFeedbackMessage('False alarm saved as a fire hard-negative sample.');
       }
@@ -592,6 +818,23 @@ export function EventsAlerts() {
       setFeedbackMessage(message);
     } finally {
       setFeedbackPendingId(null);
+    }
+  };
+
+  const handleGroupRetrain = async () => {
+    if (groupTraining) {
+      return;
+    }
+    setGroupTraining(true);
+    setGroupTrainMessage('Training face model from all current samples...');
+    try {
+      const result = await trainFaceModel();
+      setGroupTrainMessage(result.ok ? `Group retrain complete. ${result.message}` : `Group retrain failed. ${result.message}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to retrain face model.';
+      setGroupTrainMessage(message);
+    } finally {
+      setGroupTraining(false);
     }
   };
 
@@ -604,6 +847,8 @@ export function EventsAlerts() {
     setSearchQuery('');
     setSelectedSeverity('all');
     setSelectedType('all');
+    setSelectedDecision('all');
+    setSelectedReview('all');
     setSelectedTimeRange(DEFAULT_TIME_RANGE);
   };
 
@@ -635,6 +880,135 @@ export function EventsAlerts() {
         </div>
       )}
 
+      <section className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+          <div className="space-y-1">
+            <h3 className="text-base font-semibold text-gray-900">Intruder False Alarm Review</h3>
+            <p className="text-sm text-gray-700">
+              Select multiple intruder snapshots, mark them as false alarms for one authorized person, then retrain once as a group.
+            </p>
+            <p className="text-xs text-gray-600">
+              {bulkSelectedEvents.length} selected of {bulkEligibleEvents.length} eligible intruder snapshot{bulkEligibleEvents.length === 1 ? '' : 's'}.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+            {bulkFalseAlarmMode ? (
+              <label className="flex min-w-56 flex-col gap-1 text-xs font-medium text-gray-700">
+                Authorized person
+                <select
+                  value={bulkFeedbackProfileName}
+                  onChange={(event) => setBulkFeedbackProfileName(event.target.value)}
+                  className="rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                >
+                  {feedbackProfiles.length === 0 ? (
+                    <option value="">No profiles loaded</option>
+                  ) : (
+                    feedbackProfiles.map((profile) => (
+                      <option key={profile.id || profile.label} value={profile.label}>
+                        {profile.label} ({profile.sampleCount ?? 0} samples)
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+            ) : null}
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setBulkFalseAlarmMode((mode) => !mode);
+                  setBulkFeedbackMessage('');
+                }}
+                className="inline-flex items-center justify-center rounded-lg border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-800 transition-colors hover:bg-amber-100"
+              >
+                {bulkFalseAlarmMode ? 'Stop Selecting' : 'Select Intruder Alerts'}
+              </button>
+              {bulkFalseAlarmMode ? (
+                <button
+                  type="button"
+                  onClick={() => void handleBulkSnapshotFeedback()}
+                  disabled={bulkFeedbackPending || bulkSelectedEvents.length === 0}
+                  className="inline-flex items-center justify-center rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {bulkFeedbackPending ? 'Saving...' : 'Mark Selected False Alarm'}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => void handleGroupRetrain()}
+                disabled={groupTraining}
+                className="inline-flex items-center justify-center rounded-lg border border-blue-200 bg-white px-4 py-2 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {groupTraining ? 'Retraining...' : 'Group Retrain Face Model'}
+              </button>
+            </div>
+          </div>
+        </div>
+        {bulkFeedbackMessage ? (
+          <p className="mt-3 rounded-md border border-amber-100 bg-white px-3 py-2 text-sm text-amber-800">
+            {bulkFeedbackMessage}
+          </p>
+        ) : null}
+        {groupTrainMessage ? (
+          <p className="mt-3 rounded-md border border-green-100 bg-white px-3 py-2 text-sm text-green-800">
+            {groupTrainMessage}
+          </p>
+        ) : null}
+      </section>
+
+      <section className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h3 className="text-base md:text-lg font-semibold text-gray-900">Camera Diagnostics</h3>
+            <p className="text-sm text-gray-600">Snapshot readiness and live frame health for evidence capture.</p>
+          </div>
+          <span className="text-xs text-gray-500">
+            {cameraFeeds.filter(cameraSnapshotReady).length}/{cameraFeeds.length} snapshot-ready
+          </span>
+        </div>
+
+        {cameraFeeds.length > 0 ? (
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {cameraFeeds.map((feed) => {
+              const ready = cameraSnapshotReady(feed);
+              return (
+                <div key={feed.nodeId} className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-900">{feed.location || feed.nodeId}</p>
+                      <p className="text-xs font-mono text-gray-500">{feed.nodeId}</p>
+                    </div>
+                    <span
+                      className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                        ready
+                          ? 'bg-green-100 text-green-700'
+                          : feed.status === 'online'
+                            ? 'bg-amber-100 text-amber-700'
+                            : 'bg-red-100 text-red-700'
+                      }`}
+                    >
+                      {ready ? 'snapshot ready' : feed.status === 'online' ? 'check frame' : 'offline'}
+                    </span>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-gray-600 sm:grid-cols-4">
+                    <span>Status: <strong className="text-gray-900">{feed.status}</strong></span>
+                    <span>Stream: <strong className="text-gray-900">{feed.streamAvailable ? 'yes' : 'no'}</strong></span>
+                    <span>Frame age: <strong className="text-gray-900">{formatFrameAge(feed.frameAgeMs)}</strong></span>
+                    <span>FPS: <strong className="text-gray-900">{feed.fps || '-'}</strong></span>
+                    <span className="sm:col-span-2">Resolution: <strong className="text-gray-900">{feed.frameWidth && feed.frameHeight ? `${feed.frameWidth}x${feed.frameHeight}` : 'unknown'}</strong></span>
+                    <span className="sm:col-span-2">Snapshot: <strong className="text-gray-900">{ready ? 'available' : 'not ready'}</strong></span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="rounded-lg bg-gray-50 p-3 text-sm text-gray-600">No camera feeds reported yet.</p>
+        )}
+      </section>
+
       <section className="space-y-3">
         <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -655,6 +1029,10 @@ export function EventsAlerts() {
                 ackPending={ackPendingId === alert.id}
                 onAcknowledge={(selectedAlert) => void handleAcknowledge(selectedAlert.id)}
                 onOpen={(selectedAlert) => setSelectedEvent(selectedAlert)}
+                selectable={bulkFalseAlarmMode}
+                selected={bulkFalseAlarmIds.has(alert.id)}
+                bulkEligible={canBulkFalseAlarm(alert)}
+                onToggleSelected={toggleBulkFalseAlarmSelection}
               />
             ))}
           </div>
@@ -715,7 +1093,7 @@ export function EventsAlerts() {
           </div>
 
           {historyFiltersOpen && (
-            <div className="mt-3 grid grid-cols-1 gap-3 border-t border-gray-100 pt-3 sm:grid-cols-2">
+            <div className="mt-3 grid grid-cols-1 gap-3 border-t border-gray-100 pt-3 sm:grid-cols-2 xl:grid-cols-4">
               <label className="flex flex-col gap-1 text-xs font-medium text-gray-600">
                 Severity
                 <select
@@ -746,6 +1124,37 @@ export function EventsAlerts() {
                   <option value="system">System</option>
                 </select>
               </label>
+
+              <label className="flex flex-col gap-1 text-xs font-medium text-gray-600">
+                Decision State
+                <select
+                  value={selectedDecision}
+                  onChange={(e) => setSelectedDecision(e.target.value as DecisionFilter)}
+                  className="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="all">All Decisions</option>
+                  <option value="unknown_face">Unknown Face</option>
+                  <option value="face_unclear">Face Unclear</option>
+                  <option value="no_face">No Face</option>
+                  <option value="authorized">Authorized</option>
+                </select>
+              </label>
+
+              <label className="flex flex-col gap-1 text-xs font-medium text-gray-600">
+                Review Status
+                <select
+                  value={selectedReview}
+                  onChange={(e) => setSelectedReview(e.target.value as ReviewFilter)}
+                  className="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="all">All Reviews</option>
+                  <option value="needs_review">Needs Review</option>
+                  <option value="confirmed">Confirmed</option>
+                  <option value="false_positive">False Positive</option>
+                  <option value="resolved">Resolved</option>
+                  <option value="archived">Archived</option>
+                </select>
+              </label>
             </div>
           )}
 
@@ -774,6 +1183,10 @@ export function EventsAlerts() {
                 event={event}
                 highlighted={false}
                 onOpen={(selected) => setSelectedEvent(selected)}
+                selectable={bulkFalseAlarmMode}
+                selected={bulkFalseAlarmIds.has(event.id)}
+                bulkEligible={canBulkFalseAlarm(event)}
+                onToggleSelected={toggleBulkFalseAlarmSelection}
               />
             ))}
           </div>
@@ -849,6 +1262,65 @@ export function EventsAlerts() {
                 </div>
               </div>
 
+              {(selectedEvent.decisionState || selectedEvent.decisionConsensus || selectedEvent.decisionSamples?.length) ? (
+                <div className="rounded-lg border border-blue-100 bg-blue-50 p-4">
+                  <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-blue-950">Decision Explanation</p>
+                      <p className="text-sm text-blue-800">
+                        Final state: <span className="font-semibold uppercase">{formatLabel(selectedEvent.decisionState || '')}</span>
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-blue-800">
+                      {selectedEvent.consensusFrames || selectedEvent.decisionSamples?.length || 0} frame{(selectedEvent.consensusFrames || selectedEvent.decisionSamples?.length || 0) === 1 ? '' : 's'} checked
+                    </span>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
+                    <div className="rounded-lg bg-white p-3">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Consensus</p>
+                      <p className="mt-1 font-medium text-gray-900">{formatLabel(selectedEvent.decisionConsensus || 'not recorded')}</p>
+                      <p className="mt-1 text-xs text-gray-600">
+                        Required agreement: {selectedEvent.consensusRequired || 2} matching frames.
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-white p-3">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Votes</p>
+                      {selectedEvent.decisionVotes && Object.keys(selectedEvent.decisionVotes).length > 0 ? (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {Object.entries(selectedEvent.decisionVotes).map(([state, count]) => (
+                            <span key={state} className="rounded-full border border-blue-100 bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-800">
+                              {formatLabel(state)}: {count}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="mt-1 text-xs text-gray-600">No vote breakdown recorded.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  {selectedEvent.decisionSamples && selectedEvent.decisionSamples.length > 0 ? (
+                    <div className="mt-3 overflow-hidden rounded-lg bg-white">
+                      <div className="grid grid-cols-4 gap-2 border-b border-blue-50 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-blue-700">
+                        <span>Frame</span>
+                        <span>Decision</span>
+                        <span>Face Status</span>
+                        <span>Confidence</span>
+                      </div>
+                      {selectedEvent.decisionSamples.map((sample) => (
+                        <div key={`${sample.frame}-${sample.decisionState}`} className="grid grid-cols-4 gap-2 px-3 py-2 text-xs text-gray-700 odd:bg-gray-50">
+                          <span>#{sample.frame || '-'}</span>
+                          <span>{formatLabel(sample.decisionState)}</span>
+                          <span>{formatLabel(sample.faceStatus)}</span>
+                          <span>{sample.confidence == null ? '-' : `${Number(sample.confidence).toFixed(1)}%`}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
               <div>
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                   <p className="text-sm font-medium text-gray-900">Camera Snapshot</p>
@@ -878,7 +1350,7 @@ export function EventsAlerts() {
                   <div className="space-y-1">
                     <p className="text-sm font-medium text-gray-900">Continuous Improvement</p>
                     <p className="text-sm text-gray-600">
-                      Confirm valid detections or mark false alarms to collect better training samples.
+                      Confirm valid detections or mark false alarms to queue better training samples, then retrain once as a group.
                     </p>
                     {selectedEvent.reviewStatus ? (
                       <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
@@ -886,6 +1358,15 @@ export function EventsAlerts() {
                       </p>
                     ) : null}
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleGroupRetrain()}
+                    disabled={groupTraining}
+                    className="inline-flex items-center justify-center rounded-lg border border-blue-200 bg-white px-4 py-2 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {groupTraining ? 'Retraining...' : 'Group Retrain Face Model'}
+                  </button>
 
                   {canSubmitSnapshotFeedback(selectedEvent) ? (
                     <div className="flex flex-col gap-2 sm:min-w-64">
@@ -922,12 +1403,17 @@ export function EventsAlerts() {
                         <button
                           type="button"
                           onClick={() => void handleSnapshotFeedback(selectedEvent, 'false_positive')}
-                          disabled={feedbackPendingId === selectedEvent.id}
+                          disabled={feedbackPendingId === selectedEvent.id || selectedFalseAlarmSnapshotUnavailable}
                           className="inline-flex items-center justify-center rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           False Alarm
                         </button>
                       </div>
+                      {selectedFalseAlarmSnapshotUnavailable ? (
+                        <p className="text-xs text-amber-700">
+                          False-alarm training needs an existing snapshot file. This alert can still be confirmed, but it cannot be used as a training sample.
+                        </p>
+                      ) : null}
                     </div>
                   ) : (
                     <p className="text-sm text-gray-500">
@@ -938,6 +1424,11 @@ export function EventsAlerts() {
                 {feedbackMessage ? (
                   <p className="mt-3 rounded-md border border-blue-100 bg-white px-3 py-2 text-sm text-blue-800">
                     {feedbackMessage}
+                  </p>
+                ) : null}
+                {groupTrainMessage ? (
+                  <p className="mt-3 rounded-md border border-green-100 bg-white px-3 py-2 text-sm text-green-800">
+                    {groupTrainMessage}
                   </p>
                 ) : null}
               </div>

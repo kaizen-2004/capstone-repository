@@ -432,7 +432,6 @@ export function Settings() {
   const [trainingMessage, setTrainingMessage] = useState('');
   const [trainingError, setTrainingError] = useState('');
   const [trainingCameraSource, setTrainingCameraSource] = useState<'device' | 'system'>('device');
-  const [showSystemCameraFallback, setShowSystemCameraFallback] = useState(false);
   const [trainingSystemCameraNode, setTrainingSystemCameraNode] = useState<'cam_indoor' | 'cam_door'>('cam_indoor');
   const [systemPreviewTick, setSystemPreviewTick] = useState(() => Date.now());
   const [isCameraStarting, setIsCameraStarting] = useState(false);
@@ -510,7 +509,6 @@ export function Settings() {
       return true;
     }
     if (!navigator.mediaDevices?.getUserMedia) {
-      setShowSystemCameraFallback(true);
       setTrainingError(
         'Device camera is unavailable in this browser context. Open the dashboard in your phone browser over HTTPS. System Camera Feed fallback is available.',
       );
@@ -542,7 +540,6 @@ export function Settings() {
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Camera access denied or unavailable.';
-      setShowSystemCameraFallback(true);
       setTrainingError(
         `Unable to start device camera: ${message}. Try browser mode over HTTPS. System Camera Feed fallback is available.`,
       );
@@ -890,7 +887,6 @@ export function Settings() {
     setTrainingMessage('');
     setTrainingError('');
     setTrainingCameraSource('device');
-    setShowSystemCameraFallback(false);
     setTrainingSystemCameraNode('cam_indoor');
     setSystemPreviewTick(Date.now());
     setCapturedSamples(0);
@@ -1470,25 +1466,23 @@ export function Settings() {
               >
                 Device Camera
               </button>
-              {showSystemCameraFallback && (
-                <button
-                  onClick={() => {
-                    setTrainingCameraSource('system');
-                    setTrainingError('');
-                    setTrainingMessage('Using System Camera Feed fallback mode.');
-                  }}
-                  className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
-                    trainingCameraSource === 'system'
-                      ? 'bg-white text-blue-700 border border-blue-200'
-                      : 'text-gray-600 hover:text-gray-900'
-                  }`}
-                >
-                  System Camera Feed
-                </button>
-              )}
+              <button
+                onClick={() => {
+                  setTrainingCameraSource('system');
+                  setTrainingError('');
+                  setTrainingMessage('Using selected backend camera feed for guided capture.');
+                }}
+                className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
+                  trainingCameraSource === 'system'
+                    ? 'bg-white text-blue-700 border border-blue-200'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                System Camera Feed
+              </button>
             </div>
             <div className="border-2 border-dashed border-gray-300 rounded-lg p-4">
-              {trainingCameraSource === 'system' && showSystemCameraFallback ? (
+              {trainingCameraSource === 'system' ? (
                 <div className="mb-3 flex items-center justify-center gap-2">
                   <label className="text-xs text-gray-700">Feed</label>
                   <select
@@ -1571,7 +1565,7 @@ export function Settings() {
               </div>
               <p className="text-xs text-gray-600 text-center mt-3">
                 {trainingCameraSource === 'system'
-                  ? 'Fallback mode: using backend camera feed when device camera is unavailable.'
+                  ? 'Using the selected backend camera feed for guided auto-capture.'
                   : 'Device camera is the default for guided auto-capture.'}
               </p>
             </div>

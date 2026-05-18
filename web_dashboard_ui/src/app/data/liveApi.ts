@@ -4,6 +4,7 @@ import type {
   CameraFeed,
   DailyStats,
   DetectionPipeline,
+  DecisionSample,
   EventType,
   FaceOverlay,
   RuntimeSetting,
@@ -304,6 +305,27 @@ function mapFaceOverlay(raw: Json): FaceOverlay | null {
   };
 }
 
+function mapDecisionSample(raw: Json): DecisionSample {
+  return {
+    frame: toInt(raw.frame, 0),
+    decisionState: String(raw.decision_state ?? raw.decisionState ?? ''),
+    faceStatus: String(raw.face_status ?? raw.faceStatus ?? ''),
+    result: String(raw.result ?? ''),
+    confidence: raw.confidence == null ? undefined : toFloat(raw.confidence),
+  };
+}
+
+function mapDecisionVotes(value: unknown): Record<string, number> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const votes: Record<string, number> = {};
+  for (const [key, rawCount] of Object.entries(value as Record<string, unknown>)) {
+    votes[key] = toInt(rawCount);
+  }
+  return Object.keys(votes).length > 0 ? votes : undefined;
+}
+
 function mapAlert(raw: Json, kind: 'alert' | 'event' = 'event'): Alert {
   const sourceNode = String(raw.source_node ?? raw.sourceNode ?? 'unknown');
   const location = String(raw.location ?? 'Door Entrance Area');
@@ -322,6 +344,14 @@ function mapAlert(raw: Json, kind: 'alert' | 'event' = 'event'): Alert {
   const faceOverlays = faceOverlaysRaw
     .map((item) => mapFaceOverlay((item as Json) || {}))
     .filter((item): item is FaceOverlay => item !== null);
+  const decisionSamplesRaw = Array.isArray(raw.decision_samples)
+    ? raw.decision_samples
+    : (Array.isArray(raw.decisionSamples) ? raw.decisionSamples : []);
+  const decisionSamples = decisionSamplesRaw.map((item) => mapDecisionSample((item as Json) || {}));
+  const decisionState = String(raw.decision_state ?? raw.decisionState ?? '').trim();
+  const decisionConsensus = String(raw.decision_consensus ?? raw.decisionConsensus ?? '').trim();
+  const consensusFrames = toInt(raw.consensus_frames ?? raw.consensusFrames, 0);
+  const consensusRequired = toInt(raw.consensus_required ?? raw.consensusRequired, 0);
 
   const rawId = String(raw.id ?? '').trim();
   const normalizedId = rawId
@@ -354,6 +384,12 @@ function mapAlert(raw: Json, kind: 'alert' | 'event' = 'event'): Alert {
     fusionEvidence,
     snapshotPath,
     faceOverlays: faceOverlays.length > 0 ? faceOverlays : undefined,
+    decisionState: decisionState || undefined,
+    decisionVotes: mapDecisionVotes(raw.decision_votes ?? raw.decisionVotes),
+    decisionConsensus: decisionConsensus || undefined,
+    decisionSamples: decisionSamples.length > 0 ? decisionSamples : undefined,
+    consensusFrames: consensusFrames > 0 ? consensusFrames : undefined,
+    consensusRequired: consensusRequired > 0 ? consensusRequired : undefined,
   };
 }
 

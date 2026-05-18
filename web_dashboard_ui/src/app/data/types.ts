@@ -12,6 +12,16 @@ export interface FaceOverlay {
   label: string;
 }
 
+export type DecisionState = 'authorized' | 'unknown_face' | 'face_unclear' | 'no_face' | string;
+
+export interface DecisionSample {
+  frame: number;
+  decisionState: DecisionState;
+  faceStatus: string;
+  result: string;
+  confidence?: number;
+}
+
 export interface Alert {
   id: string;
   eventId?: number;
@@ -34,6 +44,12 @@ export interface Alert {
   fusionEvidence?: string[];
   snapshotPath?: string;
   faceOverlays?: FaceOverlay[];
+  decisionState?: DecisionState;
+  decisionVotes?: Record<string, number>;
+  decisionConsensus?: string;
+  decisionSamples?: DecisionSample[];
+  consensusFrames?: number;
+  consensusRequired?: number;
 }
 
 export interface KPI {
