@@ -7,6 +7,8 @@ import '../models/alert_item.dart';
 import '../models/snapshot_item.dart';
 import '../services/backend_service.dart';
 import '../widgets/snapshot_image_with_overlay.dart';
+import 'events_screen.dart';
+import 'snapshots_screen.dart';
 
 class AlertsScreen extends StatefulWidget {
   const AlertsScreen({
@@ -36,6 +38,8 @@ class _AlertsScreenState extends State<AlertsScreen> {
   String? _busyAlertId;
   DateTime? _lastUpdated;
   bool _refreshing = false;
+  bool _lastRefreshFailed = false;
+  int _consecutiveRefreshFailures = 0;
   bool _historyFiltersOpen = false;
   String _historySearchQuery = '';
   String _selectedSeverity = 'all';
@@ -100,13 +104,25 @@ class _AlertsScreenState extends State<AlertsScreen> {
           _loading = false;
           _error = null;
           _lastUpdated = DateTime.now();
+          _lastRefreshFailed = false;
+          _consecutiveRefreshFailures = 0;
         });
       }
     } catch (error) {
-      if (mounted && !silent) {
+      if (!mounted) {
+        return;
+      }
+      if (silent) {
+        setState(() {
+          _lastRefreshFailed = true;
+          _consecutiveRefreshFailures += 1;
+        });
+      } else {
         setState(() {
           _loading = false;
           _error = '$error';
+          _lastRefreshFailed = true;
+          _consecutiveRefreshFailures += 1;
         });
       }
     } finally {
@@ -132,6 +148,38 @@ class _AlertsScreenState extends State<AlertsScreen> {
         setState(() => _busyAlertId = null);
       }
     }
+  }
+
+  void _openSnapshots() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SnapshotsScreen(
+          backendService: widget.backendService,
+          settingsStore: widget.settingsStore,
+          initialDate: _selectedDate,
+          onAlertResolved: () {
+            unawaited(_loadAlerts(silent: true));
+            widget.onAlertAcknowledged?.call();
+          },
+        ),
+      ),
+    );
+  }
+
+  void _openEvents() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => EventsScreen(
+          backendService: widget.backendService,
+          settingsStore: widget.settingsStore,
+          initialDate: _selectedDate,
+          onAlertResolved: () {
+            unawaited(_loadAlerts(silent: true));
+            widget.onAlertAcknowledged?.call();
+          },
+        ),
+      ),
+    );
   }
 
   String _absoluteSnapshotUrl(String snapshotPath) {
@@ -206,6 +254,59 @@ class _AlertsScreenState extends State<AlertsScreen> {
     await _loadAlerts();
   }
 
+  Widget _buildQuickActions() {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: cs.primary.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: cs.primary.withValues(alpha: 0.20)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.dashboard_customize_outlined,
+                  size: 17, color: cs.primary),
+              const SizedBox(width: 8),
+              Text(
+                'Review tools',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      color: cs.primary,
+                      fontWeight: FontWeight.w800,
+                    ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Jump into detailed history when you need more actions than the combined Alerts view.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilledButton.tonalIcon(
+                onPressed: _openSnapshots,
+                icon: const Icon(Icons.photo_library_outlined, size: 18),
+                label: const Text('Review Snapshots'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _openEvents,
+                icon: const Icon(Icons.history_rounded, size: 18),
+                label: const Text('Event History'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildHistoryControls() {
     final cs = Theme.of(context).colorScheme;
     return Container(
@@ -257,6 +358,22 @@ class _AlertsScreenState extends State<AlertsScreen> {
                 ),
             ],
           ),
+          if (_activeHistoryFilterLabels.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: _activeHistoryFilterLabels
+                  .map(
+                    (label) => Chip(
+                      visualDensity: VisualDensity.compact,
+                      label: Text(label),
+                      onDeleted: _clearHistoryFilters,
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
           if (_historyFiltersOpen) ...[
             const SizedBox(height: 10),
             Column(
@@ -341,14 +458,65 @@ class _AlertsScreenState extends State<AlertsScreen> {
         '${local.second.toString().padLeft(2, '0')}';
   }
 
+  List<String> get _activeHistoryFilterLabels {
+    final labels = <String>[];
+    final query = _historySearchQuery.trim();
+    if (query.isNotEmpty) {
+      labels.add('Search: $query');
+    }
+    if (_selectedDate != null) {
+      labels.add('Date: ${_calendarLabel(_selectedDate!)}');
+    }
+    if (_selectedSeverity != 'all') {
+      labels.add('Severity: $_selectedSeverity');
+    }
+    if (_selectedType != 'all') {
+      labels.add('Type: $_selectedType');
+    }
+    return labels;
+  }
+
   Widget _buildAutoRefreshStatus() {
-    final suffix =
-        _lastUpdated == null ? '' : ' • updated ${_formatClock(_lastUpdated!)}';
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
-      child: Text(
-        'Auto-refreshing every $_pollingSeconds sec$suffix',
-        style: Theme.of(context).textTheme.bodySmall,
+    final cs = Theme.of(context).colorScheme;
+    final statusColor =
+        _lastRefreshFailed ? const Color(0xFFFFA726) : cs.primary;
+    final updated = _lastUpdated == null
+        ? 'not updated yet'
+        : 'updated ${_formatClock(_lastUpdated!)}';
+    final label = _lastRefreshFailed
+        ? 'Refresh delayed ($_consecutiveRefreshFailures failed) • showing last data • $updated'
+        : 'Auto-refreshing every $_pollingSeconds sec • $updated';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: statusColor.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: statusColor.withValues(alpha: 0.24)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            _lastRefreshFailed ? Icons.cloud_off_outlined : Icons.sync_rounded,
+            size: 17,
+            color: statusColor,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: statusColor,
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+          ),
+          if (_lastRefreshFailed)
+            TextButton(
+              onPressed: () => _loadAlerts(),
+              child: const Text('Retry'),
+            ),
+        ],
       ),
     );
   }
@@ -454,6 +622,8 @@ class _AlertsScreenState extends State<AlertsScreen> {
           padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
           children: [
             _buildAutoRefreshStatus(),
+            const SizedBox(height: 12),
+            _buildQuickActions(),
             const SizedBox(height: 96),
             const _EmptyState(),
           ],
@@ -467,7 +637,9 @@ class _AlertsScreenState extends State<AlertsScreen> {
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
         children: [
           _buildAutoRefreshStatus(),
-          const SizedBox(height: 8),
+          const SizedBox(height: 12),
+          _buildQuickActions(),
+          const SizedBox(height: 18),
           _SectionLabel(
               label: 'Active Alerts', count: active.length, isActive: true),
           const SizedBox(height: 8),

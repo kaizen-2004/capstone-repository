@@ -33,10 +33,15 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
   List<SnapshotItem> _snapshots = <SnapshotItem>[];
   String? _busySnapshotId;
   DateTime? _selectedDate;
+  late final TextEditingController _searchController;
+  String _searchQuery = '';
+  String _selectedType = 'all';
+  String _selectedReview = 'all';
 
   @override
   void initState() {
     super.initState();
+    _searchController = TextEditingController();
     if (widget.initialDate != null) {
       _selectedDate = DateTime(
         widget.initialDate!.year,
@@ -45,6 +50,12 @@ class _SnapshotsScreenState extends State<SnapshotsScreen> {
       );
     }
     _loadSnapshots();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadSnapshots() async {

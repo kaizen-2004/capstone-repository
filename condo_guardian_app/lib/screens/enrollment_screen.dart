@@ -22,6 +22,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
   final _nameController = TextEditingController();
   final _userCodeController = TextEditingController();
   final List<XFile> _images = [];
+  final Set<String> _failedImagePaths = <String>{};
   final _random = Random();
   List<FaceProfile> _existingProfiles = const [];
   String? _selectedProfileId;
@@ -82,7 +83,10 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
     }
   }
 
-  void _removeImage(int index) => setState(() => _images.removeAt(index));
+  void _removeImage(int index) => setState(() {
+        _failedImagePaths.remove(_images[index].path);
+        _images.removeAt(index);
+      });
 
   String _generateUserCode() {
     final now = DateTime.now();
@@ -116,9 +120,19 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
         normalized.contains('no face detected');
   }
 
-  String _friendlyEnrollmentMessage(String message) {
+  bool _isFaceUnclearError(String message) {
+    final normalized = message.toLowerCase();
+    return normalized.contains('face_unclear') ||
+        normalized.contains('face unclear');
+  }
+
+  String _friendlyEnrollmentMessage(String message, {int? sampleIndex}) {
+    final prefix = sampleIndex == null ? '' : 'Sample #$sampleIndex failed: ';
     if (_isNoFaceDetectedError(message)) {
-      return 'No clear face found in one photo. Keep your face centered and well-lit, then try again.';
+      return '${prefix}No clear face found. Remove or retake this sample, keep your face centered and well-lit, then try again.';
+    }
+    if (_isFaceUnclearError(message)) {
+      return '${prefix}Face is unclear. Remove or retake this sample with better lighting and less motion blur.';
     }
     if (_isMinimumSamplesError(message)) {
       final remainingMatch =
@@ -129,7 +143,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
       }
       return 'Upload succeeded. More samples are needed before training can complete.';
     }
-    return message;
+    return sampleIndex == null ? message : '$prefix$message';
   }
 
   double get _uploadProgressFraction {
@@ -235,6 +249,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
     setState(() {
       _uploading = true;
       _result = null;
+      _failedImagePaths.clear();
       _uploadCompletedSteps = 0;
       _uploadTotalSteps = _images.length + 2;
       _uploadProgressLabel = 'Preparing enrollment...';
@@ -258,11 +273,27 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
           totalSteps: totalSteps,
           label: 'Uploading sample ${i + 1} of ${_images.length}...',
         );
-        final uploadStatus = await widget.backendService.uploadEnrollmentImage(
-          userCode: userCode,
-          filePath: _images[i].path,
-          sampleIndex: i + 1,
-        );
+        final sampleIndex = i + 1;
+        final imagePath = _images[i].path;
+        late final EnrollmentStatus uploadStatus;
+        try {
+          uploadStatus = await widget.backendService.uploadEnrollmentImage(
+            userCode: userCode,
+            filePath: imagePath,
+            sampleIndex: sampleIndex,
+          );
+        } on ApiException catch (error) {
+          if (mounted) {
+            setState(() {
+              _failedImagePaths.add(imagePath);
+              _uploadProgressLabel = 'Sample #$sampleIndex failed.';
+            });
+          }
+          throw ApiException(
+            _friendlyEnrollmentMessage(error.message, sampleIndex: sampleIndex),
+            statusCode: error.statusCode,
+          );
+        }
         if (mounted) {
           setState(() {
             _enrollmentStatus = uploadStatus;
@@ -537,6 +568,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                         index: entry.key,
                         file: entry.value,
                         size: itemSize,
+                        failed: _failedImagePaths.contains(entry.value.path),
                         onRemove: () => _removeImage(entry.key),
                       ),
                     ),
@@ -702,12 +734,14 @@ class _ImageThumb extends StatelessWidget {
     required this.index,
     required this.file,
     required this.size,
+    required this.failed,
     required this.onRemove,
   });
 
   final int index;
   final XFile file;
   final double size;
+  final bool failed;
   final VoidCallback onRemove;
 
   @override
@@ -718,15 +752,43 @@ class _ImageThumb extends StatelessWidget {
       child: Stack(
         clipBehavior: Clip.none,
         children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: Image.file(
-              File(file.path),
-              width: size,
-              height: size,
-              fit: BoxFit.cover,
+          Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: failed
+                  ? Border.all(color: Theme.of(context).colorScheme.error, width: 3)
+                  : null,
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.file(
+                File(file.path),
+                width: size,
+                height: size,
+                fit: BoxFit.cover,
+              ),
             ),
           ),
+          if (failed)
+            Positioned(
+              left: 5,
+              top: 5,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.error,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Text(
+                  'Failed',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
           Positioned(
             left: 5,
             bottom: 5,
