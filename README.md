@@ -1,6 +1,6 @@
 # IntruFlare - Real-Time Intruder and Fire Monitoring System
 
-> An intelligent home security system that detects intruders and fires in real time, identifies faces, answers questions about system status, and sends instant alerts -- all running locally on a single Windows PC with no cloud dependency.
+> A local-first capstone project for intruder detection (InsightFace ArcFace recognition) and fire detection (smoke sensor + YOLOv8 flame fusion) with alerts, snapshots, history, health checks, and daily summaries. Demo scope: Living Room + Door Entrance. Remotely accessible via Tailscale with sticky Telegram bot notifications.
 
 ---
 
