@@ -1,137 +1,225 @@
-# Real-Time Intruder and Fire Monitoring System (Windows Local-First)
+# IntruFlare - Real-Time Intruder and Fire Monitoring System
 
-## Project Title
+> An intelligent home security system that detects intruders and fires in real time, identifies faces, answers questions about system status, and sends instant alerts -- all running locally on a single Windows PC with no cloud dependency.
 
-**Real-Time Intruder and Fire Monitoring Alert System Using IoT-Based Sensor Fusion and Event-Driven Facial Recognition with Night-Vision Cameras**
+---
 
-## Active Architecture
+## The Problem
 
-This repository now follows a **Windows 10 local-first architecture**:
+Residential safety systems are often fragmented. Smoke alarms, motion sensors, cameras, and door locks usually operate separately, which delays response and makes incidents harder to verify. Single-sensor systems produce false alarms with no supporting evidence.
 
-- **Windows runtime:** local backend process + browser dashboard
-- **Frontend:** React dashboard (`web_dashboard_ui/`)
-- **Backend:** FastAPI (`backend/`)
-- **Sensors:** ESP32-C3 nodes over **HTTP**
-- **Cameras:** 2 RTSP IP night-vision streams (`cam_indoor`, `cam_door`)
-- **Storage:** local SQLite + file snapshots/logs
+**IntruFlare solves this** by combining IoT sensors, night-vision cameras, and artificial intelligence into one unified monitoring system that detects threats, verifies them with visual evidence, and alerts the user immediately.
 
-Core processing is event-driven:
+## How It Works
 
-- Continuous lightweight monitoring for heartbeat/health and trigger detection.
-- Heavy analysis (face matching, fire visual confirmation) only on relevant triggers.
+```
+  PHYSICAL SENSORS                  CAMERAS
+  ┌──────────────────┐         ┌──────────────────┐
+  │ Smoke sensors (x2)│         │ Indoor night-    │
+  │ Door tamper sensor│         │ vision camera    │
+  │ (IMU gyroscope)   │         │ Door camera      │
+  └────────┬─────────┘         └────────┬─────────┘
+           │                            │
+           └────────────┬───────────────┘
+                        ▼
+           ┌────────────────────────┐
+           │   WINDOWS 10 PC        │
+           │   (local processing)   │
+           │                        │
+           │   AI verifies:         │
+           │   • Is this really     │
+           │     fire or just smoke?│
+           │   • Is this person     │
+           │     a resident or a    │
+           │     stranger?          │
+           │                        │
+           │   Event engine decides │
+           │   what alerts to send  │
+           └───────────┬────────────┘
+                       │
+           ┌───────────┼────────────┐
+           ▼           ▼            ▼
+       Web Dashboard  Mobile App  Telegram
+       (browser)    (phone/tablet)  Bot
+```
 
-## Core Features Implemented (Phase 1)
+---
 
-- Local backend startup and API orchestration.
-- Sensor registration, heartbeat, and event ingest over HTTP.
-- RTSP camera health monitoring and frame capture.
-- Smoke-first fire pipeline with camera confirmation.
-- Entry/tamper intruder pipeline with selective face recognition.
-- Alert creation, acknowledgment, and local persistence.
-- Login-protected dashboard (single admin account).
-- Face enrollment via image upload and model training.
-- Retention cleanup background job.
-- Offline-capable local operation.
+## Web Dashboard
 
-## Mobile App / Remote Enhancements (Phase 2)
+The **React-based web dashboard** is the main monitoring hub, accessible from any browser on the local network.
 
-- Mobile remote interface route is available at `/dashboard/remote/mobile` and admin-toggle controlled in Settings.
-- PWA install assets are included (`manifest.webmanifest`, service worker, app icon).
-- App notification APIs are implemented:
-  - `GET /api/mobile/bootstrap`
-  - `POST /api/mobile/device/register`
-  - `POST /api/mobile/device/unregister`
-  - `GET /api/mobile/notifications/preferences`
-  - `POST /api/mobile/notifications/preferences`
-- Alert dispatch now attempts mobile push delivery first and keeps Telegram fallback logging path.
+| Page | What It Does |
+|------|-------------|
+| **Dashboard** | KPI cards showing system health, active alerts, online nodes, and recent activity at a glance |
+| **Live Monitoring** | Real-time camera feeds with live status indicators for each sensor node |
+| **Events & Alerts** | Chronological event log with snapshot evidence, severity levels, and one-click acknowledgment |
+| **Sensors & Nodes** | Status of every ESP32 sensor board and camera -- online/offline, last heartbeat, location |
+| **Statistics** | Charts and daily trends for incident frequency, response times, and node uptime |
+| **Settings** | Runtime configuration, face enrollment tools, integration setup (Telegram, Tailscale, Web Push) |
 
-## Web-Only Remote Access (Phase 3)
+**Key capabilities:**
+- Login-protected single-admin access
+- Live camera snapshot overlays with face bounding boxes
+- Alert acknowledgment workflow with evidence review
+- Face enrollment via image upload and live camera capture
+- Daily PDF report generation with metrics and 7-day trend graphs
+- Runtime settings that update without restarting the server
 
-- Native mobile app is intentionally skipped to reduce deployment complexity and keep Android/iOS fully cross-platform via browser.
-- Remote access links are now resolved dynamically with priority: `Tailscale -> mDNS (.local) -> LAN`.
-- Telegram bot delivery can send access links at startup, when endpoints change, and on manual request from Settings.
-- mDNS publishing is supported on LAN when `zeroconf` is installed and `MDNS_ENABLED=true`.
+---
 
-## Run Backend
+## Mobile App with Intelligent Assistant
+
+The **Flutter companion app** (IntruFlare / Condo Guardian) provides a handheld monitoring experience for Android devices.
+
+### App Screens
+
+| Screen | Purpose |
+|--------|---------|
+| **Home** | System snapshot: alert count, online nodes, sensor readings, quick-action buttons |
+| **Monitor** | Live camera feeds (embedded WebView of the mobile dashboard route) |
+| **Alerts** | Active alert list with polling refresh, severity indicators, and acknowledgment |
+| **Events** | Historical event log with snapshot evidence |
+| **Snapshots** | Browse and review captured evidence images |
+| **Face Enrollment** | Capture photos via phone camera for face recognition training |
+| **Assistant** | AI-powered Q&A about system status (see below) |
+| **Settings** | Backend URL, connection preferences, polling interval |
+
+### System Assistant (RAG-based Q&A)
+
+The **Assistant screen** provides an intelligent question-answering feature that retrieves live data from the backend and generates contextual responses. Users can ask natural-language questions about the current state of their security system:
+
+| Question | What It Answers |
+|----------|----------------|
+| "What is the current system status?" | Online node count, active alerts, overall health |
+| "What triggered the latest alert?" | Most recent alert title, source, location, and reason |
+| "Which node detected smoke?" | Identifies the specific smoke sensor and its location |
+| "Are any nodes offline?" | Lists disconnected nodes with suggested troubleshooting |
+| "What intrusion events were logged?" | Recent forced-entry or unknown-person detections |
+| "Explain the current warning" | Context and recommended action for active warnings |
+
+Each answer includes **context** (why the answer matters) and a **suggested action** (what the user should do next). Responses appear with a typewriter animation for a conversational feel.
+
+### Other Mobile Features
+
+- **Push notifications** via Web Push (VAPID) when configured
+- **Telegram fallback** for alert delivery and access link sharing
+- **Daily PDF report export** directly to the phone (Android)
+- **Persistent alerts** that remain visible until the user acknowledges them
+- **Text-to-speech** channel for spoken alert announcements on Android
+
+---
+
+## AI and Computer Vision
+
+### Face Recognition
+
+When an intruder sensor triggers, the system captures a camera frame and runs **two-stage face analysis**:
+
+1. **Detection** (SCRFD model) -- Locates faces in the image
+2. **Recognition** (ArcFace model) -- Compares detected faces against enrolled authorized residents
+
+Results fall into three categories:
+- **Authorized** -- Recognized resident (informational log)
+- **Unknown** -- Unrecognized person (triggers intruder alert)
+- **Uncertain** -- Face detected but confidence too low (escalated for user review)
+
+Face enrollment is done through the dashboard or mobile app -- upload a photo or capture live from the camera, and the system trains the recognition model locally.
+
+### Fire Detection
+
+The fire detection pipeline uses a **two-step verification** approach:
+
+1. **Smoke sensor triggers first** -- MQ-2 sensors detect elevated smoke levels and send an immediate alert
+2. **Camera confirms visually** -- YOLOv8s AI model analyzes the camera frame for fire/flame patterns
+
+This reduces false alarms: cooking steam triggers the smoke sensor, but the camera confirms whether actual fire is present before escalating to a critical alert.
+
+---
+
+## Sensor Network
+
+| Sensor Node | Location | Hardware | Detects |
+|------------|----------|----------|---------|
+| Smoke Node 1 | Living Room | ESP32-C3 + MQ-2 | Smoke, fire conditions |
+| Smoke Node 2 | Door Entrance | ESP32-C3 + MQ-2 | Smoke, fire conditions |
+| Door Force | Door Entrance | ESP32-C3 + GY-LSM6DS3 IMU | Forced entry, tampering |
+| Indoor Camera | Living Room | RTSP night-vision | Visual evidence, face recognition |
+| Door Camera | Door Entrance | RTSP night-vision / ESP32-CAM | Visual evidence, face recognition |
+
+All sensor nodes communicate wirelessly over Wi-Fi using HTTP. Each node self-registers with the backend on boot and sends periodic heartbeats to confirm it is online.
+
+---
+
+## Event-Driven Architecture
+
+The system is **event-driven**, not continuously polling for heavy analysis:
+
+- **Always running (lightweight):** Camera health monitoring, sensor heartbeats, smoke level checks
+- **Triggered on demand (heavy):** Face recognition, fire visual confirmation, snapshot capture
+
+This design keeps the system responsive on consumer hardware (Intel i5, 16 GB RAM) while still providing intelligent analysis when it matters.
+
+### Alert Workflow
+
+```
+Sensor trigger → Event engine processes → Camera captures evidence
+→ AI analyzes (face/fire) → Alert created → Dashboard updates
+→ Mobile notification sent → User reviews & acknowledges
+```
+
+---
+
+## Remote Access and Notifications
+
+All core monitoring works **offline on the local network**. When internet is available, optional enhancements activate:
+
+| Feature | How It Works |
+|---------|-------------|
+| **Web Push** | Browser/phone notifications via VAPID keys |
+| **Telegram Bot** | Alert messages and access links delivered to a Telegram chat |
+| **Tailscale** | Secure remote access from anywhere via Tailscale VPN |
+| **mDNS** | Automatic local network discovery (`thesis-monitor.local`) |
+| **LAN Access** | Direct IP-based access for devices on the same network |
+
+---
+
+## Key Results
+
+From testing in a controlled condo-like environment:
+
+| Metric | Result |
+|--------|--------|
+| Overall classification accuracy | **83.33%** (40/48 trials) |
+| Face recognition accuracy | **88.89%** |
+| Smoke/fire detection accuracy | **80.00%** |
+| Door-force/intruder detection accuracy | **80.00%** |
+| Mean event-to-alert response time | **0.032 seconds** |
+| Maximum observed latency | **1.0 second** |
+
+---
+
+## Quick Start
+
+### Requirements
+- Windows 10 PC
+- Python 3.11+ and Node.js 20+
+- RTSP IP cameras (or USB webcams for testing)
+- ESP32-C3 sensor boards (optional for full demo)
+
+### Install and Run
 
 ```bash
-python -m venv .venv
-# activate venv
-pip install -r requirements.txt
+git clone <repo-url> && cd thesis
 cp .env.example .env
-# edit .env (TAILSCALE_BASE_URL, LAN_BASE_URL, TELEGRAM_* etc.)
+
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 python backend/run_backend.py
 ```
 
-Backend: `http://127.0.0.1:8765`
-Dashboard: `http://127.0.0.1:8765/dashboard`
-Mobile remote: `http://127.0.0.1:8765/dashboard/remote/mobile`
-
-Camera source env vars:
-
-- `CAMERA_SOURCE_MODE` (`rtsp` default, `webcam` for temporary local testing)
-- `CAMERA_WEBCAM_SINGLE_NODE` (`cam_door` default for single-webcam outdoor testing; set `none` for dual-webcam workers)
-- `CAMERA_INDOOR_RTSP` / `CAMERA_DOOR_RTSP` (used when `CAMERA_SOURCE_MODE=rtsp`)
-- `CAMERA_INDOOR_WEBCAM_INDEX` (default `0` when `CAMERA_SOURCE_MODE=webcam`)
-- `CAMERA_DOOR_WEBCAM_INDEX` (default `1`, auto-fallback to index `0` if unavailable)
-- `CAMERA_PROCESSING_FPS` (default `25`)
-- `CAMERA_RTSP_OPEN_TIMEOUT_MS` / `CAMERA_RTSP_READ_TIMEOUT_MS` (default `5000`; avoids long Windows FFmpeg stalls)
-- `FACE_COSINE_THRESHOLD` (default `0.60`; ArcFace authorized threshold, higher is stricter)
-- `FACE_UNCERTAIN_THRESHOLD` (default `0.45`; below authorized but review-worthy)
-- `FACE_INSIGHTFACE_MODEL_ROOT` (default `backend/storage/models/insightface`; preseed `models/buffalo_l` here for offline Windows deployment)
-- `FACE_DET_SIZE` (default `480`; SCRFD detection input size)
-- `FACE_DETECT_SCORE_THRESHOLD` (default `0.60`)
-- `FACE_MIN_FACE_WIDTH` / `FACE_MIN_FACE_HEIGHT` (default `60` pixels)
-- `FACE_BLUR_THRESHOLD` (default `20.0`; lower disables stricter blur rejection)
-- `FIRE_MODEL_INPUT_SIZE` (default `416`; lower values reduce CPU load)
-- `AUTHORIZED_PRESENCE_LOGGING_ENABLED` (default `false`; when `true`, logs authorized re-entry events from live camera view)
-- `AUTHORIZED_PRESENCE_SCAN_SECONDS` (default `2`; scan interval for authorized presence logging)
-- `AUTHORIZED_PRESENCE_COOLDOWN_SECONDS` (default `20`; minimum seconds between repeated authorized-presence logs)
-- `UNKNOWN_PRESENCE_LOGGING_ENABLED` (default `false`; when `true`, logs unknown-person re-entry events and captures evidence snapshots)
-- `UNKNOWN_PRESENCE_COOLDOWN_SECONDS` (default `20`; minimum seconds between repeated unknown-person re-entry logs)
-- `INTRUDER_EVENT_COOLDOWN_SECONDS` (default `20`; suppresses repeated sensor intruder triggers per node during cooldown)
-
-Note: authorized/unknown presence scans share `AUTHORIZED_PRESENCE_SCAN_SECONDS` as the polling interval.
-
-Temporary webcam test mode example:
-
-```bash
-export CAMERA_SOURCE_MODE=webcam
-export CAMERA_WEBCAM_SINGLE_NODE=cam_door
-export CAMERA_INDOOR_WEBCAM_INDEX=0
-export CAMERA_DOOR_WEBCAM_INDEX=1
-export FACE_COSINE_THRESHOLD=0.50
-export AUTHORIZED_PRESENCE_LOGGING_ENABLED=true
-export UNKNOWN_PRESENCE_LOGGING_ENABLED=true
-python backend/run_backend.py
-```
-
-For one-webcam outdoor-only testing, use `CAMERA_DOOR_WEBCAM_INDEX=0`.
-
-Optional env vars for mobile push:
-
-- `WEBPUSH_VAPID_PUBLIC_KEY`
-- `WEBPUSH_VAPID_PRIVATE_KEY`
-- `WEBPUSH_VAPID_SUBJECT` (default `mailto:admin@localhost`)
-- `LAN_BASE_URL` (recommended for QR/shared links)
-- `TAILSCALE_BASE_URL` (optional remote overlay)
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `TELEGRAM_LINK_NOTIFICATIONS_ENABLED` (default `true`)
-- `MDNS_ENABLED` (default `true`)
-- `MDNS_SERVICE_NAME` (default `thesis-monitor`)
-- `MDNS_HOSTNAME` (optional override)
-
-`.env` at project root is auto-loaded by backend startup (`backend/run_backend.py` and FastAPI app startup).
-
-Dashboard runtime settings can override selected `.env` keys (including Telegram/WebPush fields) without editing `.env`. `.env` is treated as startup defaults/fallback.
-
-Default admin:
-
-- Username: `admin`
-- Password: `admin123`
-
-## Build Frontend
+### Build the Dashboard
 
 ```bash
 cd web_dashboard_ui
@@ -139,52 +227,51 @@ npm install
 npm run build
 ```
 
-## Full Preview Automation
+### Access
 
-Run end-to-end preview checks (tests, build, backend startup, auth, event trigger, alert ack):
+| URL | Description |
+|-----|-------------|
+| `http://127.0.0.1:8765/dashboard` | Web dashboard |
+| `http://127.0.0.1:8765/dashboard/remote/mobile` | Mobile-optimized view |
 
-```bash
-bash scripts/preview_full_system.sh
+**Default login:** `admin` / `admin123`
+
+### Windows Installer
+
+Download `IntruFlare-Setup-v2.2.0.exe` for a one-click desktop installation. Requires the AI model pack (`IntruFlare-AI-Models-v2.2.0.zip`).
+
+---
+
+## Sustainable Development Goals
+
+This project supports:
+
+- **SDG 3** (Good Health and Well-Being) -- Faster awareness of fire hazards and security threats
+- **SDG 9** (Industry, Innovation and Infrastructure) -- Affordable integrated safety using IoT and AI
+- **SDG 11** (Sustainable Cities and Communities) -- Safer residential spaces through continuous monitoring
+- **SDG 13** (Climate Action) -- Earlier fire warning reduces escalation and environmental impact
+- **SDG 16** (Peace, Justice and Strong Institutions) -- Structured logs and evidence improve accountability
+
+---
+
+## Project Structure
+
+```
+thesis/
+├── backend/                    # Python backend (FastAPI + SQLite + AI models)
+│   ├── app/api/                # 65 REST endpoints
+│   ├── app/modules/            # Event engine, face service, fire service
+│   └── app/services/           # Camera, notifications, remote access, reports
+├── web_dashboard_ui/           # React dashboard (TypeScript + Tailwind CSS)
+├── condo_guardian_app/         # Flutter mobile companion app
+├── firmware/http/              # ESP32 sensor node firmware
+├── scripts/                    # Build and test automation
+├── installer/                  # Windows installer scripts
+└── docs/                       # User manual, architecture, deployment guides
 ```
 
-## Windows Packaging
+---
 
-Pushing to `main` builds the portable Windows artifact through GitHub Actions:
+## License
 
-```text
-CondoGuardian-Windows
-```
-
-For thesis/demo distribution, publish the full offline installer:
-
-```text
-IntruFlare-Setup-v2.2.0.exe
-```
-
-The installer expects the AI model pack release asset:
-
-```text
-IntruFlare-AI-Models-v2.2.0.zip
-```
-
-See `docs/instructions/deployment/windows_local_startup.md` for the model-pack
-layout, installer workflow inputs, and Windows runtime paths.
-
-## Sensor Event Contract
-
-Compatibility contract preserved:
-
-- `POST /api/sensors/event`
-
-Recommended canonical device endpoints:
-
-- `POST /api/devices/register`
-- `POST /api/devices/heartbeat`
-- `POST /api/sensors/reading`
-
-## Repository Map
-
-- `backend/`: FastAPI backend, modules, and tests
-- `web_dashboard_ui/`: React dashboard UI
-- `firmware/http/`: HTTP-based ESP32-C3 firmware
-- `docs/`: updated architecture and deployment docs
+Internal thesis project. Not published under an open-source license.
