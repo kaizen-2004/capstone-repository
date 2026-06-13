@@ -1,6 +1,7 @@
 # IntruFlare - Real-Time Intruder and Fire Monitoring System
 
-> This is our capstone project. It is a local-first monitoring system for intruder detection (ArcFace face recognition) and fire detection (smoke + flame fusion) with alerts, snapshots, history, health checks, and daily summaries (demo scope: Living Room + Door Entrance). The system can be accessed remotely via Tailscale and can send sticky notifications to the user using a Telegram bot. It runs on a Windows 10 PC that handles all processing and recognition locally.
+> An intelligent home security system that detects intruders and fires in real time, identifies faces, answers questions about system status, and sends instant alerts -- all running locally on a single Windows PC with no cloud dependency.
+> A local-first capstone project for intruder detection (InsightFace ArcFace recognition) and fire detection (smoke sensor + YOLOv8 flame fusion) with alerts, snapshots, history, health checks, and daily summaries. Demo scope: Living Room + Door Entrance. Remotely accessible via Tailscale with sticky Telegram bot notifications.
 
 ---
 
